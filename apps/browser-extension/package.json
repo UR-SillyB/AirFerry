@@ -1,0 +1,36 @@
+{
+  "name": "@easytransfer/browser-extension",
+  "version": "0.1.0",
+  "description": "EasyTransfer sender — Chrome/Edge MV3 extension that streams QR codes.",
+  "type": "module",
+  "license": "MIT",
+  "scripts": {
+    "dev": "plasmo dev",
+    "build": "plasmo build --target=chrome-mv3",
+    "build:edge": "plasmo build --target=edge-mv3",
+    "package": "plasmo package",
+    "wasm": "wasm-pack build ../../crates/transfer-engine --target web --features wasm,serde && rm -rf wasm-pkg && cp -r ../../crates/transfer-engine/pkg wasm-pkg"
+  },
+  "dependencies": {
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.0.287",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "plasmo": "^0.90.5",
+    "typescript": "^5.6.0"
+  },
+  "manifest": {
+    "name": "易传 - 离线文件传输",
+    "description": "通过屏幕二维码视频流，完全离线传输文件到手机。无需网络、蓝牙、USB。",
+    "version": "0.1.0",
+    "permissions": [
+      "storage"
+    ],
+    "content_security_policy": {
+      "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
+    }
+  }
+}

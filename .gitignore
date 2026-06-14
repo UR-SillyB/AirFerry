@@ -1,0 +1,43 @@
+# Rust / Cargo
+target/
+**/*.rs.bk
+*.pdb
+
+# WebAssembly build artifacts
+pkg/
+*.wasm
+
+# Node / pnpm
+node_modules/
+dist/
+build/
+.pnpm-store/
+*.log
+.DS_Store
+
+# Plasmo extension build output
+apps/browser-extension/build/
+apps/browser-extension/.plasmo/
+
+# Android / Gradle
+apps/android/.gradle/
+apps/android/build/
+apps/android/app/build/
+apps/android/local.properties
+apps/android/app/src/main/jniLibs/
+apps/android/app/.cxx/
+apps/android/captures/
+*.apk
+*.aab
+*.keystore
+!debug.keystore
+
+# IDE
+.idea/
+.vscode/
+*.iml
+*.swp
+
+# OS
+Thumbs.db
+.DS_Store
