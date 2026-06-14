@@ -131,9 +131,12 @@ impl Frame {
         let symbol_size = header.symbol_size as usize;
         let total = FRAME_HEADER_SIZE + symbol_size + FRAME_FOOTER_SIZE;
         if bytes.len() != total {
-            return Err(Error::BufferTooShort {
-                need: total,
-                have: bytes.len(),
+            // Distinguish "too short" from "too long" via a clearer error than
+            // the old BufferTooShort, which was returned even when the input
+            // carried extra trailing bytes.
+            return Err(Error::LengthMismatch {
+                expected: total,
+                actual: bytes.len(),
             });
         }
         let payload = &bytes[FRAME_HEADER_SIZE..FRAME_HEADER_SIZE + symbol_size];

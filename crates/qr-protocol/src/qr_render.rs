@@ -1,23 +1,49 @@
 //! QR matrix rendering.
 //!
-//! Encodes frame bytes into a fixed Version-40 / Error-Correction-L QR code
-//! and exposes the resulting module matrix as a flat `Vec<bool>` (`true` ==
-//! dark module) plus the side length. The display layer (Canvas on the
-//! browser, native draw on Android) maps this matrix to pixels.
+//! Encodes frame bytes into the *smallest* Error-Correction-L QR version that
+//! holds the frame, and exposes the resulting module matrix as a flat
+//! `Vec<bool>` (`true` == dark module) plus the side length. The display layer
+//! (Canvas on the browser, native draw on Android) maps this matrix to pixels.
 //!
-//! Version 40 / L holds up to 2953 bytes of binary data — comfortably more
-//! than our 1088-byte frame (60 header + 1024 payload + 4 footer), keeping
-//! module density low for scan reliability.
+//! ## Why the minimal version (not a fixed Version 40)
+//!
+//! A Version-40 code is 177×177 modules — the densest QR there is. Forcing it
+//! for a frame that only needs ~V23 wastes module budget and makes the code
+//! hard for a phone camera to resolve, which manifests as the receiver never
+//! accepting data symbols (stuck at "恢复中 0%"). We therefore pick the
+//! smallest version whose *byte-mode* L capacity fits the frame: byte mode is
+//! the worst case, so the optimally-segmented encoding always fits, and —
+//! because the frame size is constant within a session — every frame renders
+//! at the same fixed version, keeping the on-screen QR size stable for the
+//! scanning camera. A 1088-byte frame drops from V40 (177²) to V23 (109²); the
+//! smaller 576-byte default frame lands on V16 (81²), far easier to scan.
 
 use crate::{Error, Result};
 use qrcode::{EcLevel, QrCode, Version};
 use std::vec::Vec;
 
 /// QR parameters used by EasyTransfer.
-pub const QR_VERSION: Version = Version::Normal(40);
 pub const QR_EC_LEVEL: EcLevel = EcLevel::L;
 /// Maximum payload (bytes) a Version-40 / L QR can carry in binary mode.
 pub const QR_MAX_BYTES: usize = 2953;
+
+/// Byte-mode data capacity (bytes) for QR Versions 1..=40 at EC level L
+/// (ISO/IEC 18004 Table 7). Index `i` is the capacity of `Version::Normal(i+1)`.
+const QR_BYTE_CAPACITY_L: [usize; 40] = [
+    17, 32, 53, 78, 106, 134, 154, 192, 230, 271,
+    321, 367, 425, 458, 520, 586, 644, 718, 792, 858,
+    929, 1003, 1091, 1171, 1273, 1367, 1465, 1528, 1628, 1732,
+    1840, 1952, 2068, 2188, 2303, 2431, 2563, 2699, 2809, 2953,
+];
+
+/// Smallest QR version whose byte-mode EC-L capacity holds `len` bytes, or
+/// `None` if `len` exceeds Version 40's capacity ([`QR_MAX_BYTES`]).
+pub fn min_version_for(len: usize) -> Option<Version> {
+    QR_BYTE_CAPACITY_L
+        .iter()
+        .position(|&cap| cap >= len)
+        .map(|i| Version::Normal((i + 1) as i16))
+}
 
 /// A rendered QR code: flat module grid (row-major) + side length.
 #[derive(Debug, Clone)]
@@ -35,18 +61,16 @@ impl QrMatrix {
     }
 }
 
-/// Encode `data` into a Version-40 / L QR matrix.
+/// Encode `data` into the smallest EC-L QR version that holds it.
 ///
 /// `data` must be ≤ [`QR_MAX_BYTES`]; the caller (frame layer) guarantees this
-/// since frames are fixed at 1088 bytes.
+/// since frames are fixed-size and well under a Version-40 payload.
 pub fn encode(data: &[u8]) -> Result<QrMatrix> {
-    if data.len() > QR_MAX_BYTES {
-        return Err(Error::BufferTooShort {
-            need: QR_MAX_BYTES,
-            have: data.len(),
-        });
-    }
-    let code = QrCode::with_version(data, QR_VERSION, QR_EC_LEVEL)
+    let version = min_version_for(data.len()).ok_or(Error::BufferTooShort {
+        need: QR_MAX_BYTES,
+        have: data.len(),
+    })?;
+    let code = QrCode::with_version(data, version, QR_EC_LEVEL)
         .map_err(|_| Error::BufferTooShort {
             need: QR_MAX_BYTES,
             have: data.len(),
@@ -66,11 +90,21 @@ mod tests {
 
     #[test]
     fn encodes_frame_sized_payload() {
+        // A 1088-byte frame fits in Version 23 (109×109) at EC-L — far sparser
+        // than the old forced Version 40 (177×177).
         let data = vec![0u8; 1088];
         let m = encode(&data).unwrap();
-        // Version 40 → 177 modules per side.
-        assert_eq!(m.size, 177);
-        assert_eq!(m.modules.len(), 177 * 177);
+        assert_eq!(m.size, 109);
+        assert_eq!(m.modules.len(), 109 * 109);
+    }
+
+    #[test]
+    fn picks_minimal_version() {
+        assert_eq!(min_version_for(1088), Some(Version::Normal(23)));
+        assert_eq!(min_version_for(576), Some(Version::Normal(16)));
+        assert_eq!(min_version_for(17), Some(Version::Normal(1)));
+        assert_eq!(min_version_for(QR_MAX_BYTES), Some(Version::Normal(40)));
+        assert_eq!(min_version_for(QR_MAX_BYTES + 1), None);
     }
 
     #[test]

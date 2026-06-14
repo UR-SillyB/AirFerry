@@ -6,7 +6,7 @@ import { useState, useCallback } from "react"
 import "@/assets/app.css"
 import { ensureWasm, SenderSessionWasm } from "@/wasm/loader"
 import { deriveSessionId, contentFingerprint } from "@/wasm/session"
-import { preparePayload } from "@/wasm/compress"
+import { preparePayload, CompressionAlgorithm } from "@/wasm/compress"
 import { crc32 } from "@/wasm/crc32"
 import { FileSelectPage } from "@/pages/FileSelectPage"
 import { ParamsPage } from "@/pages/ParamsPage"
@@ -20,6 +20,8 @@ export interface AppState {
   page: Page
   file: File | null
   compressed: Uint8Array | null
+  /** Compression algorithm applied to `compressed` (None = raw bytes). */
+  compressionAlgorithm: CompressionAlgorithm
   /** CRC32 of the original (uncompressed) file bytes. */
   fileCrc32: number
   sessionId: { lo: bigint; hi: bigint } | null
@@ -36,6 +38,7 @@ export default function App() {
     page: "select",
     file: null,
     compressed: null,
+    compressionAlgorithm: CompressionAlgorithm.None,
     fileCrc32: 0,
     sessionId: null,
     session: null,
@@ -50,7 +53,11 @@ export default function App() {
   const onFileSelected = useCallback(async (file: File) => {
     await ensureWasm()
     const buf = new Uint8Array(await file.arrayBuffer())
-    const { payload: compressed } = preparePayload(buf)
+    const { payload: compressed, algorithm, compressedSize } = await preparePayload(buf)
+    console.log(
+      `Compression: ${file.size} → ${compressedSize} bytes ` +
+        `(${file.size > 0 ? ((compressedSize / file.size) * 100).toFixed(1) : "0"}%)`
+    )
     const crc = crc32(buf)
     // Content fingerprint: first 1KB + last 1KB.
     const head = buf.slice(0, 1024)
@@ -67,6 +74,7 @@ export default function App() {
       ...s,
       file,
       compressed,
+      compressionAlgorithm: algorithm,
       fileCrc32: crc,
       sessionId,
       page: "params",
@@ -89,7 +97,8 @@ export default function App() {
         cfg.symbolSize,
         state.file.name,
         BigInt(state.file.size),
-        state.fileCrc32
+        state.fileCrc32,
+        state.compressionAlgorithm
       )
       setState((s) => ({ ...s, session, page: "play", initializing: false }))
     } catch (e: any) {
@@ -100,7 +109,7 @@ export default function App() {
         error: `编码器初始化失败: ${e?.message || e}`
       }))
     }
-  }, [state.compressed, state.sessionId, state.file, state.fileCrc32, state.config])
+  }, [state.compressed, state.sessionId, state.file, state.fileCrc32, state.compressionAlgorithm, state.config])
 
   const updateConfig = useCallback(
     (patch: Partial<TransferConfig>) =>
@@ -155,6 +164,7 @@ export default function App() {
             session={state.session}
             config={state.config}
             sessionId={state.sessionId!}
+            totalBytes={state.compressed?.length ?? 0}
           />
         )}
         {state.page === "stats" && state.session && (

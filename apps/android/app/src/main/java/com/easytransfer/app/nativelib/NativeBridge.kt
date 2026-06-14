@@ -21,7 +21,13 @@ object NativeBridge {
         symbolSize: Int
     ): Long
 
-    external fun receiverIngest(handle: Long, frameBytes: ByteArray, outBuf: ByteArray): Int
+    /**
+     * Ingest a frame. Returns a freshly-allocated byte[] holding the progress
+     * JSON (NUL-terminated), or null/empty array on error. The array is sized to
+     * the exact JSON length, so there is no fixed cap that could truncate
+     * progress updates on long transfers.
+     */
+    external fun receiverIngest(handle: Long, frameBytes: ByteArray): ByteArray?
     external fun receiverIsComplete(handle: Long): Int
     external fun receiverAssembledLength(handle: Long): Int
     external fun receiverAssemble(handle: Long, outBuf: ByteArray): Int
@@ -35,6 +41,11 @@ object NativeBridge {
     /** Original file size in bytes, or 0 if not yet received. */
     external fun receiverFileSize(handle: Long): Long
 
-    /** CRC32 of the original file, or 0 if not yet received. */
-    external fun receiverCrc32(handle: Long): Int
+    /**
+     * CRC32 of the original file as an unsigned 32-bit value carried in a
+     * `Long` (0..=0xFFFFFFFF), or 0 if not yet received. Returned as Long so
+     * the full unsigned range survives the JNI boundary (Kotlin `Int` is
+     * signed and would flip high-bit CRC values negative).
+     */
+    external fun receiverCrc32(handle: Long): Long
 }

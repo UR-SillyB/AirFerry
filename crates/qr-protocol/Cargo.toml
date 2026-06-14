@@ -17,6 +17,9 @@ qrcode = { version = "0.14", default-features = false }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 zstd = "0.13"
+# XZ/LZMA2 — extreme compression (native/Android only). The C library does not
+# compile on wasm32, and the browser compresses in JS anyway, so it stays gated.
+xz2 = "0.1"
 
 [features]
 default = []

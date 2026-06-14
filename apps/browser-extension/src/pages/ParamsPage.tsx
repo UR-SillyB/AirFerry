@@ -17,8 +17,24 @@ function formatBytes(n: number): string {
   return `${(n / 1024 / 1024).toFixed(1)} MB`
 }
 
+function formatDuration(seconds: number): string {
+  if (!isFinite(seconds) || seconds <= 0) return "—"
+  const s = Math.ceil(seconds)
+  if (s < 60) return `${s} 秒`
+  const m = Math.floor(s / 60)
+  const rem = s % 60
+  if (m < 60) return `${m} 分 ${rem} 秒`
+  return `${Math.floor(m / 60)} 小时 ${m % 60} 分`
+}
+
 export function ParamsPage({ file, compressedSize, config, onChange, onStart, initializing }: Props) {
   const ratio = file && file.size > 0 ? compressedSize / file.size : 1
+
+  // Pre-transfer ETA estimate (before encoder init).
+  // Total frames ≈ source symbols × (1 + redundancy) + descriptor overhead.
+  const totalSymbols = Math.ceil(compressedSize / config.symbolSize)
+  const totalFrames = Math.ceil(totalSymbols * (1 + config.redundancyPct / 100))
+  const estimatedSeconds = totalFrames / config.fps
   return (
     <div className="page">
       <h2>传输参数</h2>
@@ -35,6 +51,17 @@ export function ParamsPage({ file, compressedSize, config, onChange, onStart, in
           <tr>
             <td>压缩后</td>
             <td>{formatBytes(compressedSize)} ({(ratio * 100).toFixed(0)}%)</td>
+          </tr>
+          <tr>
+            <td>预计帧数</td>
+            <td>{totalFrames.toLocaleString()}</td>
+          </tr>
+          <tr>
+            <td>预计传输时间</td>
+            <td>
+              <strong>{formatDuration(estimatedSeconds)}</strong>
+              <span className="muted"> ({config.fps}fps, {config.redundancyPct}% 冗余)</span>
+            </td>
           </tr>
         </tbody>
       </table>

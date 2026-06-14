@@ -8,29 +8,32 @@ use std::vec::Vec;
 
 /// A receiver session.
 ///
-/// Ingest frames (decoded QR payloads), feed the RaptorQ decoder, and report
-/// recovery progress. The session is created lazily from the first valid frame
-/// (which carries the totals needed to rebuild OTI via the encoder on the
-/// sender side — but the receiver reconstructs OTI from the header totals and
-/// the known symbol size).
+/// The session is created **without** object metadata: until an authoritative
+/// descriptor frame arrives, every data frame is only buffered in a replay
+/// cache. This avoids the previous design's bug of building a *guessed*
+/// decoder from the frame-header totals (`derive_meta_from_totals`), whose
+/// per-block layout never matched the real RaptorQ partitioning for multi-block
+/// objects — feeding cached symbols into that wrong decoder corrupted progress
+/// or silently stalled recovery. With the cache-only bootstrap, the first
+/// descriptor frame rebuilds a *correct* decoder and replays all buffered
+/// symbols into it.
 ///
 /// For resume, use [`ReceiverSession::save_state`] / [`ReceiverSession::restore`].
 pub struct ReceiverSession {
     session_id: SessionIdRaw,
-    #[allow(dead_code)]
-    symbol_size: u32,
-    #[allow(dead_code)]
-    total_blocks: u32,
-    total_symbols: u32,
-    decoder: Decoder,
-    meta: ObjectMeta,
-    /// Whether `meta` came from an authoritative descriptor frame (vs heuristic).
+    /// Authoritative object metadata. `None` until a descriptor frame arrives.
+    meta: Option<ObjectMeta>,
+    decoder: Option<Decoder>,
+    /// Whether `meta` came from an authoritative descriptor frame.
     meta_confirmed: bool,
     /// File metadata learned from the descriptor frame (filename, size, CRC32).
     file_meta: crate::descriptor::FileMeta,
     received: Vec<HashSet<u32>>,
     symbol_cache: HashMap<(u32, u32), Vec<u8>>,
     progress: Progress,
+    /// Cached symbol_size from the frame header for approximate progress while
+    /// `meta` is still `None`. Harmless to keep; only read before confirmation.
+    pending_symbol_size: u32,
 }
 
 impl ReceiverSession {
@@ -39,11 +42,31 @@ impl ReceiverSession {
     /// `meta` is normally reconstructed from the first frame's totals; see
     /// [`ReceiverSession::from_first_frame`].
     pub fn new(session_id: SessionIdRaw, meta: ObjectMeta) -> Self {
-        let symbol_size = meta.symbol_size;
-        let total_blocks = meta.blocks.len() as u32;
-        let total_symbols = meta.blocks.iter().map(|b| b.num_source_symbols).sum();
-        let decoder = Decoder::new(meta.clone());
-        let received = meta.blocks.iter().map(|_| HashSet::new()).collect();
+        Self::with_confirmed_meta(session_id, Some(meta))
+    }
+
+    /// Create a receiver with **confirmed** (authoritative) metadata — data
+    /// frames will be decoded immediately instead of buffered. Used when the
+    /// caller already has the real OTI (e.g. from a descriptor).
+    pub fn new_confirmed(session_id: SessionIdRaw, meta: ObjectMeta) -> Self {
+        let mut rx = Self::with_confirmed_meta(session_id, Some(meta));
+        rx.meta_confirmed = true;
+        rx
+    }
+
+    /// Build a fully-confirmed session from authoritative metadata.
+    fn with_confirmed_meta(session_id: SessionIdRaw, meta: Option<ObjectMeta>) -> Self {
+        let total_symbols = meta
+            .as_ref()
+            .map(|m| m.blocks.iter().map(|b| b.num_source_symbols).sum())
+            .unwrap_or(0);
+        let total_blocks = meta.as_ref().map(|m| m.blocks.len() as u32).unwrap_or(0);
+        let symbol_size = meta.as_ref().map(|m| m.symbol_size).unwrap_or(0);
+        let decoder = meta.clone().map(Decoder::new);
+        let received = meta
+            .as_ref()
+            .map(|m| m.blocks.iter().map(|_| HashSet::new()).collect())
+            .unwrap_or_default();
         let progress = Progress {
             total_symbols,
             total_blocks,
@@ -51,64 +74,42 @@ impl ReceiverSession {
         };
         Self {
             session_id,
-            symbol_size,
-            total_blocks,
-            total_symbols,
-            decoder,
             meta,
+            decoder,
             meta_confirmed: false,
             file_meta: crate::descriptor::FileMeta::default(),
             received,
             symbol_cache: HashMap::new(),
             progress,
+            pending_symbol_size: symbol_size,
         }
     }
 
-    /// Create a receiver with **confirmed** (authoritative) metadata — data
-    /// frames will be decoded immediately instead of buffered. Used when the
-    /// caller already has the real OTI (e.g. from a descriptor).
-    pub fn new_confirmed(session_id: SessionIdRaw, meta: ObjectMeta) -> Self {
-        let mut rx = Self::new(session_id, meta);
-        rx.meta_confirmed = true;
-        rx
+    /// Bootstrap a receiver from the first observed frame.
+    ///
+    /// The session starts with **no** object metadata: data frames are buffered
+    /// until a descriptor frame supplies the authoritative OTI. This replaces
+    /// the old heuristic `derive_meta_from_totals`, which produced a wrong
+    /// per-block layout for multi-block objects.
+    pub fn from_first_frame(frame: &Frame) -> Self {
+        Self::with_confirmed_meta(frame.header.session_id, None)
     }
 
-    /// Reconstruct minimal object metadata from a frame header, sufficient to
-    /// build a decoder.
-    ///
-    /// NOTE: the per-block symbol counts cannot be perfectly derived from the
-    /// aggregate totals alone; we assume a single source block when totals are
-    /// small, otherwise an even split. The *authoritative* per-block layout
-    /// comes from the OTI embedded in a session descriptor. For the optical
-    /// channel we additionally broadcast an OTI-bearing "descriptor frame" —
-    /// but to keep v1 simple and robust, the sender emits all source symbols
-    /// for every block in order, and the receiver here uses the OTI it
-    /// reconstructs once it has seen symbols from all blocks.
-    ///
-    /// In practice this constructor is used after the receiver learns the OTI
-    /// (e.g. from a handshake / first source symbols). See tests for usage.
-    pub fn from_first_frame(frame: &Frame) -> Self {
-        let mut rx = Self::new(
-            frame.header.session_id,
-            derive_meta_from_totals(
-                frame.header.total_blocks,
-                frame.header.total_symbols,
-                frame.header.symbol_size,
-            ),
-        );
-        // Heuristic meta — NOT confirmed; data frames buffered until descriptor.
-        rx.meta_confirmed = false;
-        rx
+    /// Create a "cache-only" receiver — no metadata yet, data frames buffered
+    /// until the first descriptor arrives. Used by JNI (`receiverCreate`) and
+    /// [`from_first_frame`] when no authoritative OTI is known.
+    pub fn new_pending(session_id: SessionIdRaw) -> Self {
+        Self::with_confirmed_meta(session_id, None)
     }
 
     pub fn session_id(&self) -> SessionIdRaw {
         self.session_id
     }
     pub fn total_symbols(&self) -> u32 {
-        self.total_symbols
+        self.progress.total_symbols
     }
     pub fn is_complete(&self) -> bool {
-        self.decoder.is_complete()
+        self.decoder.as_ref().is_some_and(|d| d.is_complete())
     }
 
     /// File metadata learned from descriptor frames (filename, size, CRC32).
@@ -127,7 +128,8 @@ impl ReceiverSession {
     /// - Descriptor frames (`FLAG_DESCRIPTOR`) update the session's object
     ///   metadata from the authoritative OTI carried in the payload, rebuilding
     ///   the decoder while preserving all already-received symbols.
-    /// - Data frames are deduplicated and fed to the RaptorQ decoder.
+    /// - Data frames are buffered until metadata is confirmed, then deduplicated
+    ///   and fed to the RaptorQ decoder.
     pub fn ingest(&mut self, frame: Frame) -> Result<bool> {
         if frame.header.session_id != self.session_id {
             return Err(Error::SessionMismatch {
@@ -140,27 +142,39 @@ impl ReceiverSession {
         // Descriptor frame: adopt authoritative metadata + file meta.
         if frame.header.flags & qr_protocol::frame::FLAG_DESCRIPTOR != 0 {
             if let Some(info) = crate::descriptor::parse_payload(&frame.payload) {
-                if !self.meta_confirmed || info.meta != self.meta {
+                // Only rebuild when the authoritative layout differs from what
+                // we currently hold (or we had none at all).
+                let needs_rebuild = match &self.meta {
+                    None => true,
+                    Some(cur) => *cur != info.meta,
+                };
+                if needs_rebuild {
                     self.apply_meta(info.meta.clone());
                 }
                 self.meta_confirmed = true;
+                // The replay cache is only needed while the OTI is unknown;
+                // once confirmed, no future rebuild can happen — drop it so it
+                // doesn't grow unboundedly for the rest of the transfer.
+                self.symbol_cache.clear();
                 // Always update file metadata.
                 self.file_meta = info.file_meta;
             }
             return Ok(self.is_complete());
         }
 
-        // Buffer data frames until we have the authoritative OTI (from a
-        // descriptor). The heuristic layout from `derive_meta_from_totals` is
-        // wrong for multi-block files, so feeding symbols into the wrong
-        // decoder would corrupt progress. Once the descriptor arrives, all
-        // cached symbols are replayed into the correct decoder.
+        // No authoritative metadata yet → buffer only. We must not feed symbols
+        // into a guessed decoder (the old `derive_meta_from_totals` path did
+        // exactly that and corrupted multi-block recovery). The cache is keyed
+        // by (sbn, esi); on descriptor arrival `apply_meta` replays it into the
+        // correct decoder. RaptorQ is a fountain code, so holding symbols in the
+        // cache (vs decoding immediately) costs no information.
         if !self.meta_confirmed {
-            self.symbol_cache.insert((frame.header.sbn, frame.header.esi), frame.payload);
-            // Update approximate progress from cache size.
+            self.pending_symbol_size = frame.header.symbol_size;
+            self.symbol_cache
+                .insert((frame.header.sbn, frame.header.esi), frame.payload);
+            // Approximate progress from cache size (capped by UI).
             self.progress.received_symbols = self.symbol_cache.len() as u32;
             self.progress.decoded_symbols = 0;
-            // Show "waiting for descriptor" status.
             return Ok(false);
         }
 
@@ -177,11 +191,16 @@ impl ReceiverSession {
         }
         self.progress.received_symbols += 1;
 
-        // Cache the symbol data for potential replay if metadata changes.
-        self.symbol_cache.insert((sbn as u32, esi), frame.payload.clone());
+        // NOTE: we do NOT cache the payload here. The replay cache is only
+        // populated while `!meta_confirmed` (above) for the case where the
+        // authoritative OTI arrives later and the decoder must be rebuilt.
+        // Once metadata is confirmed no rebuild can happen, so holding every
+        // symbol's bytes would leak memory for the rest of the transfer.
 
         let symbol = Symbol::new(sbn as u32, esi, frame.payload);
-        let _ = self.decoder.add_symbol(&symbol)?;
+        if let Some(dec) = self.decoder.as_mut() {
+            let _ = dec.add_symbol(&symbol)?;
+        }
 
         // Refresh decoded-symbol / decoded-block counts.
         self.refresh_decoded_counts();
@@ -189,45 +208,52 @@ impl ReceiverSession {
     }
 
     /// Replace object metadata + decoder, replaying every stored symbol so no
-    /// progress is lost when the authoritative layout arrives late.
+    /// progress is lost when the authoritative layout arrives.
     fn apply_meta(&mut self, meta: ObjectMeta) {
         // Save the cached symbols before we reset state.
         let cached_symbols = std::mem::take(&mut self.symbol_cache);
 
         // Update metadata and rebuild decoder.
-        self.meta = meta.clone();
-        self.symbol_size = meta.symbol_size;
-        self.total_blocks = meta.blocks.len() as u32;
-        self.total_symbols = meta.blocks.iter().map(|b| b.num_source_symbols).sum();
+        self.meta = Some(meta.clone());
+        self.pending_symbol_size = meta.symbol_size;
+        self.progress.total_symbols = meta.blocks.iter().map(|b| b.num_source_symbols).sum();
+        self.progress.total_blocks = meta.blocks.len() as u32;
         self.received = meta.blocks.iter().map(|_| HashSet::new()).collect();
-        self.decoder = Decoder::new(meta);
-        self.progress.total_symbols = self.total_symbols;
-        self.progress.total_blocks = self.total_blocks;
+        self.decoder = Some(Decoder::new(meta));
 
-        // Replay all cached symbols into the new decoder.
+        // Replay all cached symbols into the new decoder. We do NOT re-cache
+        // them: once the authoritative OTI is applied the caller sets
+        // meta_confirmed = true and clears the cache, and no further rebuild
+        // can occur, so keeping the bytes around would just leak memory.
         for ((sbn, esi), data) in cached_symbols {
             // Validate the symbol still fits in the new layout.
             if (sbn as usize) < self.received.len() {
                 // Re-insert into received set and decoder.
                 if self.received[sbn as usize].insert(esi) {
-                    let symbol = Symbol::new(sbn, esi, data.clone());
+                    let symbol = Symbol::new(sbn, esi, data);
                     // Ignore errors during replay; the symbol might not fit the new layout.
-                    let _ = self.decoder.add_symbol(&symbol);
-                    // Re-cache for potential future metadata updates.
-                    self.symbol_cache.insert((sbn, esi), data);
+                    if let Some(dec) = self.decoder.as_mut() {
+                        let _ = dec.add_symbol(&symbol);
+                    }
                 }
             }
         }
+
+        // Count how many unique symbols survived the replay.
+        self.progress.received_symbols =
+            self.received.iter().map(|s| s.len() as u32).sum();
 
         // Refresh progress counters after replay.
         self.refresh_decoded_counts();
     }
 
     fn refresh_decoded_counts(&mut self) {
+        let Some(meta) = &self.meta else { return };
+        let Some(dec) = &self.decoder else { return };
         let mut decoded_symbols = 0u32;
         let mut decoded_blocks = 0u32;
-        for (i, b) in self.meta.blocks.iter().enumerate() {
-            if self.decoder.block_progress(b.sbn).is_some() {
+        for (i, b) in meta.blocks.iter().enumerate() {
+            if dec.block_progress(b.sbn).is_some() {
                 decoded_symbols += b.num_source_symbols;
                 decoded_blocks += 1;
             } else {
@@ -244,9 +270,72 @@ impl ReceiverSession {
         self.progress.decoded_blocks = decoded_blocks;
     }
 
-    /// Reassemble the original object once complete.
+    /// Reassemble the RaptorQ object bytes exactly as transmitted (including
+    /// any symbol-padding), without applying decompression. Used by callers
+    /// and tests that want the raw recovered bytes.
+    pub fn assemble_raw(&self) -> Option<Vec<u8>> {
+        self.decoder.as_ref()?.assemble()
+    }
+
+    /// Reassemble the original file once complete.
+    ///
+    /// The RaptorQ decoder yields the transmitted payload padded with zeros up
+    /// to a symbol boundary. This method trims that padding back to the real
+    /// payload length and — when the descriptor advertised a compression
+    /// algorithm — runs the matching decompressor to recover the original file
+    /// bytes. Returns `None` if decoding is incomplete or decompression fails.
     pub fn assemble(&self) -> Option<Vec<u8>> {
-        self.decoder.assemble()
+        // `assemble_result` is `Result<Option<Vec<u8>>>`: `Ok(Some)` on success,
+        // `Ok(None)` when decoding isn't complete yet, `Err` on a recoverable
+        // decompression failure. Collapse both non-success cases to `None` —
+        // `.ok()` turns the `Err` into `None`, and `.flatten()` unwraps the
+        // `Option<Option<...>>` so an incomplete decode (`Ok(None)`) also maps
+        // to `None`.
+        self.assemble_result().ok().flatten()
+    }
+
+    /// Like [`assemble`](Self::assemble) but surfaces the decompression error
+    /// instead of collapsing it to `None`. Returns `Ok(None)` when decoding is
+    /// not yet complete (no bytes to assemble), `Ok(Some(bytes))` on success,
+    /// and `Err(_)` if the bytes were recovered but the payload could not be
+    /// decompressed (e.g. compressed_size was wrong or the stream is corrupt).
+    pub fn assemble_result(&self) -> Result<Option<Vec<u8>>> {
+        let Some(dec) = self.decoder.as_ref() else {
+            return Ok(None);
+        };
+        let mut raw = match dec.assemble() {
+            Some(b) => b,
+            None => return Ok(None),
+        };
+        // Trim zero padding back to the true payload length. For compressed
+        // payloads that is `compressed_size`; for uncompressed payloads the
+        // v2/v3 parser sets compressed_size == original_size. The
+        // `compressed_size_known` flag distinguishes "0 bytes is the real
+        // length" from "we never learned it" (e.g. a receiver built without a
+        // descriptor) — operating on the raw padded bytes in the latter case.
+        if self.file_meta.compressed_size_known {
+            let len = self.file_meta.compressed_size as usize;
+            // A corrupt/overflowing descriptor should never claim more than we
+            // actually recovered; clamp rather than panic.
+            if len <= raw.len() {
+                raw.truncate(len);
+            } else {
+                // The sender claimed a larger payload than RaptorQ recovered —
+                // the object cannot be valid. Treat as a decompression failure
+                // so the caller surfaces it instead of silently truncating.
+                return Err(Error::Compress(format!(
+                    "descriptor compressed_size ({len}) exceeds recovered payload ({})",
+                    raw.len()
+                )));
+            }
+        }
+        if self.file_meta.compression == qr_protocol::compress::COMPRESSION_NONE {
+            Ok(Some(raw))
+        } else {
+            qr_protocol::compress::decompress_with(&raw, self.file_meta.compression)
+                .map(Some)
+                .map_err(|e| Error::Compress(e.to_string()))
+        }
     }
 
     pub fn progress(&self) -> Progress {
@@ -261,16 +350,15 @@ impl ReceiverSession {
     }
 }
 
-/// Derive a single-block `ObjectMeta` from totals (used before the receiver
-/// knows the real per-block layout). The decoder built from this works
-/// correctly only when the object fits in one source block; for multi-block
-/// objects the caller should supply the real OTI.
+/// Derive a single-block `ObjectMeta` from totals.
 ///
-/// WARNING: This is a heuristic approximation. The actual RaptorQ block
-/// partitioning may differ from this even split. This metadata should ONLY
-/// be used temporarily until the authoritative descriptor frame arrives.
-/// The receiver will rebuild the decoder with correct metadata when it receives
-/// a descriptor frame (FLAG_DESCRIPTOR), at which point cached symbols are replayed.
+/// **Deprecated / retained only for JNI ABI compatibility and tests.** This
+/// heuristic cannot reproduce the real RaptorQ per-block partitioning
+/// (`partition()` in RFC 6330 §4.4.1.2) from aggregate totals alone, so a
+/// decoder built from it decodes multi-block objects incorrectly. The live
+/// receiver path now buffers data frames until a descriptor frame supplies the
+/// authoritative OTI (see [`ReceiverSession::new_pending`]). Callers should
+/// treat the returned metadata as a *placeholder* and never feed it symbols.
 pub fn derive_meta_from_totals(total_blocks: u32, total_symbols: u32, symbol_size: u32) -> ObjectMeta {
     use raptorq::ObjectTransmissionInformation;
     // Heuristic: place all symbols in the number of blocks reported, splitting
@@ -316,7 +404,7 @@ mod tests {
 
     fn run_roundtrip(data: &[u8], redundancy: u8, drop_every: u32) {
         let sid = SessionId::derive("file", data.len() as u64, 0, &[]);
-        let mut sender = SenderSession::new(
+        let sender = SenderSession::new(
             data,
             sid,
             SenderConfig {
@@ -327,6 +415,24 @@ mod tests {
         )
         .unwrap();
         let meta = sender.meta().clone();
+        // The sender advertises the padded payload length as compressed_size
+        // (uncompressed path), so the receiver trims zero-padding back to it.
+        // Without this the descriptor would carry compressed_size=0 and the
+        // receiver would trim the recovered object to zero bytes.
+        let mut fm = sender.file_meta().clone();
+        fm.compressed_size = meta.transfer_length;
+        fm.compressed_size_known = true;
+        // Re-create the sender so its descriptor carries the corrected meta.
+        let mut sender = SenderSession::new(
+            data,
+            sid,
+            SenderConfig {
+                codec: Config::default(),
+                redundancy_pct: redundancy,
+            },
+            fm,
+        )
+        .unwrap();
 
         let mut rx = ReceiverSession::new_confirmed(sid.into(), meta);
         let total = sender.total_k();
@@ -359,7 +465,7 @@ mod tests {
         // In the real pipeline, the payload is a zstd stream whose own length
         // is self-describing, so truncation to the true length happens at
         // decompression time.
-        assert!(out.len() >= data.len(), "assembled too short");
+        assert!(out.len() >= data.len(), "assembled too short: out={} data={}", out.len(), data.len());
         assert_eq!(&out[..data.len()], data, "payload bytes must match");
         // Padding region must be all zero.
         assert!(
@@ -380,5 +486,67 @@ mod tests {
         // should still allow recovery.
         let data = payload(30_000);
         run_roundtrip(&data, 50, 5);
+    }
+
+    /// Regression test for Bug 1: a receiver bootstrapped with `from_first_frame`
+    /// (cache-only, no guessed meta) must still recover a multi-block object
+    /// once the descriptor arrives — even if it appears *after* many data frames.
+    #[test]
+    fn from_first_frame_recovers_multiblock_late_descriptor() {
+        let data = payload(120_000); // spans several source blocks
+        let sid = SessionId::derive("late", data.len() as u64, 0, &[]);
+        // First create the sender to learn the padded transfer_length, then
+        // rebuild with a FileMeta whose compressed_size matches it so the
+        // descriptor advertises the correct payload size.
+        let probe = SenderSession::new(
+            &data,
+            sid,
+            SenderConfig {
+                codec: Config::default(),
+                redundancy_pct: 20,
+            },
+            crate::descriptor::FileMeta::default(),
+        )
+        .unwrap();
+        let padded_len = probe.meta().transfer_length;
+        let fm = crate::descriptor::FileMeta {
+            filename: String::new(),
+            original_size: data.len() as u64,
+            crc32: 0,
+            compression: qr_protocol::compress::COMPRESSION_NONE,
+            compressed_size: padded_len,
+            compressed_size_known: true,
+        };
+        let mut sender = SenderSession::new(
+            &data,
+            sid,
+            SenderConfig {
+                codec: Config::default(),
+                redundancy_pct: 20,
+            },
+            fm,
+        )
+        .unwrap();
+        sender.set_descriptor_interval(8);
+
+        // Buffer a batch of frames with the descriptor deliberately delayed.
+        let mut frames: Vec<Frame> = Vec::new();
+        for _ in 0..(sender.total_k() as usize * 2 + 32) {
+            frames.push(sender.next_frame().unwrap());
+        }
+
+        // Receiver bootstraps from the very first (descriptor) frame via
+        // from_first_frame, which now creates a cache-only session.
+        let mut rx = ReceiverSession::from_first_frame(&frames[0]);
+        for f in frames {
+            let parsed = Frame::from_bytes(&f.to_bytes()).unwrap();
+            let _ = rx.ingest(parsed);
+            if rx.is_complete() {
+                break;
+            }
+        }
+        assert!(rx.is_complete(), "late-descriptor receiver must recover");
+        let out = rx.assemble().unwrap();
+        assert_eq!(&out[..data.len()], data);
     }
 }

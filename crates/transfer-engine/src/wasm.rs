@@ -32,6 +32,10 @@ pub struct SenderSessionWasm {
 #[wasm_bindgen]
 impl SenderSessionWasm {
     /// Create from payload bytes + session id + file metadata.
+    ///
+    /// `compression` is a [`qr_protocol::compress`] tag (0=None, 1=Zstd, 2=Xz)
+    /// identifying how `compressed_payload` was produced; the receiver runs the
+    /// matching decompressor after RaptorQ recovery.
     #[wasm_bindgen(constructor)]
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -43,6 +47,7 @@ impl SenderSessionWasm {
         filename: &str,
         original_file_size: u64,
         crc32: u32,
+        compression: u8,
     ) -> Result<SenderSessionWasm, JsValue> {
         _start();
         let sid = SessionId(((session_id_hi as u128) << 64) | session_id_lo as u128);
@@ -54,6 +59,9 @@ impl SenderSessionWasm {
             filename: filename.to_string(),
             original_size: original_file_size,
             crc32,
+            compression,
+            compressed_size: compressed_payload.len() as u64,
+            compressed_size_known: true,
         };
         let inner = SenderSession::new(compressed_payload, sid, cfg, file_meta).map_err(err_to_js)?;
         Ok(SenderSessionWasm { inner })

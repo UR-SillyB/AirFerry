@@ -3,14 +3,20 @@ package com.easytransfer.app.ui
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.hardware.camera2.CaptureRequest
 import android.os.Bundle
 import android.util.Log
+import android.util.Range
+import android.util.Size
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.camera.camera2.interop.Camera2Interop
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.Preview
+import androidx.camera.core.resolutionselector.ResolutionSelector
+import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.compose.foundation.background
@@ -279,6 +285,7 @@ class ScanActivity : ComponentActivity() {
         // Will be triggered by AndroidView update once a PreviewView is available.
     }
 
+    @androidx.annotation.OptIn(androidx.camera.camera2.interop.ExperimentalCamera2Interop::class)
     private fun startCameraWithView(previewView: PreviewView) {
         val cameraProviderFuture = ProcessCameraProvider.getInstance(this)
         cameraProviderFuture.addListener({
@@ -289,12 +296,45 @@ class ScanActivity : ComponentActivity() {
                 }
                 val analyzer = ImageAnalysis.Builder()
                     .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                    // Note: setTargetFrameRate may not be available in all CameraX versions
-                    // Frame rate will be automatically optimized by the camera
+                    // Request a 720p analysis stream. The default ImageAnalysis
+                    // resolution (~640×480) leaves too few camera pixels per QR
+                    // module to decode reliably, so data frames were silently
+                    // dropped and the receiver stuck at "恢复中 0%". 720p gives
+                    // ~8 px/module for our 81×81 codes with margin to spare.
+                    .setResolutionSelector(
+                        ResolutionSelector.Builder()
+                            .setResolutionStrategy(
+                                ResolutionStrategy(
+                                    Size(1280, 720),
+                                    ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER
+                                )
+                            )
+                            .build()
+                    )
+                    .also { builder ->
+                        // Request a high sensor frame rate so ImageAnalysis receives up
+                        // to ~60 fps where the device supports it (2x throughput vs the
+                        // ~30 fps default). CameraX 1.3.x has no public
+                        // ImageAnalysis.Builder#setTargetFrameRate, so we set the Camera2
+                        // CONTROL_AE_TARGET_FPS_RANGE via Camera2Interop instead. A
+                        // variable range (30..60) is preferred over a fixed (60,60):
+                        // devices that don't reach 60 fps fall back to 30 instead of
+                        // failing to open the camera.
+                        Camera2Interop.Extender(builder).setCaptureRequestOption(
+                            CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE,
+                            Range(30, 60)
+                        )
+                    }
                     .build()
                     .also {
                         it.setAnalyzer(cameraExecutor, QrStreamAnalyzer(this@ScanActivity) { payload ->
-                            runOnUiThread { handleFrame(payload) }
+                            // Heavy work (ZXing decode already ran above): feed the
+                            // frame to the native receiver here, ON THE ANALYSIS
+                            // THREAD. This is a background executor, so the JNI call
+                            // (RaptorQ ingest + JSON serialization) does NOT compete
+                            // with Compose rendering on the main thread. Only the
+                            // throttled UI snapshot is posted to the main thread.
+                            handleFrameAsync(payload)
                         })
                     }
                 cameraProvider.unbindAll()
@@ -311,17 +351,46 @@ class ScanActivity : ComponentActivity() {
     private var lastUiUpdate = 0L
     private var completedHandled = false
 
-    private fun handleFrame(payload: ByteArray) {
+    /**
+     * Pure-data snapshot produced on the analysis thread and handed to the main
+     * thread. Keeping every JNI / JSON / RaptorQ step off the main thread is what
+     * lets the receiver keep up at 60 fps — previously the whole ingest chain ran
+     * under runOnUiThread and competed with Compose rendering, capping the
+     * effective receive rate well below the camera frame rate.
+     */
+    private data class FrameSnapshot(
+        val progress: ReceiverSessionManager.Progress,
+        val fileName: String,
+        val fileSize: Long
+    )
+
+    /** Analysis-thread entry: do all heavy work here, post only a snapshot over. */
+    private fun handleFrameAsync(payload: ByteArray) {
         val progress = session.ingest(payload) ?: return
 
-        // Read file metadata from session
+        // Read file metadata from session (JNI) — keep on this background thread.
         val fn = if (session.isInitialized) session.fileName() else ""
         val fs = if (session.isInitialized) session.fileSize() else 0L
 
+        // UI refresh throttle: ~7 Hz is plenty for a progress bar, and keeps the
+        // main thread free. Always let the final "complete" frame through.
         val now = System.currentTimeMillis()
         if (now - lastUiUpdate < 150 && !progress.complete) return
         lastUiUpdate = now
 
+        val snapshot = FrameSnapshot(progress, fn, fs)
+        if (progress.complete) {
+            // Completion path involves file I/O + Activity start → must run on
+            // the main thread. Handle UI update + completion together.
+            runOnUiThread { applySnapshot(snapshot, handleCompletion = true) }
+        } else {
+            runOnUiThread { applySnapshot(snapshot, handleCompletion = false) }
+        }
+    }
+
+    /** Main-thread only: apply the precomputed snapshot to Compose state. */
+    private fun applySnapshot(s: FrameSnapshot, handleCompletion: Boolean) {
+        val progress = s.progress
         val pct = when {
             // Normal mode: metadata confirmed, use decoded progress
             progress.metaConfirmed || progress.totalSymbols > 0 -> {
@@ -357,14 +426,14 @@ class ScanActivity : ComponentActivity() {
                 totalBlocks = progress.totalBlocks,
                 lossPct = (progress.lossRatio * 100).toInt(),
                 framesSeen = progress.framesSeen,
-                fileName = fn,
-                fileSize = fs,
+                fileName = s.fileName,
+                fileSize = s.fileSize,
                 statusText = statusMsg,
                 complete = progress.complete
             )
         }
 
-        if (progress.complete && !completedHandled) {
+        if (handleCompletion && progress.complete && !completedHandled) {
             completedHandled = true
             val fileBytes = session.assemble()
             if (fileBytes != null) {
@@ -377,10 +446,14 @@ class ScanActivity : ComponentActivity() {
                 val intent = Intent(this, ReceiveDetailActivity::class.java).apply {
                     putExtra("FILE_PATH", tmp.absolutePath)
                     putExtra("FILE_SIZE", if (originalSize > 0) originalSize else truncBytes.size.toLong())
-                    putExtra("FILE_NAME", if (fn.isNotEmpty()) fn else "received_file")
-                    putExtra("CRC32", session.crc32())
-                    // CRC32 computed over the truncated (original-size) bytes.
+                    putExtra("FILE_NAME", if (s.fileName.isNotEmpty()) s.fileName else "received_file")
+                    // Expected CRC32 from the descriptor; 0 means the descriptor
+                    // never arrived (or advertised 0), so we cannot verify —
+                    // pass a flag so the detail screen treats it as "unknown".
+                    val expectedCrc = session.crc32()
+                    putExtra("CRC32", expectedCrc)
                     putExtra("CRC32_RECEIVED", crc32OfBytes(truncBytes))
+                    putExtra("CRC32_UNKNOWN", expectedCrc == 0L)
                 }
                 startActivity(intent)
             }
@@ -427,7 +500,11 @@ class ScanActivity : ComponentActivity() {
             return "%.1f MB".format(bytes / 1024.0 / 1024.0)
         }
 
-        fun crc32OfBytes(data: ByteArray): Int {
+        fun crc32OfBytes(data: ByteArray): Long {
+            // Compute CRC32 and return as an unsigned 32-bit value in a Long
+            // (0..=0xFFFFFFFF) so it compares correctly with the JNI-supplied
+            // expected CRC (also a Long). Using Int would sign-flip high-bit
+            // values and break equality.
             var crc = 0xFFFFFFFF.toInt()
             for (b in data) {
                 crc = crc xor (b.toInt() and 0xFF)
@@ -435,7 +512,7 @@ class ScanActivity : ComponentActivity() {
                     crc = if (crc and 1 != 0) (crc ushr 1) xor 0xEDB88320.toInt() else crc ushr 1
                 }
             }
-            return crc xor 0xFFFFFFFF.toInt()
+            return (crc xor 0xFFFFFFFF.toInt()).toLong() and 0xFFFFFFFFL
         }
     }
 }

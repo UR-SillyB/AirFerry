@@ -56,6 +56,8 @@ pub enum Error {
     PayloadCrcMismatch,
     #[error("unsupported symbol size {0}")]
     BadSymbolSize(u32),
+    #[error("frame length mismatch: expected {expected} bytes, got {actual}")]
+    LengthMismatch { expected: usize, actual: usize },
     #[error("compression error: {0}")]
     #[cfg(not(target_arch = "wasm32"))]
     Compress(String),

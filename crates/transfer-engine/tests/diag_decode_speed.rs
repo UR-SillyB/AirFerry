@@ -5,11 +5,12 @@ use qr_protocol::{Frame, SessionId};
 use raptorq_core::Config;
 
 #[test]
+#[ignore = "diagnostic benchmark — run with: cargo test -- --ignored diag_small"]
 fn diag_small() {
     let size = 50_000usize;
     let data: Vec<u8> = (0..size).map(|i| (i & 0xff) as u8).collect();
     let sid = SessionId::derive("f", size as u64, 0, &[]);
-    let fm = FileMeta { filename: "f".into(), original_size: size as u64, crc32: 0 };
+    let fm = FileMeta { filename: "f".into(), original_size: size as u64, ..Default::default() };
     let mut sender = SenderSession::new(&data, sid,
         SenderConfig { codec: Config::default(), redundancy_pct: 50 }, fm.clone()).unwrap();
     let k = sender.total_k();

@@ -5,13 +5,17 @@
   "type": "module",
   "license": "MIT",
   "scripts": {
+    "extract-lzma-wasm": "node scripts/extract-lzma-wasm.cjs",
+    "postinstall": "node scripts/extract-lzma-wasm.cjs",
     "dev": "plasmo dev",
-    "build": "plasmo build --target=chrome-mv3",
-    "build:edge": "plasmo build --target=edge-mv3",
+    "build": "node scripts/extract-lzma-wasm.cjs && plasmo build --target=chrome-mv3 && cp node_modules/@foxglove/wasm-zstd/dist/wasm-zstd.wasm build/chrome-mv3-prod/wasm-zstd.wasm",
+    "build:edge": "node scripts/extract-lzma-wasm.cjs && plasmo build --target=edge-mv3",
     "package": "plasmo package",
     "wasm": "wasm-pack build ../../crates/transfer-engine --target web --features wasm,serde && rm -rf wasm-pkg && cp -r ../../crates/transfer-engine/pkg wasm-pkg"
   },
   "dependencies": {
+    "@foxglove/wasm-zstd": "^1.0.1",
+    "lzma-wasm": "^1.0.7",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
   },

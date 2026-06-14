@@ -1,5 +1,6 @@
 /** Browser-action popup: launches the sender app in a new tab. */
 import { useState } from "react"
+import "@/assets/app.css"
 
 export default function Popup() {
   const [opening, setOpening] = useState(false)

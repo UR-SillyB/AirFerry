@@ -1,33 +1,322 @@
 /**
  * Compression helper for the browser sender.
  *
- * The browser cannot link the native `zstd` C library to wasm32-unknown-unknown,
- * so compression is performed in JS only when a compress-capable zstd-wasm
- * library is wired in. For v1 the sender passes data through UNCOMPRESSED —
- * the receiver reassembles raw bytes directly. Compression remains a future
- * optimization and is isolated behind this module so enabling it later is a
- * one-file change (swap `preparePayload` to call a zstd-compress lib).
+ * The browser cannot link the native zstd / liblzma C libraries to
+ * wasm32-unknown-unknown, so compression is performed here in JS via WASM
+ * modules. The outputs are standard zstd frames / .xz streams respectively, so
+ * the Rust receiver decompresses them with the exact same codecs it uses for
+ * native/Android payloads.
  *
- * The `compressed` flag returned here is informational; a future protocol
- * revision can carry it in the session descriptor so the receiver knows whether
- * to decompress.
+ * ## Three-way algorithm selection (pick the smallest)
+ *
+ * All algorithms run at their maximum level and the smallest result wins:
+ *
+ *   - **raw**  — the original bytes, uncompressed.
+ *   - **zstd** — level 22 (the maximum zstd level).
+ *   - **xz**   — level 9 (the maximum LZMA2 preset).
+ *
+ * Whichever produces the fewest bytes is shipped. Already-compressed files
+ * (jpeg, mp4, zip, …) thus naturally fall back to raw, while text-heavy files
+ * benefit from xz's superior ratio.
+ *
+ * **Time-saving early exit:** xz (LZMA2 at level 9) is much slower than zstd.
+ * To avoid spending it on data that won't benefit, zstd is run first; if its
+ * result is ≥ 95% of the original size the file is treated as already
+ * compressed and xz is skipped. The final comparison then picks the smallest
+ * among whichever candidates actually ran (2 or 3). The chosen algorithm tag
+ * is carried in the session descriptor (protocol v3), telling the receiver
+ * which decompressor to run after RaptorQ recovery.
+ *
+ * ## CSP / WASM loading
+ *
+ * The zstd `.wasm` is copied into the extension build output by a post-build
+ * script (see package.json "build:copy-wasm") and fetched at runtime via
+ * chrome.runtime.getURL() + WebAssembly.instantiate — fully CSP-safe under
+ * Chrome MV3's `wasm-unsafe-eval`. `lzma-wasm` bundles its own loader.
  */
 
 /** Whether the sender compresses payload before encoding. */
-export const COMPRESSION_ENABLED = false
+export const COMPRESSION_ENABLED = true
 
 /**
- * Compress (or pass-through). Returns the payload bytes plus a flag indicating
- * whether compression was actually applied.
+ * Compression-algorithm tag. Mirrors `qr_protocol::compress` constants so the
+ * byte written into the descriptor matches what the Rust receiver expects.
  */
-export function preparePayload(data: Uint8Array): {
+export const enum CompressionAlgorithm {
+  None = 0,
+  Zstd = 1,
+  Xz = 2
+}
+
+/** Maximum zstd level (22). */
+const ZSTD_LEVEL = 22
+/** Maximum XZ/LZMA2 preset level (9). */
+const XZ_LEVEL = 9
+/**
+ * Early-exit threshold. If zstd only shrinks the file to ≥ this fraction of
+ * the original, the file is treated as already compressed and the slower xz
+ * pass is skipped (xz is very unlikely to beat zstd on already-compressed
+ * data, and level-9 LZMA2 is expensive). 0.95 = 95%.
+ */
+const ZSTD_ALREADY_COMPRESSED_RATIO = 0.95
+
+export interface PrepareResult {
   payload: Uint8Array
-  compressed: boolean
-} {
-  if (!COMPRESSION_ENABLED) {
-    return { payload: data, compressed: false }
+  algorithm: CompressionAlgorithm
+  originalSize: number
+  compressedSize: number
+}
+
+// ---------------------------------------------------------------------------
+// zstd WASM module management — load once, reuse for all compressions
+// ---------------------------------------------------------------------------
+
+interface ZstdWasmModule {
+  memory: WebAssembly.Memory
+  _malloc: (size: number) => number
+  _free: (ptr: number) => void
+  _compressBound: (srcSize: number) => number
+  _compress: (
+    dst: number, dstCap: number,
+    src: number, srcSize: number,
+    level: number
+  ) => number
+}
+
+/** Resolve to the loaded WASM instance (singleton). */
+let wasmInitPromise: Promise<ZstdWasmModule> | null = null
+
+/**
+ * The emscripten WASM module imports "a.a" (_emscripten_memcpy_big) and
+ * "a.b" (_emscripten_resize_heap). We provide minimal stubs.
+ */
+interface EmscriptenImportCtx {
+  memory: WebAssembly.Memory | null
+}
+
+function createEmscriptenImports(): { imports: WebAssembly.Imports; ctx: EmscriptenImportCtx } {
+  const ctx: EmscriptenImportCtx = { memory: null }
+
+  const imports: WebAssembly.Imports = {
+    a: {
+      // "a" → _emscripten_resize_heap(requestedSize)
+      a: (requestedSize: number) => {
+        if (!ctx.memory) return 0
+        const oldSize = ctx.memory.buffer.byteLength
+        const alignUp = (x: number, m: number) => x + ((m - (x % m)) % m)
+        const maxHeapSize = 2147483648
+        if (requestedSize > maxHeapSize) return 0
+        for (let cutDown = 1; cutDown <= 4; cutDown *= 2) {
+          const overGrown = oldSize * (1 + 0.2 / cutDown)
+          const newSize = Math.min(
+            maxHeapSize,
+            alignUp(Math.max(requestedSize, overGrown + 100663296), 65536)
+          )
+          try {
+            ctx.memory.grow((newSize - oldSize) / 65536)
+            return 1
+          } catch {
+            // couldn't grow, try smaller
+          }
+        }
+        return 0
+      },
+      // "b" → _emscripten_memcpy_big(dest, src, num)
+      b: (dest: number, src: number, num: number) => {
+        if (!ctx.memory) return
+        new Uint8Array(ctx.memory.buffer).copyWithin(dest, src, src + num)
+      }
+    }
   }
-  // When a compress-capable zstd JS lib is wired in, compress here and return
-  // { payload: zstdCompress(data), compressed: true }.
-  return { payload: data, compressed: false }
+
+  return { imports, ctx }
+}
+
+function loadWasm(): Promise<ZstdWasmModule> {
+  // The .wasm file is at the extension root after the post-build copy step.
+  const wasmUrl = chrome.runtime.getURL("wasm-zstd.wasm")
+
+  return fetch(wasmUrl, { credentials: "same-origin" })
+    .then((resp) => {
+      if (!resp.ok) throw new Error(`Failed to fetch wasm-zstd.wasm: ${resp.status}`)
+      return resp.arrayBuffer()
+    })
+    .then((buffer) => {
+      const { imports, ctx } = createEmscriptenImports()
+
+      return WebAssembly.instantiate(buffer, imports).then(({ instance }) => {
+        // Wire the module's own memory into our import stubs.
+        ctx.memory = instance.exports.c as WebAssembly.Memory
+
+        // Run C global constructors
+        const callCtors = instance.exports.d as () => number
+        callCtors()
+
+        return {
+          memory: ctx.memory,
+          _malloc: instance.exports.f as ZstdWasmModule["_malloc"],
+          _free: instance.exports.g as ZstdWasmModule["_free"],
+          _compressBound: instance.exports.h as ZstdWasmModule["_compressBound"],
+          _compress: instance.exports.i as ZstdWasmModule["_compress"],
+        }
+      })
+    })
+}
+
+async function getWasm(): Promise<ZstdWasmModule> {
+  if (!wasmInitPromise) {
+    wasmInitPromise = loadWasm()
+  }
+  return wasmInitPromise
+}
+
+/**
+ * Compress `data` with zstd at max level using the WASM module.
+ */
+function compressWithWasm(wasm: ZstdWasmModule, data: Uint8Array): Uint8Array {
+  const srcSize = data.byteLength
+  const dstCap = wasm._compressBound(srcSize)
+  const srcPtr = wasm._malloc(srcSize)
+  const dstPtr = wasm._malloc(dstCap)
+
+  try {
+    new Uint8Array(wasm.memory.buffer, srcPtr, srcSize).set(data)
+
+    const resultSize = wasm._compress(dstPtr, dstCap, srcPtr, srcSize, ZSTD_LEVEL)
+    if (resultSize === -1 || resultSize <= 0) {
+      throw new Error(`Zstd compress returned ${resultSize}`)
+    }
+
+    return new Uint8Array(wasm.memory.buffer, dstPtr, resultSize).slice()
+  } finally {
+    wasm._free(srcPtr)
+    wasm._free(dstPtr)
+  }
+}
+
+// ---------------------------------------------------------------------------
+// lzma-wasm (XZ) module management
+// ---------------------------------------------------------------------------
+
+import { initWasm as initLzma, compress as lzmaCompress } from "lzma-wasm"
+
+let lzmaInitPromise: Promise<void> | null = null
+
+/** Initialize the lzma-wasm module exactly once. */
+function ensureLzma(): Promise<void> {
+  if (!lzmaInitPromise) {
+    lzmaInitPromise = initLzma().then(() => undefined)
+  }
+  return lzmaInitPromise
+}
+
+/**
+ * Compress `data` with XZ/LZMA2 at the configured level. Returns a standard
+ * `.xz` stream that the Android `xz2` decoder can decompress.
+ */
+async function compressXz(data: Uint8Array): Promise<Uint8Array> {
+  await ensureLzma()
+  return lzmaCompress(data, { format: "xz", level: XZ_LEVEL })
+}
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
+
+/**
+ * Pick the smallest payload among raw / zstd / xz.
+ *
+ * Strategy (see module docs): all algorithms run at their maximum level;
+ * whichever produces the fewest bytes is shipped. To save time, xz (the
+ * slowest) is skipped when zstd's result is ≥ 95% of the original — a strong
+ * signal the file is already compressed and xz won't help. The final pick is
+ * then the minimum over whichever candidates actually ran (2 or 3).
+ *
+ * Always returns a transmissible payload, falling back to the raw bytes on any
+ * compression failure.
+ */
+export async function preparePayload(data: Uint8Array): Promise<PrepareResult> {
+  const originalSize = data.length
+  if (!COMPRESSION_ENABLED || originalSize === 0) {
+    return {
+      payload: data,
+      algorithm: CompressionAlgorithm.None,
+      originalSize,
+      compressedSize: originalSize
+    }
+  }
+
+  const input =
+    data.byteOffset === 0 && data.byteLength === data.buffer.byteLength
+      ? data
+      : new Uint8Array(data)
+
+  // raw is always a candidate — used when every compressor fails to shrink.
+  const candidates: Array<{ payload: Uint8Array; algorithm: CompressionAlgorithm }> = [
+    { payload: data, algorithm: CompressionAlgorithm.None }
+  ]
+
+  // --- zstd pass (fast, always run) ---
+  try {
+    const wasm = await getWasm()
+    const c = compressWithWasm(wasm, input)
+    if (c.length < originalSize) {
+      candidates.push({ payload: c, algorithm: CompressionAlgorithm.Zstd })
+    }
+  } catch (e) {
+    console.warn("Zstd compression failed:", e)
+  }
+
+  const zstdSize = candidates.length > 1 ? candidates[1].payload.length : originalSize
+
+  // --- time-saving early exit ---
+  // zstd barely shrank the file (≥ 95% of original) → it's already compressed.
+  // Skip the expensive xz pass; pick the smaller of raw / zstd only.
+  if (zstdSize / originalSize >= ZSTD_ALREADY_COMPRESSED_RATIO) {
+    return pickSmallest(candidates, originalSize)
+  }
+
+  // --- xz pass (slow, only when the file is genuinely compressible) ---
+  try {
+    const c = await compressXz(input)
+    if (c.length < originalSize) {
+      candidates.push({ payload: c, algorithm: CompressionAlgorithm.Xz })
+    }
+  } catch (e) {
+    console.warn("XZ compression failed:", e)
+  }
+
+  // Pick the smallest of raw / zstd / xz.
+  return pickSmallest(candidates, originalSize)
+}
+
+/** Choose the smallest candidate and build the result. Logs the decision. */
+function pickSmallest(
+  candidates: Array<{ payload: Uint8Array; algorithm: CompressionAlgorithm }>,
+  originalSize: number
+): PrepareResult {
+  let best = candidates[0]
+  for (let i = 1; i < candidates.length; i++) {
+    if (candidates[i].payload.length < best.payload.length) {
+      best = candidates[i]
+    }
+  }
+  const size = best.payload.length
+  const algoName =
+    best.algorithm === CompressionAlgorithm.None
+      ? "raw"
+      : best.algorithm === CompressionAlgorithm.Zstd
+        ? "zstd"
+        : "xz"
+  const ratio = originalSize > 0 ? ((size / originalSize) * 100).toFixed(1) : "0"
+  console.log(
+    `Compression: ${originalSize} → ${size} bytes via ${algoName} (${ratio}%, ` +
+      `compared ${candidates.length} candidates)`
+  )
+  return {
+    payload: best.payload,
+    algorithm: best.algorithm,
+    originalSize,
+    compressedSize: size
+  }
 }

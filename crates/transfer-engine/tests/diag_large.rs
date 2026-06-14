@@ -6,11 +6,12 @@ use raptorq_core::Config;
 use std::time::Instant;
 
 #[test]
+#[ignore = "diagnostic benchmark — run with: cargo test -- --ignored diag_2mb"]
 fn diag_2mb_from_first_frame() {
     let size = 2 * 1024 * 1024;
     let data: Vec<u8> = (0..size).map(|i| (i & 0xff) as u8).collect();
     let sid = SessionId::derive("big.bin", size as u64, 0, &[]);
-    let fm = FileMeta { filename: "big.bin".into(), original_size: size as u64, crc32: 0 };
+    let fm = FileMeta { filename: "big.bin".into(), original_size: size as u64, ..Default::default() };
 
     let mut sender = SenderSession::new(&data, sid,
         SenderConfig { codec: Config::default(), redundancy_pct: 20 },

@@ -63,6 +63,8 @@ pub enum Error {
     AlreadyComplete,
     #[error("invalid redundancy percentage: {0} (must be between 5 and 50)")]
     InvalidRedundancy(u8),
+    #[error("compression error: {0}")]
+    Compress(String),
 }
 
 pub(crate) type Result<T> = core::result::Result<T, Error>;

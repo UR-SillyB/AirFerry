@@ -8,6 +8,8 @@ interface Props {
   session: SenderSessionWasm
   config: TransferConfig
   sessionId: { lo: bigint; hi: bigint }
+  /** Total bytes to send (compressed payload). */
+  totalBytes: number
 }
 
 function hex(lo: bigint, hi: bigint): string {
@@ -17,15 +19,42 @@ function hex(lo: bigint, hi: bigint): string {
   return `${hi32}${lo32}`
 }
 
-export function PlayPage({ session, config, sessionId }: Props) {
+function formatDuration(seconds: number): string {
+  if (!isFinite(seconds) || seconds <= 0) return "—"
+  const s = Math.ceil(seconds)
+  if (s < 60) return `${s}s`
+  const m = Math.floor(s / 60)
+  const rem = s % 60
+  if (m < 60) return `${m}m ${rem}s`
+  return `${Math.floor(m / 60)}h ${m % 60}m`
+}
+
+export function PlayPage({ session, config, sessionId, totalBytes }: Props) {
   const [stats, setStats] = useState<QrStreamStats | null>(null)
   const [error, setError] = useState<string | null>(null)
+
+  // Total bytes including redundancy overhead (sender emits K source + K*redundancy/100 repair).
+  const totalWithRedundancy = totalBytes * (1 + config.redundancyPct / 100)
+  // The sender loops its emission plan forever so late receivers can rejoin.
+  // Progress is therefore within a single pass; once a full pass completes the
+  // stream keeps looping ("持续传输中") and we switch to showing loop count
+  // instead of a stuck 100% bar.
+  const passPct = stats && totalWithRedundancy > 0
+    ? (stats.bytes / totalWithRedundancy) * 100
+    : 0
+  const loopsDone = Math.floor(passPct / 100)
+  const progressPct = Math.min(100, passPct)
+  const remainingInPass = Math.max(0, totalWithRedundancy - (stats?.bytes ?? 0) + loopsDone * totalWithRedundancy)
+  const etaSeconds = stats && stats.throughputBps > 0
+    ? remainingInPass / stats.throughputBps
+    : 0
 
   return (
     <div className="page">
       <h2>正在播放二维码</h2>
       <p className="hint">
         用接收端手机的摄像头对准下方二维码即可接收文件。
+        {loopsDone > 0 && " 持续循环传输中，可随时让接收端开始扫描。"}
       </p>
       {error && <p className="error">{error}</p>}
       <QrStream
@@ -39,16 +68,22 @@ export function PlayPage({ session, config, sessionId }: Props) {
       {stats && (
         <div className="stats-bar">
           <div className="stat-item">
-            <div className="stat-value">{stats.frames}</div>
-            <div className="stat-label">已发帧数</div>
-          </div>
-          <div className="stat-item">
             <div className="stat-value">{stats.fps.toFixed(0)}</div>
             <div className="stat-label">FPS</div>
           </div>
           <div className="stat-item">
             <div className="stat-value">{(stats.throughputBps / 1024).toFixed(1)}</div>
             <div className="stat-label">KB/s</div>
+          </div>
+          <div className="stat-item">
+            <div className="stat-value">
+              {loopsDone > 0 ? `循环×${loopsDone}` : `${progressPct.toFixed(0)}%`}
+            </div>
+            <div className="stat-label">进度</div>
+          </div>
+          <div className="stat-item">
+            <div className="stat-value">{loopsDone > 0 ? "持续中" : formatDuration(etaSeconds)}</div>
+            <div className="stat-label">预计剩余</div>
           </div>
         </div>
       )}

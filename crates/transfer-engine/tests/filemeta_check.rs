@@ -1,4 +1,4 @@
-use transfer_engine::descriptor::{FileMeta, build_payload, parse_payload};
+use transfer_engine::descriptor::FileMeta;
 use transfer_engine::sender::{SenderConfig, SenderSession};
 use transfer_engine::receiver::ReceiverSession;
 use qr_protocol::SessionId;
@@ -6,7 +6,7 @@ use qr_protocol::SessionId;
 #[test]
 fn file_meta_roundtrip() {
     let data: Vec<u8> = (0..50_000).map(|i| (i & 0xff) as u8).collect();
-    let fm = FileMeta { filename: "test.pdf".to_string(), original_size: 50_000, crc32: 0xCAFEBABE };
+    let fm = FileMeta { filename: "test.pdf".to_string(), original_size: 50_000, crc32: 0xCAFEBABE, ..Default::default() };
     let sender = SenderSession::new(&data, SessionId::zero(), SenderConfig::default(), fm.clone()).unwrap();
     let meta = sender.meta().clone();
 

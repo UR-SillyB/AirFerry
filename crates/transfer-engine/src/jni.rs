@@ -9,7 +9,7 @@
 use crate::receiver::{derive_meta_from_totals, ReceiverSession};
 use crate::Progress;
 use jni::objects::{JByteArray, JClass};
-use jni::sys::{jint, jlong};
+use jni::sys::{jint, jlong, jsize};
 use jni::JNIEnv;
 use qr_protocol::frame::SessionIdRaw;
 
@@ -44,42 +44,82 @@ pub extern "system" fn Java_com_easytransfer_app_nativelib_NativeBridge_receiver
     }
 }
 
+/// Ingest a frame. Returns a freshly-allocated `byte[]` containing the
+/// NUL-terminated progress JSON (or an empty array on error). Returning a new
+/// array instead of writing into a caller-supplied buffer removes the fixed
+/// 1024-byte cap that previously truncated JSON (and threw
+/// `ArrayIndexOutOfBoundsException` on long transfers), silently stalling the
+/// receiver's progress updates.
 #[no_mangle]
 pub extern "system" fn Java_com_easytransfer_app_nativelib_NativeBridge_receiverIngest(
     mut env: JNIEnv,
     _class: JClass,
     handle: jlong,
     frame_bytes: JByteArray,
-    out_buf: JByteArray,
-) -> jint {
+) -> jni::sys::jbyteArray {
+    // Helper: allocate a fresh byte[] of `len` bytes and fill it from `buf`.
+    // Returns null on allocation failure. Inlined (not a closure) so it does
+    // not capture a borrow of `env` and conflict with later uses of `env`.
+    fn fill_array(
+        env: &mut JNIEnv,
+        buf: &[u8],
+    ) -> jni::sys::jbyteArray {
+        let len = buf.len() as jsize;
+        let arr = match env.new_byte_array(len) {
+            Ok(a) => a,
+            Err(_) => return std::ptr::null_mut(),
+        };
+        // SAFETY: u8 and i8 have the same layout; the slice is a valid
+        // reinterpretation for the JNI SetByteArrayRegion call.
+        let i8_buf: &[i8] =
+            unsafe { std::slice::from_raw_parts(buf.as_ptr() as *const i8, buf.len()) };
+        if env.set_byte_array_region(&arr, 0, i8_buf).is_ok() {
+            arr.into_raw()
+        } else {
+            std::ptr::null_mut()
+        }
+    }
+
     if handle == 0 {
-        return 0;
+        return fill_array(&mut env, &[]);
     }
     let frame_vec: Vec<u8> = match env.convert_byte_array(&frame_bytes) {
         Ok(v) => v,
-        Err(_) => return 0,
+        Err(_) => return fill_array(&mut env, &[]),
     };
     let session = unsafe { &mut *(handle as *mut ReceiverSession) };
-    let written: usize = match qr_protocol::Frame::from_bytes(&frame_vec) {
+    match qr_protocol::Frame::from_bytes(&frame_vec) {
         Ok(frame) => {
-            let _ = session.ingest(frame);
+            let is_descriptor = frame.header.flags & qr_protocol::frame::FLAG_DESCRIPTOR != 0;
+            match session.ingest(frame) {
+                Ok(_) => {}
+                Err(e) => {
+                    // A SessionMismatch on a data frame would silently drop
+                    // every symbol — surface it so the cause is visible.
+                    android_log(&format!("ingest error: {e}"));
+                }
+            }
+            let p = session.progress();
+            // Log the first few frames + any descriptor + when received is
+            // suspiciously stuck at 0 while frames are flowing. Throttled by
+            // frame_index to avoid flooding logcat.
+            if p.frames_seen <= 3 || is_descriptor || (p.frames_seen % 50 == 0 && !session.is_complete()) {
+                android_log(&format!(
+                    "f={} desc={} meta={} recv={} dec={} {}/{}",
+                    p.frames_seen, is_descriptor, p.meta_confirmed,
+                    p.received_symbols, p.decoded_blocks, p.decoded_symbols, p.total_symbols
+                ));
+            }
             let json = progress_json(&session.progress());
             let mut buf = json.into_bytes();
-            buf.push(0);
-            let i8_buf: &[i8] = unsafe {
-                std::slice::from_raw_parts(buf.as_ptr() as *const i8, buf.len())
-            };
-            match env.set_byte_array_region(&out_buf, 0, i8_buf) {
-                Ok(_) => buf.len().saturating_sub(1),
-                Err(_) => 0,
-            }
+            buf.push(0); // NUL terminator for C-string reads on the Kotlin side.
+            fill_array(&mut env, &buf)
         }
         Err(e) => {
-            android_log(&format!("frame rejected: {e:?}"));
-            0
+            android_log(&format!("frame rejected (len={}): {:?}", frame_vec.len(), e));
+            fill_array(&mut env, &[])
         }
-    };
-    written as jint
+    }
 }
 
 #[no_mangle]
@@ -105,12 +145,19 @@ pub extern "system" fn Java_com_easytransfer_app_nativelib_NativeBridge_receiver
         return 0;
     }
     let session = unsafe { &*(handle as *const ReceiverSession) };
-    session.assemble().map(|d| d.len() as jint).unwrap_or(0)
+    match session.assemble_result() {
+        Ok(Some(d)) => d.len() as jint,
+        Ok(None) => 0,
+        Err(e) => {
+            android_log(&format!("assemble length failed: {e}"));
+            0
+        }
+    }
 }
 
 #[no_mangle]
 pub extern "system" fn Java_com_easytransfer_app_nativelib_NativeBridge_receiverAssemble(
-    mut env: JNIEnv,
+    env: JNIEnv,
     _class: JClass,
     handle: jlong,
     out_buf: JByteArray,
@@ -119,8 +166,13 @@ pub extern "system" fn Java_com_easytransfer_app_nativelib_NativeBridge_receiver
         return 0;
     }
     let session = unsafe { &*(handle as *const ReceiverSession) };
-    let Some(data) = session.assemble() else {
-        return 0;
+    let data = match session.assemble_result() {
+        Ok(Some(d)) => d,
+        Ok(None) => return 0,
+        Err(e) => {
+            android_log(&format!("assemble failed: {e}"));
+            return 0;
+        }
     };
     match env.set_byte_array_region(&out_buf, 0, unsafe {
         std::slice::from_raw_parts(data.as_ptr() as *const i8, data.len())
@@ -137,11 +189,10 @@ pub extern "system" fn Java_com_easytransfer_app_nativelib_NativeBridge_receiver
 /// Returns the original filename as a Java String (or empty if unknown).
 #[no_mangle]
 pub extern "system" fn Java_com_easytransfer_app_nativelib_NativeBridge_receiverFileName(
-    mut env: JNIEnv,
+    env: JNIEnv,
     _class: JClass,
     handle: jlong,
 ) -> jni::sys::jstring {
-    use jni::objects::JString;
     if handle == 0 {
         return std::ptr::null_mut();
     }
@@ -168,22 +219,27 @@ pub extern "system" fn Java_com_easytransfer_app_nativelib_NativeBridge_receiver
 }
 
 /// Returns the CRC32 of the original file (0 if unknown).
+///
+/// Returned as `jlong` (not `jint`) so the full unsigned 32-bit range
+/// (0..=0xFFFF_FFFF) survives intact — Kotlin's `Int` is signed, so a value
+/// like `0xDEADBEEF` would otherwise arrive as a negative number and break
+/// equality comparisons with a receiver-computed CRC.
 #[no_mangle]
 pub extern "system" fn Java_com_easytransfer_app_nativelib_NativeBridge_receiverCrc32(
     _env: JNIEnv,
     _class: JClass,
     handle: jlong,
-) -> jint {
+) -> jlong {
     if handle == 0 {
         return 0;
     }
     let session = unsafe { &*(handle as *const ReceiverSession) };
-    session.file_meta().crc32 as jint
+    session.file_meta().crc32 as u64 as jlong
 }
 
 fn progress_json(p: &Progress) -> String {
     format!(
-        r#"{{"decoded_symbols":{},"total_symbols":{},"received_symbols":{},"frames_seen":{},"frames_dropped":{},"frames_corrupt":{},"decoded_blocks":{},"total_blocks":{},"decoded_fraction":{:.4},"loss_ratio":{:.4},"complete":{},"meta_confirmed":{}}}"#,
+        r#"{{"decoded_symbols":{},"total_symbols":{},"received_symbols":{},"frames_seen":{},"frames_duplicate":{},"frames_corrupt":{},"decoded_blocks":{},"total_blocks":{},"decoded_fraction":{:.4},"loss_ratio":{:.4},"complete":{},"meta_confirmed":{}}}"#,
         p.decoded_symbols,
         p.total_symbols,
         p.received_symbols,

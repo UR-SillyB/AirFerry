@@ -39,8 +39,11 @@ class ReceiveDetailActivity : ComponentActivity() {
     private var recoveredFile: File? = null
     private var fileName: String = "received_file"
     private var fileSize: Long = 0L
-    private var expectedCrc: Int = 0
-    private var receivedCrc: Int = 0
+    /** CRC32 values carried as unsigned 32-bit in a Long (0..=0xFFFFFFFF). */
+    private var expectedCrc: Long = 0L
+    private var receivedCrc: Long = 0L
+    /** True when the descriptor never supplied an expected CRC (so 0 is not a real value). */
+    private var crcUnknown: Boolean = true
 
     private val createDocument = registerForActivityResult(
         ActivityResultContracts.CreateDocument("application/octet-stream")
@@ -54,8 +57,13 @@ class ReceiveDetailActivity : ComponentActivity() {
         val filePath = intent.getStringExtra("FILE_PATH")
         fileName = intent.getStringExtra("FILE_NAME") ?: "received_file"
         fileSize = intent.getLongExtra("FILE_SIZE", 0L)
-        expectedCrc = intent.getIntExtra("CRC32", 0)
-        receivedCrc = intent.getIntExtra("CRC32_RECEIVED", 0)
+        // CRC extras may arrive as Long (new path, ScanActivity) or Int (old
+        // path, FileListActivity reads from .meta hex). Read Long first; if the
+        // intent only carried an Int, getIntExtra returns the same bits which
+        // we reinterpret as unsigned.
+        expectedCrc = readCrcExtra(intent, "CRC32")
+        receivedCrc = readCrcExtra(intent, "CRC32_RECEIVED")
+        crcUnknown = intent.getBooleanExtra("CRC32_UNKNOWN", true)
         recoveredFile = filePath?.let { File(it) }
 
         // Copy to received dir for file list — but ONLY when arriving from a
@@ -69,7 +77,10 @@ class ReceiveDetailActivity : ComponentActivity() {
 
     @Composable
     private fun ReceiveDetailScreen() {
-        val crcOk = expectedCrc == receivedCrc
+        // crcOk is only meaningful when we actually have an expected CRC.
+        // When crcUnknown is true the descriptor never supplied one, so we
+        // can neither pass nor fail the file — treat it as neutral.
+        val crcOk = !crcUnknown && expectedCrc == receivedCrc
         val fileExists = recoveredFile?.exists() == true
 
         Column(
@@ -77,13 +88,15 @@ class ReceiveDetailActivity : ComponentActivity() {
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.Center
         ) {
-            // Success/check icon
+            // Success/check icon. Unknown CRC is shown as success (file was
+            // recovered); only a real mismatch is shown as an error.
+            val statusOk = fileExists && (crcOk || crcUnknown)
             Box(
-                modifier = Modifier.size(96.dp).clip(CircleShape).background(if (crcOk) Success else Error),
+                modifier = Modifier.size(96.dp).clip(CircleShape).background(if (statusOk) Success else Error),
                 contentAlignment = Alignment.Center
             ) {
                 Icon(
-                    if (crcOk) Icons.Default.Check else Icons.Default.Close,
+                    if (statusOk) Icons.Default.Check else Icons.Default.Close,
                     contentDescription = null,
                     tint = Color.White,
                     modifier = Modifier.size(48.dp)
@@ -110,17 +123,21 @@ class ReceiveDetailActivity : ComponentActivity() {
                     DetailRow("大小", ScanActivity.formatSize(fileSize))
                     DetailRow(
                         "校验",
-                        if (crcOk) "✓ CRC32 校验通过" else "✗ 校验失败（数据可能损坏）",
-                        valueColor = if (crcOk) Success else Error
+                        when {
+                            crcUnknown -> "— CRC32 未知（未收到描述符）"
+                            crcOk -> "✓ CRC32 校验通过"
+                            else -> "✗ 校验失败（数据可能损坏）"
+                        },
+                        valueColor = when {
+                            crcUnknown -> TextSecondary
+                            crcOk -> Success
+                            else -> Error
+                        }
                     )
-                    DetailRow(
-                        "期望 CRC32",
-                        "0x%08X".format(expectedCrc)
-                    )
-                    DetailRow(
-                        "实际 CRC32",
-                        "0x%08X".format(receivedCrc)
-                    )
+                    if (!crcUnknown) {
+                        DetailRow("期望 CRC32", "0x%08X".format(expectedCrc))
+                        DetailRow("实际 CRC32", "0x%08X".format(receivedCrc))
+                    }
                 }
             }
 
@@ -187,8 +204,29 @@ class ReceiveDetailActivity : ComponentActivity() {
             val safeName = fileName.takeLast(64).replace(Regex("[^a-zA-Z0-9._-]"), "_")
             val target = File(dir, "${System.currentTimeMillis()}_$safeName")
             src.copyTo(target, overwrite = true)
-            // Also write a small metadata sidecar for file size
-            File(dir, "${target.name}.meta").writeText("$fileName\n$fileSize\n${java.lang.Integer.toHexString(expectedCrc)}")
+            // Also write a small metadata sidecar for file size + crc.
+            // Write "unknown" when no expected CRC was supplied so the file
+            // list does not display a misleading "0x0".
+            val crcStr = if (crcUnknown) "unknown" else java.lang.Long.toHexString(expectedCrc)
+            // Line 4: whether the CRC is unknown, so the re-open path can
+            // restore the crcUnknown flag instead of treating 0 as verified.
+            File(dir, "${target.name}.meta").writeText("$fileName\n$fileSize\n$crcStr\n$crcUnknown")
         } catch (_: Exception) {}
+    }
+
+    /**
+     * Read a CRC32 intent extra as an unsigned 32-bit Long. Accepts both the
+     * new Long encoding (ScanActivity) and the legacy Int encoding, so the
+     * detail screen stays compatible with both call sites.
+     */
+    private fun readCrcExtra(intent: android.content.Intent, key: String): Long {
+        // Long extra takes precedence; if absent, fall back to Int (reinterpreted
+        // as unsigned 32-bit so high-bit CRC values survive).
+        return try {
+            val asLong = intent.getLongExtra(key, -1L)
+            if (asLong >= 0) asLong else intent.getIntExtra(key, 0).toLong() and 0xFFFFFFFFL
+        } catch (_: Exception) {
+            intent.getIntExtra(key, 0).toLong() and 0xFFFFFFFFL
+        }
     }
 }

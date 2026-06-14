@@ -99,12 +99,14 @@ class ReceiverSessionManager {
 
         if (!initialized) return null
 
-        // Output buffer for progress JSON from JNI. Use 1024 to handle edge cases
-        // with large frame counts or long field values.
-        val outBuf = ByteArray(1024)
-        val written = NativeBridge.receiverIngest(handle, frameBytes, outBuf)
-        if (written <= 0) return null
-        val json = String(outBuf, 0, written).trimEnd('\u0000')
+        // receiverIngest now returns a freshly-allocated byte[] (progress JSON +
+        // trailing NUL) instead of writing into a fixed-size buffer, which used
+        // to truncate on long transfers and stall the UI at 0%.
+        val jsonBytes = NativeBridge.receiverIngest(handle, frameBytes) ?: return null
+        if (jsonBytes.isEmpty()) return null
+        val nul = jsonBytes.indexOf(0)
+        val len = if (nul >= 0) nul else jsonBytes.size
+        val json = String(jsonBytes, 0, len)
         return parseProgress(json)
     }
 
@@ -119,9 +121,9 @@ class ReceiverSessionManager {
     fun fileSize(): Long =
         if (initialized) NativeBridge.receiverFileSize(handle) else 0L
 
-    /** Expected CRC32, or 0. */
-    fun crc32(): Int =
-        if (initialized) NativeBridge.receiverCrc32(handle) else 0
+    /** Expected CRC32 (unsigned 32-bit in a Long), or 0. */
+    fun crc32(): Long =
+        if (initialized) NativeBridge.receiverCrc32(handle) else 0L
 
     /** Recover the assembled file bytes, or null if not complete. */
     fun assemble(): ByteArray? {
@@ -149,13 +151,19 @@ class ReceiverSessionManager {
 
     private fun parseProgress(json: String): Progress {
         val o = JSONObject(json)
+        // The Rust progress_json emits `frames_duplicate` and `frames_corrupt`
+        // (there is no `frames_dropped` key). Treat "dropped" as the union of
+        // duplicate and corrupt frames — i.e. every seen frame that did not
+        // contribute new data — which is what the loss-ratio already reflects.
+        val framesDuplicate = o.optLong("frames_duplicate")
+        val framesCorrupt = o.optLong("frames_corrupt")
         return Progress(
             decodedSymbols = o.optInt("decoded_symbols"),
             totalSymbols = o.optInt("total_symbols"),
             receivedSymbols = o.optInt("received_symbols"),
             framesSeen = o.optLong("frames_seen"),
-            framesDropped = o.optLong("frames_dropped"),
-            framesCorrupt = o.optLong("frames_corrupt"),
+            framesDropped = framesDuplicate + framesCorrupt,
+            framesCorrupt = framesCorrupt,
             decodedBlocks = o.optInt("decoded_blocks"),
             totalBlocks = o.optInt("total_blocks"),
             decodedFraction = o.optDouble("decoded_fraction"),

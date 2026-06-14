@@ -100,15 +100,15 @@ class FileListActivity : ComponentActivity() {
     @Composable
     private fun FileCard(file: File, onClick: () -> Unit, onDelete: (File) -> Unit) {
         val metaFile = remember(file) { File(file.parentFile, "${file.name}.meta") }
-        val meta: Triple<String, Long, Int> = remember(file) {
+        val meta: Triple<String, Long, Long> = remember(file) {
             if (metaFile.exists()) {
                 val lines = metaFile.readLines()
                 val name = lines.getOrElse(0) { file.name }
                 val size = lines.getOrElse(1) { file.length().toString() }.toLongOrNull() ?: file.length()
-                val crc = lines.getOrElse(2) { "0" }.toIntOrNull(16) ?: 0
+                val crc = lines.getOrElse(2) { "0" }.toLongOrNull(16) ?: 0L
                 Triple(name, size, crc)
             } else {
-                Triple(file.name, file.length(), 0)
+                Triple(file.name, file.length(), 0L)
             }
         }
         val origName = meta.first
@@ -167,12 +167,19 @@ class FileListActivity : ComponentActivity() {
         val metaFile = File(file.parentFile, "${file.name}.meta")
         var fileName = file.name
         var fileSize = file.length()
-        var crc32 = 0
+        var crc32 = 0L
+        // Default to "unknown" — a fresh scan always sets this explicitly, and
+        // old .meta files (pre-line-4) lack the flag, so assume unknown rather
+        // than falsely showing a 0==0 "verified" result.
+        var crcUnknown = true
         if (metaFile.exists()) {
             val lines = metaFile.readLines()
             fileName = lines.getOrElse(0) { file.name }
             fileSize = lines.getOrElse(1) { file.length().toString() }.toLongOrNull() ?: file.length()
-            crc32 = lines.getOrElse(2) { "0" }.toIntOrNull(16) ?: 0
+            crc32 = lines.getOrElse(2) { "0" }.toLongOrNull(16) ?: 0L
+            // Line 4 (added later): explicit "crcUnknown" boolean. Absent on
+            // old sidecars → keep the default true.
+            crcUnknown = lines.getOrElse(3) { "true" }.trim() != "false"
         }
         val intent = Intent(this, ReceiveDetailActivity::class.java).apply {
             putExtra("FILE_PATH", file.absolutePath)
@@ -180,6 +187,7 @@ class FileListActivity : ComponentActivity() {
             putExtra("FILE_SIZE", fileSize)
             putExtra("CRC32", crc32)
             putExtra("CRC32_RECEIVED", crc32)
+            putExtra("CRC32_UNKNOWN", crcUnknown)
             // Re-save path: don't copy into received/ again (avoids duplicates).
             putExtra("RESAVE", true)
         }

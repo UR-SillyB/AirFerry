@@ -57,6 +57,12 @@ pub struct SenderSession {
     cursor: usize,
     frame_index: u64,
     descriptor_interval: u32,
+    /// Whether `start_ms` has been set. Kept separate from `start_ms` so a
+    /// wall-clock of 0 (impossible in practice but defensive) is handled.
+    started: bool,
+    /// Timestamp of the first emitted frame; 0 until `started` becomes true.
+    /// Delayed so that the cumulative-average FPS (frames / elapsed) is not
+    /// diluted by the WASM init gap between `new()` and the first render tick.
     start_ms: u64,
     stats: Stats,
 }
@@ -88,7 +94,8 @@ impl SenderSession {
             cursor: 0,
             frame_index: 0,
             descriptor_interval: 5,  // Reduced from 15 to 5 for faster metadata confirmation
-            start_ms: now_ms(),
+            started: false,
+            start_ms: 0,            // Set on first next_frame() call
             stats: Stats::default(),
         })
     }
@@ -122,20 +129,36 @@ impl SenderSession {
 
     /// Emit the next frame, looping the emission plan forever.
     ///
-    /// Every `descriptor_interval` data frames (default 30), a *descriptor
-    /// frame* is emitted instead of a data symbol, carrying the authoritative
-    /// object metadata so late-joining receivers can build a decoder.
+    /// A *descriptor frame* is emitted every `descriptor_interval` emitted
+    /// frames of any kind (default 5), carrying the authoritative object
+    /// metadata so late-joining receivers can build a decoder. The very first
+    /// emitted frame is always a descriptor so an immediate-join receiver can
+    /// build its decoder without having to cache symbols.
+    ///
+    /// Note: the cadence is measured in *all* emitted frames (descriptors
+    /// included), so the effective ratio is ~1 descriptor per
+    /// `descriptor_interval` frames on the wire.
     pub fn next_frame(&mut self) -> Result<Frame> {
         if self.plan.is_empty() {
             return Err(Error::NoPayload);
         }
 
+        // Start the clock on the very first frame so that the cumulative FPS
+        // isn't diluted by the initialisation delay between new() and the
+        // first render-loop tick.
+        if !self.started {
+            self.start_ms = now_ms();
+            self.started = true;
+        }
+
         let now_ms_val = now_ms();
 
         // Emit a descriptor every `descriptor_interval` frames (counted in
-        // emitted frames of any kind, so the cadence stays regular).
+        // emitted frames of any kind, so the cadence stays regular). The very
+        // first emitted frame is always a descriptor so a receiver that joins
+        // immediately can build its decoder without having to cache symbols.
         let interval = self.descriptor_interval.max(1) as u64;
-        if self.frame_index > 0 && self.frame_index % interval == 0 {
+        if self.frame_index == 0 || (self.frame_index > 0 && self.frame_index % interval == 0) {
             self.frame_index = self.frame_index.wrapping_add(1);
             let frame = crate::descriptor::build_frame(&self.meta, &self.file_meta, self.session_id, self.frame_index, now_ms_val)?;
             self.stats.record_sent(frame.payload.len() as u64);
@@ -179,8 +202,9 @@ impl SenderSession {
     /// Live statistics snapshot (sent frames, fps, throughput, elapsed).
     pub fn stats(&self) -> Stats {
         let mut s = self.stats.clone();
-        let now = now_ms();
-        s.elapsed_ms = now.saturating_sub(self.start_ms);
+        if self.started {
+            s.elapsed_ms = now_ms().saturating_sub(self.start_ms);
+        }
         s.finalize();
         s
     }
@@ -246,6 +270,9 @@ mod tests {
             filename: "test.bin".to_string(),
             original_size: 0,
             crc32: 0,
+            compression: qr_protocol::compress::COMPRESSION_NONE,
+            compressed_size: 0,
+            compressed_size_known: true,
         }
     }
 

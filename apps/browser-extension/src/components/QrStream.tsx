@@ -41,6 +41,7 @@ export function QrStream({
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const rafRef = useRef<number | null>(null)
   const lastTickRef = useRef<number>(0)
+  const lastPxRef = useRef<number>(0)
   const statsTimerRef = useRef<number>(0)
   const [fullscreen, setFullscreen] = useState(false)
 
@@ -71,8 +72,16 @@ export function QrStream({
     const cssSize = canvas.clientWidth || 480  // Fallback to 480 if clientWidth is 0
     const dpr = window.devicePixelRatio || 1
     const px = Math.max(cssSize * dpr, 256)
-    canvas.width = px
-    canvas.height = px
+    // Only resize the backing store when the target size actually changes.
+    // Reassigning canvas.width/height every frame clears the surface and
+    // forces the compositor to re-allocate its buffer — under sustained 60fps
+    // load this degrades into periodic stalls (observed FPS sliding 60→40 as
+    // the session runs longer). Caching the size keeps the GPU buffer stable.
+    if (px !== lastPxRef.current) {
+      lastPxRef.current = px
+      canvas.width = px
+      canvas.height = px
+    }
     const modulePx = Math.floor(px / quiet)
     const drawSize = modulePx * quiet
     const offset = Math.floor((px - drawSize) / 2)
@@ -81,21 +90,35 @@ export function QrStream({
     ctx.fillStyle = "#ffffff"
     ctx.fillRect(0, 0, px, px)
 
-    // Draw dark modules only (sparse fill is faster than per-module rects for
-    // dense codes, but per-rect is simplest and correct).
+    // Draw dark modules only. Group consecutive dark modules in a row into a
+    // single fillRect (run-length) — far fewer state changes / draw calls than
+    // one rect per module, which matters at 60fps for a 177×177 grid.
     ctx.fillStyle = "#000000"
     for (let y = 0; y < side; y++) {
       const rowBase = y * side
       const py = offset + (y + margin) * modulePx
+      let runStart = -1
       for (let x = 0; x < side; x++) {
-        if (matrix[rowBase + x]) {
+        const dark = matrix[rowBase + x] !== 0
+        if (dark) {
+          if (runStart < 0) runStart = x
+        } else if (runStart >= 0) {
           ctx.fillRect(
-            offset + (x + margin) * modulePx,
+            offset + (runStart + margin) * modulePx,
             py,
-            modulePx,
+            (x - runStart) * modulePx,
             modulePx
           )
+          runStart = -1
         }
+      }
+      if (runStart >= 0) {
+        ctx.fillRect(
+          offset + (runStart + margin) * modulePx,
+          py,
+          (side - runStart) * modulePx,
+          modulePx
+        )
       }
     }
 
@@ -131,8 +154,14 @@ export function QrStream({
 
     const loop = (ts: number) => {
       if (cancelled) return
-      if (ts - lastTickRef.current >= interval) {
-        lastTickRef.current = ts
+      const delta = ts - lastTickRef.current
+      if (delta >= interval) {
+        // Anti-stall guard: if we fell behind by more than ~2 frames (e.g.
+        // after a tab-switch, GC pause, or thermal throttle), snap to the
+        // current timestamp instead of letting delta keep growing. Otherwise
+        // the loop would fire several catch-up renders in rapid succession,
+        // compounding the slowdown (the "60 → 40 and keeps dropping" cascade).
+        lastTickRef.current = delta > interval * 3 ? ts : ts - (delta % interval)
         render()
       }
       rafRef.current = requestAnimationFrame(loop)

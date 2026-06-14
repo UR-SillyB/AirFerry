@@ -16,7 +16,11 @@ fn pseudo_random(n: usize) -> Vec<u8> {
 /// the late-join path rather than the sender handing over its OTI directly.
 fn cycle(data: &[u8], redundancy: u8, drop_every: u32, dup_some: bool, shuffle: bool) {
     let sid = SessionId::derive("file", data.len() as u64, 0, &[]);
-    let mut sender = SenderSession::new(
+    // Probe the sender once to learn the padded transfer_length, then build the
+    // real sender with a FileMeta whose compressed_size matches it. Without
+    // this the descriptor would advertise compressed_size=0 and the receiver
+    // would trim the recovered object to zero bytes.
+    let probe = SenderSession::new(
         data,
         sid,
         SenderConfig {
@@ -24,6 +28,25 @@ fn cycle(data: &[u8], redundancy: u8, drop_every: u32, dup_some: bool, shuffle: 
             redundancy_pct: redundancy,
         },
         transfer_engine::FileMeta::default(),
+    )
+    .unwrap();
+    let padded_len = probe.meta().transfer_length;
+    let fm = transfer_engine::FileMeta {
+        filename: String::new(),
+        original_size: data.len() as u64,
+        crc32: 0,
+        compression: qr_protocol::compress::COMPRESSION_NONE,
+        compressed_size: padded_len,
+        compressed_size_known: true,
+    };
+    let mut sender = SenderSession::new(
+        data,
+        sid,
+        SenderConfig {
+            codec: Config::default(),
+            redundancy_pct: redundancy,
+        },
+        fm,
     )
     .unwrap();
     // Emit a descriptor early so the receiver learns the real layout fast.

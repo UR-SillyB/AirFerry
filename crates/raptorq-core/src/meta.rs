@@ -13,7 +13,13 @@ pub struct SourceBlockMeta {
     pub sbn: u32,
     /// Number of source symbols K in this block.
     pub num_source_symbols: u32,
-    /// Total bytes of original data in this block (may be < K*T for the last block).
+    /// Total bytes carried by this block. **Invariant: `block_length ==
+    /// num_source_symbols * symbol_size`** for *every* block, including the
+    /// last one. This holds because the input is zero-padded to a whole symbol
+    /// count before encoding (`chunker::pad_to_symbols`), and `raptorq` further
+    /// zero-pads each block to a whole symbol boundary internally. The decoder
+    /// derives `K = ceil(block_length / symbol_size)`, so any deviation from
+    /// this invariant would produce a wrong K and corrupt recovery.
     pub block_length: u64,
 }
 

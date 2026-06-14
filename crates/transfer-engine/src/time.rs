@@ -5,8 +5,6 @@
 //! `js_sys::Date`; on native we use `SystemTime`. Both return UNIX-epoch
 //! milliseconds, which is all the engine needs for timestamps and stats.
 
-use std::time::SystemTime;
-
 /// Current UNIX epoch time in milliseconds. Works on native + WASM.
 pub fn now_ms() -> u64 {
     #[cfg(target_arch = "wasm32")]
@@ -16,8 +14,8 @@ pub fn now_ms() -> u64 {
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
+        std::time::SystemTime::now()
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0)
     }
