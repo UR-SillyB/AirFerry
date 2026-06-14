@@ -68,9 +68,9 @@ export function QrStream({
     const margin = 4
     const quiet = side + margin * 2
     // Fit matrix into canvas; pick a module size that tiles evenly.
-    const cssSize = canvas.clientWidth
+    const cssSize = canvas.clientWidth || 480  // Fallback to 480 if clientWidth is 0
     const dpr = window.devicePixelRatio || 1
-    const px = Math.max(cssSize, 256)
+    const px = Math.max(cssSize * dpr, 256)
     canvas.width = px
     canvas.height = px
     const modulePx = Math.floor(px / quiet)

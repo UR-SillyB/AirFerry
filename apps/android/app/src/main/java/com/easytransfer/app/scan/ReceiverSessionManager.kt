@@ -41,7 +41,8 @@ class ReceiverSessionManager {
         val totalBlocks: Int,
         val decodedFraction: Double,
         val lossRatio: Double,
-        val complete: Boolean
+        val complete: Boolean,
+        val metaConfirmed: Boolean
     )
 
     private var handle: Long = 0L
@@ -49,8 +50,11 @@ class ReceiverSessionManager {
     private var sessionIdHi: Long = 0L
     private var symbolSize: Int = 0
     private var initialized: Boolean = false
+    private var estimatedTotalSymbols: Int = 0
 
     val isInitialized: Boolean get() = initialized
+
+    fun getEstimatedTotalSymbols(): Int = estimatedTotalSymbols
 
     /** Parse + validate a frame's header. Returns null if not a valid ET frame. */
     fun parseHeader(bytes: ByteArray): FrameHeader? {
@@ -76,6 +80,11 @@ class ReceiverSessionManager {
     /** Ingest a decoded QR payload. Lazily initializes the native receiver. */
     fun ingest(frameBytes: ByteArray): Progress? {
         val header = parseHeader(frameBytes) ?: return null
+
+        // Cache estimated total symbols from first frame for approximate progress
+        if (estimatedTotalSymbols == 0 && header.totalSymbols > 0) {
+            estimatedTotalSymbols = header.totalSymbols
+        }
 
         if (!initialized) {
             sessionIdLo = header.sessionIdLo
@@ -151,7 +160,10 @@ class ReceiverSessionManager {
             totalBlocks = o.optInt("total_blocks"),
             decodedFraction = o.optDouble("decoded_fraction"),
             lossRatio = o.optDouble("loss_ratio"),
-            complete = o.optBoolean("complete")
+            complete = o.optBoolean("complete"),
+            metaConfirmed = o.optBoolean("meta_confirmed", false)
+        )
+    }
         )
     }
 

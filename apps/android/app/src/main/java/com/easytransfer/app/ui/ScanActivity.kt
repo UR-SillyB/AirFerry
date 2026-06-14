@@ -289,6 +289,7 @@ class ScanActivity : ComponentActivity() {
                 }
                 val analyzer = ImageAnalysis.Builder()
                     .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                    .setTargetFrameRate(android.util.Range(60, 60))  // Target 60fps for 2x throughput
                     .build()
                     .also {
                         it.setAnalyzer(cameraExecutor, QrStreamAnalyzer(this) { payload ->
@@ -320,12 +321,30 @@ class ScanActivity : ComponentActivity() {
         if (now - lastUiUpdate < 150 && !progress.complete) return
         lastUiUpdate = now
 
-        val pct = (progress.decodedFraction * 100).toInt().coerceIn(0, 100)
+        val pct = when {
+            // Normal mode: metadata confirmed, use decoded progress
+            progress.metaConfirmed || progress.totalSymbols > 0 -> {
+                (progress.decodedFraction * 100).toInt().coerceIn(0, 100)
+            }
+            // Cache mode: estimate approximate progress based on first frame total_symbols
+            progress.receivedSymbols > 0 -> {
+                val estimated = session.getEstimatedTotalSymbols()
+                if (estimated > 0) {
+                    // Cap at 15% to avoid over-optimism (descriptor may reveal larger total)
+                    (progress.receivedSymbols * 100 / estimated).coerceIn(0, 15)
+                } else {
+                    0
+                }
+            }
+            else -> 0
+        }
         val statusMsg = when {
             progress.complete -> "✓ 文件恢复完成"
-            progress.totalSymbols == 0 && progress.receivedSymbols > 0 -> "正在同步… 已缓存 ${progress.receivedSymbols} 帧"
+            !progress.metaConfirmed && progress.receivedSymbols > 0 ->
+                "⏳ 正在同步… 已缓存 ${progress.receivedSymbols} 符号 (~$pct%)"
             progress.totalSymbols == 0 -> "等待二维码…"
-            progress.receivedSymbols > 0 && progress.decodedBlocks == 0 -> "接收中… ${progress.receivedSymbols}/${progress.totalSymbols} 符号 (等待解码)"
+            progress.receivedSymbols > 0 && progress.decodedBlocks == 0 ->
+                "接收中… ${progress.receivedSymbols}/${progress.totalSymbols} 符号 (等待解码)"
             else -> "恢复中… $pct%"
         }
         updateUi {

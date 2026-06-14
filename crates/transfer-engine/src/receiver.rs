@@ -249,13 +249,15 @@ impl ReceiverSession {
         self.decoder.assemble()
     }
 
-    pub fn progress(&self) -> &Progress {
-        &self.progress
+    pub fn progress(&self) -> Progress {
+        let mut progress = self.progress.clone();
+        progress.meta_confirmed = self.meta_confirmed;
+        progress
     }
 
     /// Snapshot progress (clone).
     pub fn progress_snapshot(&self) -> Progress {
-        self.progress.clone()
+        self.progress()
     }
 }
 

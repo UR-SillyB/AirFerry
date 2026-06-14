@@ -63,7 +63,7 @@ pub extern "system" fn Java_com_easytransfer_app_nativelib_NativeBridge_receiver
     let written: usize = match qr_protocol::Frame::from_bytes(&frame_vec) {
         Ok(frame) => {
             let _ = session.ingest(frame);
-            let json = progress_json(session.progress());
+            let json = progress_json(&session.progress());
             let mut buf = json.into_bytes();
             buf.push(0);
             let i8_buf: &[i8] = unsafe {
@@ -183,7 +183,7 @@ pub extern "system" fn Java_com_easytransfer_app_nativelib_NativeBridge_receiver
 
 fn progress_json(p: &Progress) -> String {
     format!(
-        r#"{{"decoded_symbols":{},"total_symbols":{},"received_symbols":{},"frames_seen":{},"frames_dropped":{},"frames_corrupt":{},"decoded_blocks":{},"total_blocks":{},"decoded_fraction":{:.4},"loss_ratio":{:.4},"complete":{}}}"#,
+        r#"{{"decoded_symbols":{},"total_symbols":{},"received_symbols":{},"frames_seen":{},"frames_dropped":{},"frames_corrupt":{},"decoded_blocks":{},"total_blocks":{},"decoded_fraction":{:.4},"loss_ratio":{:.4},"complete":{},"meta_confirmed":{}}}"#,
         p.decoded_symbols,
         p.total_symbols,
         p.received_symbols,
@@ -194,7 +194,8 @@ fn progress_json(p: &Progress) -> String {
         p.total_blocks,
         p.decoded_fraction(),
         p.loss_ratio(),
-        p.is_complete()
+        p.is_complete(),
+        p.meta_confirmed
     )
 }
 

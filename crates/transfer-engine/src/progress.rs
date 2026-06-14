@@ -78,6 +78,8 @@ pub struct Progress {
     pub decoded_blocks: u32,
     /// Total blocks.
     pub total_blocks: u32,
+    /// Whether metadata has been confirmed via descriptor frame.
+    pub meta_confirmed: bool,
 }
 
 impl Progress {

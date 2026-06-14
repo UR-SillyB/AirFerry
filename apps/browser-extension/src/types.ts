@@ -12,7 +12,7 @@ export interface TransferConfig {
 
 export const DEFAULT_CONFIG: TransferConfig = {
   redundancyPct: 10,
-  fps: 30,
+  fps: 60,  // Upgraded from 30 to 60 for 2x throughput
   symbolSize: 1024,
   brightness: 1.0,
   autoOptimize: true

@@ -87,13 +87,13 @@ impl SenderSession {
             plan,
             cursor: 0,
             frame_index: 0,
-            descriptor_interval: 15,
+            descriptor_interval: 5,  // Reduced from 15 to 5 for faster metadata confirmation
             start_ms: now_ms(),
             stats: Stats::default(),
         })
     }
 
-    /// How often (in frames) a descriptor frame is emitted. Default 30.
+    /// How often (in frames) a descriptor frame is emitted. Default 5.
     pub fn set_descriptor_interval(&mut self, interval: u32) {
         self.descriptor_interval = interval.max(1);
     }
