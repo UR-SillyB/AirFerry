@@ -289,10 +289,11 @@ class ScanActivity : ComponentActivity() {
                 }
                 val analyzer = ImageAnalysis.Builder()
                     .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                    .setTargetFrameRate(android.util.Range(60, 60))  // Target 60fps for 2x throughput
+                    // Note: setTargetFrameRate may not be available in all CameraX versions
+                    // Frame rate will be automatically optimized by the camera
                     .build()
                     .also {
-                        it.setAnalyzer(cameraExecutor, QrStreamAnalyzer(this) { payload ->
+                        it.setAnalyzer(cameraExecutor, QrStreamAnalyzer(this@ScanActivity) { payload ->
                             runOnUiThread { handleFrame(payload) }
                         })
                     }

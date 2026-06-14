@@ -164,8 +164,6 @@ class ReceiverSessionManager {
             metaConfirmed = o.optBoolean("meta_confirmed", false)
         )
     }
-        )
-    }
 
     companion object {
         const val MAGIC = 0x4554
