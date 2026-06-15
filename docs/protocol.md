@@ -72,17 +72,47 @@ session_id = FNV1a_128(
 
 ### 描述符载荷布局（1024B 内）
 
+**协议 v3 格式**（当前版本）：
+
 | 偏移 | 长度 | 字段 | 说明 |
 |------|------|------|------|
 | 0 | 1 | magic | `0xD5` |
-| 1 | 1 | version | `1` |
+| 1 | 1 | version | `3` |
 | 2 | 2 | num_blocks | u16 BE |
-| 4 | 8 | transfer_length | u64 BE |
+| 4 | 8 | transfer_length | u64 BE（压缩后大小） |
 | 12 | 4 | symbol_size | u32 BE |
 | 16 | 12 | oti_bytes | RFC 6330 OTI（12B 线格式） |
 | 28 | 16×B | blocks[] | 每块：sbn(u32) + num_source_symbols(u32) + block_length(u64) |
+| 28+16B | 1 | compression | u8：`0`=无压缩, `1`=Zstd, `2`=XZ |
+| 29+16B | 8 | compressed_size | u64 BE（压缩后负载大小） |
+| 37+16B | 4 | original_crc32 | u32 BE（原始文件 CRC32） |
+| 41+16B | 变长 | filename | UTF-8 文件名（剩余字节） |
 
-固定开销 28 字节 + 每块 16 字节。对数百块以内的文件，轻松装入 1024B 符号。
+**v3 扩展尾部**（compression + compressed_size + original_crc32 + filename）按可用长度解析，因此 v2 接收端可读取 v3 描述符（忽略尾部扩展）。
+
+固定开销 28 字节 + 每块 16 字节 + v3 尾部 13 字节。对数百块以内的文件，轻松装入 1024B 符号。
+
+## 压缩 (Compression)
+
+发送端在 RaptorQ 编码前对文件进行压缩，压缩算法标签由描述符帧携带（`compression` 字段），接收端在 RaptorQ 恢复后按标签解压。
+
+### 算法标签
+
+| 标签值 | 算法 | 说明 |
+|--------|------|------|
+| `0` | 无压缩 (Raw) | 原始字节直传 |
+| `1` | Zstd | 压缩等级 22（最大） |
+| `2` | XZ / LZMA2 | 浏览器端压缩等级 9，Rust 解压端兼容 |
+
+### 三算法选优策略（浏览器端）
+
+浏览器发送端对每个文件同时运行多个压缩候选，选取最小结果：
+
+1. **Raw**：始终作为候选
+2. **Zstd Lv22**：始终运行
+3. **Xz Lv9**：仅当 Zstd 压缩率 < 95% 时运行（95% early-exit 启发式，跳过已压缩文件如 JPEG/MP4 的慢速 Xz 压缩）
+
+最终选取所有已运行候选中体积最小的算法，标签写入描述符帧。
 
 ## RaptorQ 符号坐标
 

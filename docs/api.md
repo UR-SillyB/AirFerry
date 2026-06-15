@@ -53,9 +53,14 @@ pub fn encode(data: &[u8]) -> Result<QrMatrix>;  // Version 40 / L
 // 会话 ID
 pub fn derive(name, size, mtime, fingerprint) -> SessionId;
 
-// 压缩（native/Android only）
-pub fn compress(data: &[u8], level: i32) -> Result<Vec<u8>>;
-pub fn decompress(data: &[u8]) -> Result<Vec<u8>>;
+// 压缩（native/Android only；浏览器端在 TS 层实现）
+// 算法标签：0=None, 1=Zstd, 2=XZ
+pub const COMPRESSION_NONE: u8 = 0;
+pub const COMPRESSION_ZSTD: u8 = 1;
+pub const COMPRESSION_XZ: u8 = 2;
+
+pub fn compress_with(data: &[u8], compression: u8) -> Result<Vec<u8>>;
+pub fn decompress_with(data: &[u8], compression: u8) -> Result<Vec<u8>>;
 ```
 
 ### transfer-engine
@@ -64,7 +69,12 @@ pub fn decompress(data: &[u8]) -> Result<Vec<u8>>;
 // 发送端
 pub struct SenderSession { ... }
 impl SenderSession {
-    pub fn new(payload: &[u8], session_id: SessionId, config: SenderConfig) -> Result<Self>;
+    pub fn new(
+        payload: &[u8],          // 已压缩的负载
+        session_id: SessionId,
+        config: SenderConfig,
+        file_meta: FileMeta,      // 文件名、大小、CRC32、压缩标签
+    ) -> Result<Self>;
     pub fn next_frame(&mut self) -> Result<Frame>;  // 无限循环
     pub fn stats(&self) -> Stats;
 }
@@ -82,6 +92,16 @@ impl ReceiverSession {
     pub fn is_complete(&self) -> bool;
     pub fn assemble(&self) -> Option<Vec<u8>>;
     pub fn progress(&self) -> &Progress;
+}
+
+// 文件元数据（携带压缩标签）
+pub struct FileMeta {
+    pub filename: String,
+    pub original_size: u64,
+    pub crc32: u32,
+    pub compression: u8,           // 0=None, 1=Zstd, 2=XZ
+    pub compressed_size: u64,
+    pub compressed_size_known: bool,
 }
 ```
 

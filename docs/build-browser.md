@@ -4,7 +4,7 @@
 
 - Node.js ≥ 18
 - npm（或 pnpm）
-- Rust + wasm-pack（见 [dev-setup.md](dev-setup.md)）
+- Rust + wasm-pack（见 [开发环境搭建](dev-setup.md)）
 
 ## 构建 WASM 核心
 
@@ -17,15 +17,38 @@ npm run wasm
 
 ## 构建扩展
 
-```bash
-# Chrome (MV3)
-npm run build
+### 全部目标（推荐）
 
-# Edge (MV3)
-npm run build:edge
+```bash
+cd apps/browser-extension
+npm run build
 ```
 
-产物：`build/chrome-mv3-prod/`（或 `edge-mv3-prod/`）。
+一次性构建全部 4 个目标：
+
+| 目标 | 产物目录 | 支持浏览器 |
+|------|---------|-----------|
+| `chrome-mv3-prod` | Chrome / Edge（MV3） | Chrome 88+, Edge 88+ |
+| `chrome-mv2-prod` | Chrome / Edge（MV2 遗留） | 旧版 Chrome / Edge |
+| `firefox-mv3-prod` | Firefox（MV3） | Firefox 109+ |
+| `firefox-mv2-prod` | Firefox（MV2 遗留） | Firefox 91+ |
+
+### 单独构建某个目标
+
+```bash
+npm run build:chrome-mv3    # Chrome / Edge MV3
+npm run build:chrome-mv2    # Chrome / Edge MV2
+npm run build:firefox-mv3   # Firefox MV3
+npm run build:firefox-mv2   # Firefox MV2
+```
+
+### 构建后处理
+
+`scripts/fix-manifest.cjs` 会自动执行以下修正：
+- MV2：移除无效的 `action` 字段，保留 `browser_action`
+- MV2：CSP 改为 `wasm-eval`（MV3 的 `wasm-unsafe-eval` 在 MV2 中不支持）
+- Firefox：添加 `browser_specific_settings.gecko.id`
+- 修补 HTML `<title>` 标签
 
 ## 开发模式
 
@@ -42,21 +65,19 @@ Plasmo 启动 HMR 开发服务器，自动重载扩展。
 1. 打开 `chrome://extensions`（或 `edge://extensions`）
 2. 开启「开发者模式」
 3. 点击「加载已解压的扩展程序」
-4. 选择 `build/chrome-mv3-prod/` 目录
+4. 选择 `build/chrome-mv3-prod/`（或 `build/chrome-mv2-prod/`）目录
+
+### Firefox
+
+1. 打开 `about:debugging#/runtime/this-firefox`
+2. 点击「临时载入附加组件」
+3. 选择 `build/firefox-mv3-prod/manifest.json`（或 MV2）
 
 ### 使用
 
-1. 点击工具栏 EasyTransfer 图标 → 弹出窗口
-2. 点击「打开发送端」→ 在新标签页打开完整应用
+1. 点击工具栏易传图标 → 弹出窗口
+2. 点击「开始发送文件」→ 在新标签页打开完整应用
 3. 选择文件 → 设置参数 → 开始播放二维码视频流
-
-## 打包发布
-
-```bash
-npm run package
-```
-
-生成可上传到 Chrome Web Store 的 `.zip` 包。
 
 ## 项目结构
 
@@ -64,23 +85,28 @@ npm run package
 apps/browser-extension/
 ├── package.json
 ├── tsconfig.json
+├── scripts/
+│   ├── build-all.cjs           # 全量构建脚本（4 目标）
+│   ├── fix-manifest.cjs        # MV2/Firefox manifest 修正
+│   └── extract-lzma-wasm.cjs   # lzma-wasm base64 → .wasm 提取
 ├── src/
-│   ├── popup.tsx              # 工具栏弹出窗口
-│   ├── options.tsx            # 完整应用（4 页面路由）
-│   ├── pages/                 # 4 个页面组件
+│   ├── popup.tsx               # 工具栏弹出窗口
+│   ├── options.tsx             # 完整应用（4 页面路由）
+│   ├── pages/                  # 4 个页面组件
 │   │   ├── FileSelectPage.tsx
 │   │   ├── ParamsPage.tsx
 │   │   ├── PlayPage.tsx
 │   │   └── StatsPage.tsx
 │   ├── components/
-│   │   └── QrStream.tsx       # QR 视频流渲染器
+│   │   └── QrStream.tsx        # QR 视频流渲染器
 │   ├── wasm/
-│   │   ├── loader.ts          # WASM 加载
-│   │   ├── compress.ts        # 压缩
-│   │   └── session.ts         # 会话 ID 派生
-│   ├── types.ts               # 共享类型
+│   │   ├── loader.ts           # WASM 加载
+│   │   ├── compress.ts         # 三算法选优压缩
+│   │   ├── crc32.ts            # CRC32 计算
+│   │   └── session.ts          # 会话 ID 派生
+│   ├── types.ts                # 共享类型
 │   └── assets/
-│       └── app.css            # 样式
-├── wasm-pkg/                  # wasm-pack 产物（generated）
-└── assets/                    # 图标
+│       └── app.css             # 样式
+├── wasm-pkg/                   # wasm-pack 产物（generated）
+└── assets/                     # 图标
 ```

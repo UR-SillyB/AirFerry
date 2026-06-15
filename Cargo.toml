@@ -7,11 +7,11 @@ members = [
 ]
 
 [workspace.package]
-version = "0.3.0"
+version = "1.0.0"
 edition = "2021"
 rust-version = "1.75"
 license = "MIT"
-repository = "https://github.com/b1456089826/EasyTransfer"
+repository = "https://github.com/UR-SillyB/EasyTransfer"
 description = "Fully offline optical file transfer: browser-extension sender <-> Android receiver via QR video stream."
 
 [workspace.dependencies]

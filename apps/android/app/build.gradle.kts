@@ -11,8 +11,8 @@ android {
         applicationId = "com.easytransfer.app"
         minSdk = 29          // Android 10+
         targetSdk = 34
-        versionCode = 3
-        versionName = "0.3.0"
+        versionCode = 4
+        versionName = "1.0.0"
 
         // Native build: ZXing-C++ via CMake + JNI bridge.
         externalNativeBuild {

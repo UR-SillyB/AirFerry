@@ -1,10 +1,10 @@
-# EasyTransfer
+# 易传 EasyTransfer
 
 > 完全离线的光学文件传输系统 · Fully Offline Optical File Transfer
 
 通过**屏幕二维码视频流 + 手机摄像头扫描**完成文件传输，不依赖互联网、局域网、蓝牙、USB、NFC 等任何通信通道。适用于 Air-Gap（隔离网络）场景。
 
-- **发送端**：Chrome / Edge 浏览器扩展（Manifest V3）
+- **发送端**：浏览器扩展（Chrome / Edge / Firefox，支持 MV2 与 MV3）
 - **接收端**：Android 原生 App
 - **核心库**：Rust，同时编译为 **WebAssembly**（浏览器插件）与 **Android Native Library**（JNI 调用），保证两端编解码逻辑完全一致
 
@@ -13,11 +13,12 @@
 ```
 发送端                                          接收端
 文件                                             摄像头视频流
-  │ Zstd 压缩                                     │
+  │ 三算法选优压缩 (Raw / Zstd / XZ)              │
   ├─ 分块                                         │
   ├─ RaptorQ 编码 (RFC 6330)                      │
   ├─ QR 帧生成 ───────── 屏幕二维码视频流 ────────► QR 解码 (ZXing-C++)
   └─ 连续播放                                       ├─ RaptorQ 恢复
+                                                   ├─ 解压缩
                                                    ├─ 文件重组
                                                    └─ 文件保存
 ```
@@ -30,6 +31,27 @@
 - ✅ 连续二维码视频流（30 / 60 fps）
 - ✅ Air-Gap 场景，零网络依赖
 - ✅ 单向信道，无需回传确认
+- ✅ 三算法选优压缩（Raw / Zstd Lv22 / Xz Lv9），自动选取最小结果
+- ✅ 多浏览器支持（Chrome / Edge / Firefox，MV2 + MV3）
+
+## 下载安装
+
+### Android 接收端
+
+从 [GitHub Release](https://github.com/UR-SillyB/EasyTransfer/releases) 下载 APK，安装到 Android 10+ 设备。
+
+### 浏览器扩展
+
+从 [GitHub Release](https://github.com/UR-SillyB/EasyTransfer/releases) 下载对应浏览器的插件目录：
+
+| 浏览器 | 目录 |
+|--------|------|
+| Chrome / Edge (MV3) | `easytransfer-chrome-mv3` |
+| Chrome / Edge (MV2) | `easytransfer-chrome-mv2` |
+| Firefox (MV3) | `easytransfer-firefox-mv3` |
+| Firefox (MV2) | `easytransfer-firefox-mv2` |
+
+**安装方法**：解压后在浏览器的「开发者模式 / 调试模式」中「加载已解压的扩展程序」，选择对应目录。
 
 ## 仓库结构
 
@@ -42,19 +64,38 @@ EasyTransfer/
 ├── apps/
 │   ├── browser-extension/ # Plasmo + React + TS + Vite + WASM 发送端
 │   └── android/           # Kotlin + CameraX + ZXing-C++ 接收端
-└── docs/                  # 协议 / 架构 / API / 构建说明
+├── docs/                  # 协议 / 架构 / API / 构建说明（中文）
+└── Cargo.toml             # Rust workspace 根配置
 ```
 
 ## 快速开始
 
-详见 [docs/dev-setup.md](docs/dev-setup.md)。各端构建说明：
-- 核心库：`cargo build` / `cargo test`
-- 浏览器扩展：见 [docs/build-browser.md](docs/build-browser.md)
-- Android App：见 [docs/build-android.md](docs/build-android.md)
+详见 [开发环境搭建](docs/dev-setup.md)。各端构建说明：
 
-## 协议规范
+| 组件 | 命令 | 说明 |
+|------|------|------|
+| 核心库 | `cargo build` / `cargo test` | Rust workspace |
+| 浏览器扩展 | `npm run build` | 构建全部 4 个目标 |
+| Android App | `./gradlew assembleDebug` | 需要 Android NDK |
 
-见 [docs/protocol.md](docs/protocol.md) 与 [docs/qr-frame-format.md](docs/qr-frame-format.md)。
+## 技术架构
+
+- **编码层**：RaptorQ 喷泉码（RFC 6330），发送端无限循环发送，接收端可随时加入
+- **压缩层**：三算法选优（Raw / Zstd Lv22 / Xz Lv9），95% Zstd early-exit 启发式跳过慢速 Xz
+- **传输层**：60 字节帧头 + 1024 字节负载 + 4 字节 CRC，编码为 Version-40/L 二维码
+- **协议层**：Descriptor 帧携带 OTI + 文件元数据（文件名、大小、CRC32、压缩标签）
+
+## 文档
+
+- [协议规范](docs/protocol.md) — 完整协议描述
+- [二维码帧格式](docs/qr-frame-format.md) — 帧头字段定义
+- [RaptorQ 参数](docs/raptorq-params.md) — 编解码参数说明
+- [架构设计](docs/architecture.md) — 系统架构与组件关系
+- [数据流](docs/data-flow.md) — 端到端数据流详解
+- [API 参考](docs/api.md) — 核心 API 文档
+- [构建指南 - 浏览器扩展](docs/build-browser.md)
+- [构建指南 - Android](docs/build-android.md)
+- [开发环境搭建](docs/dev-setup.md)
 
 ## 许可证
 
