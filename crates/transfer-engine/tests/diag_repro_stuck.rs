@@ -32,6 +32,7 @@ fn run_android_path(size: usize, redundancy: u8, label: &str) {
         crc32: 0,
         compression: qr_protocol::compress::COMPRESSION_NONE,
         compressed_size: size as u64,
+        compressed_size_known: true,
     };
     let mut sender = SenderSession::new(
         &data,

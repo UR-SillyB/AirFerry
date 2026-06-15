@@ -50,7 +50,7 @@ impl SenderSessionWasm {
         compression: u8,
     ) -> Result<SenderSessionWasm, JsValue> {
         _start();
-        let sid = SessionId(((session_id_hi as u128) << 64) | session_id_lo as u128);
+        let sid = SessionId(((session_id_hi as u64 as u128) << 64) | session_id_lo as u64 as u128);
         let cfg = SenderConfig {
             codec: Config { symbol_size },
             redundancy_pct,

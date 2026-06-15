@@ -2,7 +2,7 @@
  * EasyTransfer sender app — single full-tab page with internal routing across
  * the four required screens: file select → params → play → stats.
  */
-import { useState, useCallback } from "react"
+import { useState, useCallback, useEffect } from "react"
 import "@/assets/app.css"
 import { ensureWasm, SenderSessionWasm } from "@/wasm/loader"
 import { deriveSessionId, contentFingerprint } from "@/wasm/session"
@@ -34,6 +34,10 @@ export interface AppState {
 }
 
 export default function App() {
+  useEffect(() => {
+    document.title = "易传 · 文件传输"
+  }, [])
+
   const [state, setState] = useState<AppState>({
     page: "select",
     file: null,

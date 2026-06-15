@@ -80,6 +80,11 @@ pub struct Progress {
     pub total_blocks: u32,
     /// Whether metadata has been confirmed via descriptor frame.
     pub meta_confirmed: bool,
+    /// Number of consecutive session-mismatch errors since the last accepted
+    /// frame (reset to 0 when a frame is accepted).  Used by the JNI layer to
+    /// signal the Kotlin side that the receiver was likely initialised from a
+    /// corrupted first QR decode and should be re-created.
+    pub session_mismatch_streak: u32,
 }
 
 impl Progress {

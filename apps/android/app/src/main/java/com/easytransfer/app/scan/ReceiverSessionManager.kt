@@ -42,7 +42,8 @@ class ReceiverSessionManager {
         val decodedFraction: Double,
         val lossRatio: Double,
         val complete: Boolean,
-        val metaConfirmed: Boolean
+        val metaConfirmed: Boolean,
+        val sessionMismatchStreak: Int
     )
 
     private var handle: Long = 0L
@@ -51,6 +52,10 @@ class ReceiverSessionManager {
     private var symbolSize: Int = 0
     private var initialized: Boolean = false
     private var estimatedTotalSymbols: Int = 0
+    /// Consecutive mismatch count seen by Kotlin (driven from Rust streak).
+    private var mismatchStreak: Int = 0
+    /// True once at least one symbol has been accepted (no re-init after that).
+    private var everAccepted: Boolean = false
 
     val isInitialized: Boolean get() = initialized
 
@@ -77,7 +82,19 @@ class ReceiverSessionManager {
         )
     }
 
-    /** Ingest a decoded QR payload. Lazily initializes the native receiver. */
+    /** Ingest a decoded QR payload.
+     *
+     * The native receiver is **only** initialised from a descriptor frame
+     * (FLAG_DESCRIPTOR).  Ordinary data frames are silently dropped until a
+     * descriptor arrives.  This prevents a corrupted first QR decode (which
+     * only passes magic+version but has a garbage session_id) from permanently
+     * locking out every subsequent correct frame.
+     *
+     * Once initialised, a persistent session-mismatch streak with zero
+     * accepted symbols triggers a forced re-init from the next descriptor that
+     * arrives — covering the edge-case where the first descriptor itself was
+     * corrupted but a later one is clean.
+     */
     fun ingest(frameBytes: ByteArray): Progress? {
         val header = parseHeader(frameBytes) ?: return null
 
@@ -86,28 +103,62 @@ class ReceiverSessionManager {
             estimatedTotalSymbols = header.totalSymbols
         }
 
+        val isDescriptor = (header.flags and FLAG_DESCRIPTOR) != 0
+
+        // --- Lazy init: only from descriptor frames ---
         if (!initialized) {
-            sessionIdLo = header.sessionIdLo
-            sessionIdHi = header.sessionIdHi
-            symbolSize = if (header.symbolSize > 0) header.symbolSize else 1024
-            handle = NativeBridge.receiverCreate(
-                sessionIdLo, sessionIdHi,
-                header.totalBlocks, header.totalSymbols, symbolSize
-            )
-            initialized = handle != 0L
+            if (!isDescriptor) return null  // wait for a descriptor
+            createReceiver(header)
+            if (!initialized) return null
         }
 
-        if (!initialized) return null
+        // --- Session-mismatch re-init ---
+        // If streak is high and nothing was ever accepted, the initial
+        // descriptor was likely corrupted.  Destroy and wait for a fresh one.
+        if (initialized && !isDescriptor && mismatchStreak >= 3 && !everAccepted) {
+            destroy()
+            return null  // will re-init on next descriptor
+        }
 
-        // receiverIngest now returns a freshly-allocated byte[] (progress JSON +
-        // trailing NUL) instead of writing into a fixed-size buffer, which used
-        // to truncate on long transfers and stall the UI at 0%.
+        // If we're waiting for re-init, only accept descriptors
+        if (!initialized) {
+            if (!isDescriptor) return null
+            createReceiver(header)
+            if (!initialized) return null
+        }
+
+        // receiverIngest returns a freshly-allocated byte[] (progress JSON +
+        // trailing NUL). On error (corrupted frame) it returns empty.
         val jsonBytes = NativeBridge.receiverIngest(handle, frameBytes) ?: return null
         if (jsonBytes.isEmpty()) return null
         val nul = jsonBytes.indexOf(0)
         val len = if (nul >= 0) nul else jsonBytes.size
         val json = String(jsonBytes, 0, len)
-        return parseProgress(json)
+        val progress = parseProgress(json)
+
+        // Track mismatch streak for re-init logic above.
+        if (progress.sessionMismatchStreak >= 3) {
+            mismatchStreak = progress.sessionMismatchStreak
+        } else if (progress.receivedSymbols > 0) {
+            everAccepted = true
+            mismatchStreak = 0
+        }
+
+        return progress
+    }
+
+    /** Create (or re-create) the native receiver from a parsed frame header. */
+    private fun createReceiver(header: FrameHeader) {
+        sessionIdLo = header.sessionIdLo
+        sessionIdHi = header.sessionIdHi
+        symbolSize = if (header.symbolSize > 0) header.symbolSize else 1024
+        handle = NativeBridge.receiverCreate(
+            sessionIdLo, sessionIdHi,
+            header.totalBlocks, header.totalSymbols, symbolSize
+        )
+        initialized = handle != 0L
+        mismatchStreak = 0
+        everAccepted = false
     }
 
     fun isComplete(): Boolean =
@@ -169,7 +220,8 @@ class ReceiverSessionManager {
             decodedFraction = o.optDouble("decoded_fraction"),
             lossRatio = o.optDouble("loss_ratio"),
             complete = o.optBoolean("complete"),
-            metaConfirmed = o.optBoolean("meta_confirmed", false)
+            metaConfirmed = o.optBoolean("meta_confirmed", false),
+            sessionMismatchStreak = o.optInt("session_mismatch_streak", 0)
         )
     }
 

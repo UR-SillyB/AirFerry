@@ -31,6 +31,8 @@ pub struct ReceiverSession {
     received: Vec<HashSet<u32>>,
     symbol_cache: HashMap<(u32, u32), Vec<u8>>,
     progress: Progress,
+    /// Consecutive session-mismatch count (reset on successful ingest).
+    session_mismatch_streak: u32,
     /// Cached symbol_size from the frame header for approximate progress while
     /// `meta` is still `None`. Harmless to keep; only read before confirmation.
     pending_symbol_size: u32,
@@ -82,6 +84,7 @@ impl ReceiverSession {
             symbol_cache: HashMap::new(),
             progress,
             pending_symbol_size: symbol_size,
+            session_mismatch_streak: 0,
         }
     }
 
@@ -132,11 +135,15 @@ impl ReceiverSession {
     ///   and fed to the RaptorQ decoder.
     pub fn ingest(&mut self, frame: Frame) -> Result<bool> {
         if frame.header.session_id != self.session_id {
+            self.session_mismatch_streak += 1;
+            self.progress.session_mismatch_streak = self.session_mismatch_streak;
             return Err(Error::SessionMismatch {
                 expected: self.session_id,
                 got: frame.header.session_id,
             });
         }
+        self.session_mismatch_streak = 0;
+        self.progress.session_mismatch_streak = 0;
         self.progress.frames_seen += 1;
 
         // Descriptor frame: adopt authoritative metadata + file meta.

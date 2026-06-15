@@ -33,6 +33,9 @@
     "permissions": [
       "storage"
     ],
+    "action": {
+      "default_title": "易传 - 离线文件传输"
+    },
     "content_security_policy": {
       "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
     }

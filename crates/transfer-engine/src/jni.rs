@@ -23,7 +23,8 @@ pub extern "system" fn Java_com_easytransfer_app_nativelib_NativeBridge_receiver
     total_symbols: jint,
     symbol_size: jint,
 ) -> jlong {
-    let sid: SessionIdRaw = ((session_id_hi as u128) << 64) | session_id_lo as u128;
+    let sid: SessionIdRaw =
+        ((session_id_hi as u64 as u128) << 64) | (session_id_lo as u64 as u128);
     let meta = derive_meta_from_totals(
         total_blocks as u32,
         total_symbols as u32,
@@ -105,9 +106,10 @@ pub extern "system" fn Java_com_easytransfer_app_nativelib_NativeBridge_receiver
             // frame_index to avoid flooding logcat.
             if p.frames_seen <= 3 || is_descriptor || (p.frames_seen % 50 == 0 && !session.is_complete()) {
                 android_log(&format!(
-                    "f={} desc={} meta={} recv={} dec={} {}/{}",
+                    "f={} desc={} meta={} recv={} dec={} {}/{} mismatch={}",
                     p.frames_seen, is_descriptor, p.meta_confirmed,
-                    p.received_symbols, p.decoded_blocks, p.decoded_symbols, p.total_symbols
+                    p.received_symbols, p.decoded_blocks, p.decoded_symbols, p.total_symbols,
+                    p.session_mismatch_streak
                 ));
             }
             let json = progress_json(&session.progress());
@@ -239,7 +241,7 @@ pub extern "system" fn Java_com_easytransfer_app_nativelib_NativeBridge_receiver
 
 fn progress_json(p: &Progress) -> String {
     format!(
-        r#"{{"decoded_symbols":{},"total_symbols":{},"received_symbols":{},"frames_seen":{},"frames_duplicate":{},"frames_corrupt":{},"decoded_blocks":{},"total_blocks":{},"decoded_fraction":{:.4},"loss_ratio":{:.4},"complete":{},"meta_confirmed":{}}}"#,
+        r#"{{"decoded_symbols":{},"total_symbols":{},"received_symbols":{},"frames_seen":{},"frames_duplicate":{},"frames_corrupt":{},"decoded_blocks":{},"total_blocks":{},"decoded_fraction":{:.4},"loss_ratio":{:.4},"complete":{},"meta_confirmed":{},"session_mismatch_streak":{}}}"#,
         p.decoded_symbols,
         p.total_symbols,
         p.received_symbols,
@@ -251,7 +253,8 @@ fn progress_json(p: &Progress) -> String {
         p.decoded_fraction(),
         p.loss_ratio(),
         p.is_complete(),
-        p.meta_confirmed
+        p.meta_confirmed,
+        p.session_mismatch_streak
     )
 }
 
