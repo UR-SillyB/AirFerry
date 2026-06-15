@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- cacheDir: ScanActivity writes recovered_*.bin temp files here -->
+    <cache-path name="cache" path="." />
+    <!-- getExternalFilesDir(null)/received: copyToReceivedDir target -->
+    <external-files-path name="received" path="received/" />
+</paths>

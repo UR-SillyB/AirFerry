@@ -14,6 +14,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -24,6 +25,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.FileProvider
 import java.io.File
 
 private val BgDark = Color(0xFF0F172A)
@@ -143,6 +145,26 @@ class ReceiveDetailActivity : ComponentActivity() {
 
             Spacer(modifier = Modifier.height(24.dp))
 
+            // Share button — share the recovered file directly without saving
+            Button(
+                onClick = {
+                    if (fileExists) {
+                        shareFile()
+                    } else {
+                        Toast.makeText(this@ReceiveDetailActivity, "没有可分享的文件", Toast.LENGTH_SHORT).show()
+                    }
+                },
+                modifier = Modifier.fillMaxWidth().height(50.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = Success),
+                shape = RoundedCornerShape(12.dp)
+            ) {
+                Icon(Icons.Default.Share, contentDescription = null, modifier = Modifier.size(20.dp))
+                Spacer(modifier = Modifier.width(8.dp))
+                Text("分享", fontSize = 16.sp)
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
             // Save button
             Button(
                 onClick = {
@@ -192,6 +214,28 @@ class ReceiveDetailActivity : ComponentActivity() {
             Toast.makeText(this, "已保存", Toast.LENGTH_SHORT).show()
         } catch (e: Exception) {
             Toast.makeText(this, "保存失败: ${e.message}", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    /**
+     * Share the recovered file directly via ACTION_SEND without requiring
+     * the user to save it first.  Uses FileProvider to securely expose the
+     * temp file (cacheDir/recovered_*.bin) to other apps.
+     */
+    private fun shareFile() {
+        try {
+            val src = recoveredFile ?: return
+            val authority = "${packageName}.fileprovider"
+            val uri = FileProvider.getUriForFile(this, authority, src)
+            val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                type = "application/octet-stream"
+                putExtra(Intent.EXTRA_STREAM, uri)
+                putExtra(Intent.EXTRA_TITLE, fileName)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            startActivity(Intent.createChooser(shareIntent, "分享文件"))
+        } catch (e: Exception) {
+            Toast.makeText(this, "分享失败: ${e.message}", Toast.LENGTH_LONG).show()
         }
     }
 
