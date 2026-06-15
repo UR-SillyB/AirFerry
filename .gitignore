@@ -44,3 +44,6 @@ Thumbs.db
 
 # Release packaging (artifacts published as GitHub release assets, not in git)
 release/
+
+# CRX signing private key (do not commit)
+*.pem

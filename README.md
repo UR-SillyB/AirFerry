@@ -36,22 +36,33 @@
 
 ## 下载安装
 
+最新版本发布在 [GitHub Release v1.0.0](https://github.com/UR-SillyB/EasyTransfer/releases/tag/v1.0.0)。
+
+| 文件 | 说明 |
+|------|------|
+| `easytransfer-android-v1.0.0.apk` | Android 接收端（Android 10+，arm64-v8a） |
+| `easytransfer-chrome-mv3-v1.0.0.crx` | Chrome / Edge MV3 扩展（已签名 Cr24） |
+| `easytransfer-chrome-mv2-v1.0.0.crx` | Chrome / Edge MV2 扩展（旧版兼容，已签名 Cr24） |
+| `easytransfer-firefox-mv3-v1.0.0.xpi` | Firefox MV3 扩展（Firefox 109+） |
+| `easytransfer-firefox-mv2-v1.0.0.xpi` | Firefox MV2 扩展（Firefox 91+） |
+
 ### Android 接收端
 
-从 [GitHub Release](https://github.com/UR-SillyB/EasyTransfer/releases) 下载 APK，安装到 Android 10+ 设备。
+下载 APK，允许「未知来源」后安装到 Android 10+ 设备。
 
-### 浏览器扩展
+### Chrome / Edge 扩展
 
-从 [GitHub Release](https://github.com/UR-SillyB/EasyTransfer/releases) 下载对应浏览器的插件目录：
+1. 下载对应 `.crx` 文件（MV3 为现代版本，MV2 供旧版浏览器兼容）
+2. 打开 `chrome://extensions`，右上角开启「开发者模式」
+3. 将 `.crx` 文件拖入浏览器窗口即可安装；也可将 `.crx` 解压后点击「加载已解压的扩展程序」
 
-| 浏览器 | 目录 |
-|--------|------|
-| Chrome / Edge (MV3) | `easytransfer-chrome-mv3` |
-| Chrome / Edge (MV2) | `easytransfer-chrome-mv2` |
-| Firefox (MV3) | `easytransfer-firefox-mv3` |
-| Firefox (MV2) | `easytransfer-firefox-mv2` |
+> 注：新版 Chrome 可能因商店外安装拦截 `.crx`，此时使用「加载已解压的扩展程序」方式最稳定。
 
-**安装方法**：解压后在浏览器的「开发者模式 / 调试模式」中「加载已解压的扩展程序」，选择对应目录。
+### Firefox 扩展
+
+1. 下载对应 `.xpi` 文件（MV3 为 Firefox 109+，MV2 为 Firefox 91+）
+2. 打开 `about:addons` → 齿轮图标 → 「Install Add-on From File」选择 `.xpi`
+3. 或在 `about:debugging#/runtime/this-firefox` 中「Load Temporary Add-on」临时载入
 
 ## 仓库结构
 

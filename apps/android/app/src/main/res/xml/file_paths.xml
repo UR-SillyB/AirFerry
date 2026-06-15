@@ -2,6 +2,8 @@
 <paths>
     <!-- cacheDir: ScanActivity writes recovered_*.bin temp files here -->
     <cache-path name="cache" path="." />
+    <!-- cacheDir/share: renamed files for sharing with correct filename -->
+    <cache-path name="share" path="share/" />
     <!-- getExternalFilesDir(null)/received: copyToReceivedDir target -->
     <external-files-path name="received" path="received/" />
 </paths>

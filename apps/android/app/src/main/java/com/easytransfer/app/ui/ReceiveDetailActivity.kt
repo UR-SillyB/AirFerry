@@ -219,14 +219,23 @@ class ReceiveDetailActivity : ComponentActivity() {
 
     /**
      * Share the recovered file directly via ACTION_SEND without requiring
-     * the user to save it first.  Uses FileProvider to securely expose the
-     * temp file (cacheDir/recovered_*.bin) to other apps.
+     * the user to save it first.  Copies the temp file (recovered_*.bin)
+     * to a correctly-named file so the share target sees the real filename,
+     * then uses FileProvider to securely expose it.
      */
     private fun shareFile() {
         try {
             val src = recoveredFile ?: return
+            // Copy to a correctly-named file so the receiving app shows the
+            // real filename instead of "recovered_*.bin".
+            val safeName = fileName.replace(Regex("[^a-zA-Z0-9._\\u4e00-\\u9fff-]"), "_")
+            val shareDir = File(cacheDir, "share")
+            if (!shareDir.exists()) shareDir.mkdirs()
+            val shareFile = File(shareDir, safeName)
+            src.copyTo(shareFile, overwrite = true)
+
             val authority = "${packageName}.fileprovider"
-            val uri = FileProvider.getUriForFile(this, authority, src)
+            val uri = FileProvider.getUriForFile(this, authority, shareFile)
             val shareIntent = Intent(Intent.ACTION_SEND).apply {
                 type = "application/octet-stream"
                 putExtra(Intent.EXTRA_STREAM, uri)

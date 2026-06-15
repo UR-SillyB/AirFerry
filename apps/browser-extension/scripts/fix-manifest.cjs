@@ -32,14 +32,47 @@ const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf-8"));
 const isMV2 = manifest.manifest_version === 2;
 const isFirefox = target.includes("firefox");
 
-// 1. MV2: remove `action`, keep only `browser_action`.
-if (isMV2) {
-  if (manifest.browser_action && manifest.action) {
-    // Merge default_title into browser_action if not already present.
-    if (manifest.action.default_title && !manifest.browser_action.default_title) {
-      manifest.browser_action.default_title = manifest.action.default_title;
+// 1. Icons: copy the real RGBA icons from assets/ into the build dir and
+//    point the manifest at them. Plasmo generates tiny 1-bit placeholder
+//    icons (icon16.plasmo.*.png etc.) which look broken, so we overwrite the
+//    manifest.icon references with our own copied files.
+const iconAssetsDir = path.resolve(__dirname, "..", "assets");
+const icons = {
+  "16": "icon16.png",
+  "32": "icon32.png",
+  "48": "icon48.png",
+  "64": "icon64.png",
+  "128": "icon128.png",
+};
+
+for (const fname of Object.values(icons)) {
+  const src = path.join(iconAssetsDir, fname);
+  const dst = path.join(targetDir, fname);
+  if (fs.existsSync(src)) {
+    fs.copyFileSync(src, dst);
+    // Remove Plasmo placeholder icon for this size to avoid confusion.
+    const prefix = fname.replace(/\.png$/, "");
+    for (const f of fs.readdirSync(targetDir)) {
+      if (f.startsWith(`${prefix}.plasmo.`) && f.endsWith(".png")) {
+        fs.unlinkSync(path.join(targetDir, f));
+      }
     }
-    delete manifest.action;
+  }
+}
+
+manifest.icons = icons;
+
+if (isMV2) {
+  if (manifest.browser_action) {
+    manifest.browser_action.default_icon = icons;
+    manifest.browser_action.default_title = "易传 - 离线文件传输";
+  }
+  if (manifest.action) delete manifest.action;
+} else {
+  // MV3: ensure action.default_icon is set
+  if (manifest.action) {
+    manifest.action.default_icon = icons;
+    manifest.action.default_title = "易传 - 离线文件传输";
   }
 }
 
