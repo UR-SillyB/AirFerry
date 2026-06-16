@@ -11,7 +11,14 @@ export interface TransferConfig {
 }
 
 export const DEFAULT_CONFIG: TransferConfig = {
-  redundancyPct: 10,
+  // 25% redundancy: a better default than 10% for real-world scanning where
+  // the receiver often reports 30–50% frame loss. RaptorQ needs K unique
+  // symbols per block to decode; at 40% loss the receiver keeps ~60% of each
+  // pass, so a single pass yields ~0.6×(1+R/100)×K usable symbols. With 10%
+  // redundancy that's only ~0.66×K (forces 2 full passes); 25% gives more
+  // headroom for bursty loss without wasting as much as 50%. Tune up for
+  // higher-loss links, down for clean ones.
+  redundancyPct: 25,
   // 30fps (not 60): a QR needs to stay on screen long enough for the receiver
   // camera to capture a clean frame. 60fps showed each frame ~16ms — too brief
   // for reliable capture, so large files never accumulated enough symbols and

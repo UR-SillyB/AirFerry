@@ -21,7 +21,15 @@ impl Default for SenderConfig {
     fn default() -> Self {
         Self {
             codec: Config::default(),
-            redundancy_pct: 10,
+            // 25% redundancy is a better all-round default than 10% under real
+            // camera-scan conditions, where the receiver commonly reports
+            // 30–50% frame loss. RaptorQ only needs K unique symbols to decode
+            // a block, and at 40% loss the receiver keeps ~60% of each pass —
+            // so a single pass yields ~0.6×(1+R/100)×K usable symbols. A low
+            // 10% redundancy means almost no slack (0.66×K), forcing two full
+            // passes to recover. 25% gives headroom for bursty loss without
+            // crossing into diminishing-returns territory (>50%).
+            redundancy_pct: 25,
         }
     }
 }
@@ -93,7 +101,14 @@ impl SenderSession {
             plan,
             cursor: 0,
             frame_index: 0,
-            descriptor_interval: 5,  // Reduced from 15 to 5 for faster metadata confirmation
+            // Descriptor every ~16 frames (~0.5s at 30fps). Each descriptor is a
+            // full frame that carries no source data, so it is pure overhead:
+            // the old value of 5 wasted ~20% of the channel on metadata at
+            // exactly the time (high frame loss) when every data frame counts.
+            // A receiver needs just *one* descriptor to join, and the fountain
+            // stream loops forever, so 0.5s is still a fast rejoin cadence
+            // while reclaiming ~15% of the wire for real symbols.
+            descriptor_interval: 16,
             started: false,
             start_ms: 0,            // Set on first next_frame() call
             stats: Stats::default(),
@@ -212,19 +227,33 @@ impl SenderSession {
 
 /// Build the ordered (sbn, esi) list for one full pass.
 ///
-/// Strategy: walk blocks; for each block emit all K source symbols first
-/// (they decode fastest), then emit the block's repair symbols. Interleaving
-/// repair symbols *across* blocks is more robust to bursty loss of the last
-/// blocks, so we interleave repair symbols block-round-robin at the tail.
+/// Strategy: emit source symbols **round-robin across blocks** (esi 0 of every
+/// block, then esi 1 of every block, …), then emit repair symbols the same way.
+/// Round-robin interleaving is more robust to bursty loss: at 40% loss the
+/// receiver tends to drop runs of consecutive frames, and the old block-major
+/// order meant a single burst could wipe a whole swath of one block's symbols
+/// while other blocks were already complete — leaving that block stranded until
+/// the next full pass. With round-robin, every burst is spread thinly across
+/// all blocks, so each block advances roughly in lockstep and hits its decode
+/// threshold together.
 fn build_emission_plan(meta: &ObjectMeta, total_k: u32, redundancy_pct: u8) -> Vec<(u32, u32)> {
     let mut plan: Vec<(u32, u32)> = Vec::with_capacity(total_k as usize);
-    // 1. All source symbols, block by block.
-    for b in &meta.blocks {
-        for esi in 0..b.num_source_symbols {
-            plan.push((b.sbn, esi));
+    // 1. Source symbols, round-robin across blocks (esi-major, not block-major).
+    //    For each esi index, emit (sbn, esi) for every block that has that esi.
+    let max_k = meta
+        .blocks
+        .iter()
+        .map(|b| b.num_source_symbols)
+        .max()
+        .unwrap_or(0);
+    for esi in 0..max_k {
+        for b in &meta.blocks {
+            if esi < b.num_source_symbols {
+                plan.push((b.sbn, esi));
+            }
         }
     }
-    // 2. Repair symbols, round-robin across blocks.
+    // 2. Repair symbols, round-robin across blocks (same rationale).
     let per_block_repair = |k: u32| -> u32 {
         if k == 0 {
             0
@@ -309,5 +338,58 @@ mod tests {
             *esi >= k
         }).count();
         assert!(repair_count > 0);
+    }
+
+    /// Source symbols must be interleaved round-robin across blocks (esi-major
+    /// order), not emitted block-major. This is the burst-loss optimisation:
+    /// with the old block-major order a single burst of dropped frames could
+    /// starve one block while others were already complete. Round-robin spreads
+    /// each burst thinly so every block advances together.
+    #[test]
+    fn source_symbols_interleaved_across_blocks() {
+        use raptorq_core::{ObjectMeta, SourceBlockMeta};
+        // Hand-build a 3-block object so the test does not depend on the
+        // raptorq library's (length-dependent) block-partitioning heuristic,
+        // which only produces multiple blocks for very large payloads.
+        let meta = ObjectMeta {
+            transfer_length: 3 * 10 * 1024,
+            symbol_size: 1024,
+            oti_bytes: [0u8; 12],
+            blocks: vec![
+                SourceBlockMeta { sbn: 0, num_source_symbols: 10, block_length: 10 * 1024 },
+                SourceBlockMeta { sbn: 1, num_source_symbols: 10, block_length: 10 * 1024 },
+                SourceBlockMeta { sbn: 2, num_source_symbols: 10, block_length: 10 * 1024 },
+            ],
+        };
+        let total_k = 30;
+        let plan = build_emission_plan(&meta, total_k, 10);
+
+        // Source-symbol portion of the plan (esi < K_block).
+        let source_plan: Vec<(u32, u32)> = plan.into_iter()
+            .filter(|(sbn, esi)| (*esi as usize) < meta.blocks[*sbn as usize].num_source_symbols as usize)
+            .collect();
+
+        // Round-robin: first 3 symbols must be esi=0 of each of the 3 blocks.
+        let first_round = &source_plan[..3];
+        let sbns: std::collections::HashSet<u32> = first_round.iter().map(|(sbn, _)| *sbn).collect();
+        assert_eq!(sbns.len(), 3, "first round should cover all 3 blocks once, got {:?}", first_round);
+        assert!(first_round.iter().all(|(_, esi)| *esi == 0), "first round should all be esi=0");
+
+        // The old block-major order would emit sbn=0 ten times in a row.
+        // Round-robin must NOT — consecutive entries must differ in sbn.
+        let consecutive_same = first_round.windows(2).all(|w| w[0].0 == w[1].0);
+        assert!(!consecutive_same, "plan is block-major, not interleaved: {:?}", first_round);
+    }
+
+    /// The default descriptor interval should be high enough that descriptors
+    /// are a small fraction of the wire (each descriptor is pure overhead).
+    #[test]
+    fn default_descriptor_interval_is_efficient() {
+        let data = payload(50_000);
+        let s = SenderSession::new(&data, SessionId::zero(), SenderConfig::default(), test_file_meta()).unwrap();
+        // <=20% of the wire for descriptors means interval >= 5; we default to
+        // 16 (~6%), so this guards against accidentally dropping it back to the
+        // old wasteful 5.
+        assert!(s.descriptor_interval >= 16, "descriptor interval too low: {}", s.descriptor_interval);
     }
 }

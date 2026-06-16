@@ -2,8 +2,16 @@
 import type { TransferConfig } from "@/types"
 
 interface Props {
-  file: File | null
+  /** Files chosen by the user (1 or more). */
+  files: File[]
+  /** Display name for the transfer (single file name or "N个文件打包"). */
+  displayName: string
+  /** Total original (pre-compression) byte count of the transfer unit. */
+  originalSize: number
+  /** Compressed payload size in bytes. */
   compressedSize: number
+  /** Whether the payload is a multi-file bundle. */
+  isBundle: boolean
   config: TransferConfig
   onChange: (patch: Partial<TransferConfig>) => void
   onStart: () => void
@@ -27,26 +35,56 @@ function formatDuration(seconds: number): string {
   return `${Math.floor(m / 60)} 小时 ${m % 60} 分`
 }
 
-export function ParamsPage({ file, compressedSize, config, onChange, onStart, initializing }: Props) {
-  const ratio = file && file.size > 0 ? compressedSize / file.size : 1
+export function ParamsPage({
+  files,
+  displayName,
+  originalSize,
+  compressedSize,
+  isBundle,
+  config,
+  onChange,
+  onStart,
+  initializing
+}: Props) {
+  const ratio = originalSize > 0 ? compressedSize / originalSize : 1
 
   // Pre-transfer ETA estimate (before encoder init).
   // Total frames ≈ source symbols × (1 + redundancy) + descriptor overhead.
   const totalSymbols = Math.ceil(compressedSize / config.symbolSize)
   const totalFrames = Math.ceil(totalSymbols * (1 + config.redundancyPct / 100))
   const estimatedSeconds = totalFrames / config.fps
+
+  // Show the file list (collapsible-ish: first few + "还有 N 个" for bundles).
+  const visibleFiles = files.slice(0, 5)
+  const hiddenCount = files.length - visibleFiles.length
+
   return (
     <div className="page">
       <h2>传输参数</h2>
       <table className="kv">
         <tbody>
           <tr>
-            <td>文件</td>
-            <td>{file?.name ?? "-"}</td>
+            <td>{isBundle ? "打包内容" : "文件"}</td>
+            <td>
+              {displayName}
+              {isBundle && (
+                <ul className="kv-file-list">
+                  {visibleFiles.map((f, i) => (
+                    <li key={i}>
+                      <span>{f.name}</span>
+                      <span className="muted"> {formatBytes(f.size)}</span>
+                    </li>
+                  ))}
+                  {hiddenCount > 0 && (
+                    <li className="muted">…还有 {hiddenCount} 个文件</li>
+                  )}
+                </ul>
+              )}
+            </td>
           </tr>
           <tr>
             <td>原始大小</td>
-            <td>{file ? formatBytes(file.size) : "-"}</td>
+            <td>{formatBytes(originalSize)}</td>
           </tr>
           <tr>
             <td>压缩后</td>
@@ -79,6 +117,19 @@ export function ParamsPage({ file, compressedSize, config, onChange, onStart, in
           value={config.redundancyPct}
           onChange={(e) => onChange({ redundancyPct: Number(e.target.value) })}
         />
+        {/* Loss-aware tuning hint. RaptorQ needs K unique symbols/block; at a
+            given loss rate L the receiver keeps ~(1-L) of each pass, so the
+            redundancy should at least cover the loss to finish in one pass. */}
+        <span
+          className="muted"
+          style={{ display: "block", marginTop: 4, lineHeight: 1.5 }}
+        >
+          {config.redundancyPct < 20
+            ? "提示：若接收端丢帧率较高（>30%），建议将冗余率提高到 30%–50%，以减少需要重播的整轮次数。"
+            : config.redundancyPct > 40
+              ? "提示：冗余率较高会降低有效吞吐，仅在丢帧率很高的环境下使用。"
+              : "当前冗余率适合大多数场景。"}
+        </span>
       </div>
 
       <div className="field">

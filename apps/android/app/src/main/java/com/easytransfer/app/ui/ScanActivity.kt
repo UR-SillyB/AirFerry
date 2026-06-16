@@ -40,6 +40,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import com.easytransfer.app.nativelib.NativeBridge
+import com.easytransfer.app.scan.BundleParser
 import com.easytransfer.app.scan.QrStreamAnalyzer
 import com.easytransfer.app.scan.ReceiverSessionManager
 import java.util.concurrent.Executors
@@ -441,23 +442,88 @@ class ScanActivity : ComponentActivity() {
                 val originalSize = session.fileSize()
                 val truncLen = if (originalSize > 0 && originalSize <= fileBytes.size) originalSize.toInt() else fileBytes.size
                 val truncBytes = fileBytes.copyOfRange(0, truncLen)
-                val tmp = java.io.File(cacheDir, "recovered_${System.currentTimeMillis()}.bin")
-                tmp.writeBytes(truncBytes)
-                val intent = Intent(this, ReceiveDetailActivity::class.java).apply {
-                    putExtra("FILE_PATH", tmp.absolutePath)
-                    putExtra("FILE_SIZE", if (originalSize > 0) originalSize else truncBytes.size.toLong())
-                    putExtra("FILE_NAME", if (s.fileName.isNotEmpty()) s.fileName else "received_file")
-                    // Expected CRC32 from the descriptor; 0 means the descriptor
-                    // never arrived (or advertised 0), so we cannot verify —
-                    // pass a flag so the detail screen treats it as "unknown".
-                    val expectedCrc = session.crc32()
+                handleRecoveredBytes(truncBytes, s.fileName, originalSize)
+            }
+        }
+    }
+
+    /**
+     * Route the recovered bytes to either the single-file detail screen or, if
+     * the payload is a multi-file bundle, the bundle screen. The bundle is
+     * unpacked into per-file temp files so each can be saved / shared
+     * individually. Both paths run on the main thread (caller guarantees it).
+     */
+    private fun handleRecoveredBytes(bytes: ByteArray, displayName: String, originalSize: Long) {
+        val expectedCrc = session.crc32()
+        val receivedCrc = crc32OfBytes(bytes)
+
+        // Multi-file bundle → unpack and route to the bundle detail screen.
+        if (BundleParser.isBundle(bytes)) {
+            val bundle = BundleParser.parse(bytes)
+            if (bundle != null && bundle.files.isNotEmpty()) {
+                val paths = ArrayList<String>()
+                val names = ArrayList<String>()
+                val sizes = ArrayList<String>()
+                for (f in bundle.files) {
+                    val safeName = sanitizeFileName(f.name)
+                    val tmp = java.io.File(cacheDir, "recovered_${System.currentTimeMillis()}_$safeName")
+                    tmp.writeBytes(f.data)
+                    paths.add(tmp.absolutePath)
+                    names.add(f.name)
+                    sizes.add(f.data.size.toString())
+                }
+                // Copy all files to the received dir for the file list.
+                copyBundleToReceivedDir(paths, names, sizes)
+                val intent = Intent(this, ReceiveBundleActivity::class.java).apply {
+                    putStringArrayListExtra("FILE_PATHS", paths)
+                    putStringArrayListExtra("FILE_NAMES", names)
+                    putStringArrayListExtra("FILE_SIZES", sizes)
                     putExtra("CRC32", expectedCrc)
-                    putExtra("CRC32_RECEIVED", crc32OfBytes(truncBytes))
+                    putExtra("CRC32_RECEIVED", receivedCrc)
                     putExtra("CRC32_UNKNOWN", expectedCrc == 0L)
                 }
                 startActivity(intent)
+                return
             }
+            // If parsing failed, fall through and treat as a single file so the
+            // user still gets something rather than a dead end.
         }
+
+        // Single-file path (unchanged behaviour).
+        val tmp = java.io.File(cacheDir, "recovered_${System.currentTimeMillis()}.bin")
+        tmp.writeBytes(bytes)
+        val intent = Intent(this, ReceiveDetailActivity::class.java).apply {
+            putExtra("FILE_PATH", tmp.absolutePath)
+            putExtra("FILE_SIZE", if (originalSize > 0) originalSize else bytes.size.toLong())
+            putExtra("FILE_NAME", if (displayName.isNotEmpty()) displayName else "received_file")
+            putExtra("CRC32", expectedCrc)
+            putExtra("CRC32_RECEIVED", receivedCrc)
+            putExtra("CRC32_UNKNOWN", expectedCrc == 0L)
+        }
+        startActivity(intent)
+    }
+
+    /** Sanitize a filename for use on the local filesystem. */
+    private fun sanitizeFileName(name: String): String {
+        return name.takeLast(64).replace(Regex("[^a-zA-Z0-9._\\u4e00-\\u9fff-]"), "_")
+    }
+
+    /** Persist every unpacked bundle file to the received dir + write sidecars. */
+    private fun copyBundleToReceivedDir(paths: List<String>, names: List<String>, sizes: List<String>) {
+        try {
+            val dir = java.io.File(getExternalFilesDir(null), "received")
+            if (!dir.exists()) dir.mkdirs()
+            for (i in paths.indices) {
+                val src = java.io.File(paths[i])
+                if (!src.exists()) continue
+                val safeName = sanitizeFileName(names.getOrElse(i) { src.name })
+                val target = java.io.File(dir, "${System.currentTimeMillis()}_$safeName")
+                src.copyTo(target, overwrite = true)
+                val name = names.getOrElse(i) { src.name }
+                val size = sizes.getOrElse(i) { "0" }
+                java.io.File(dir, "${target.name}.meta").writeText("$name\n$size\nunknown\ntrue")
+            }
+        } catch (_: Exception) {}
     }
 
     private fun resetSession() {
