@@ -465,8 +465,10 @@ class ScanActivity : ComponentActivity() {
                 val names = ArrayList<String>()
                 val sizes = ArrayList<String>()
                 for (f in bundle.files) {
-                    val safeName = sanitizeFileName(f.name)
-                    val tmp = java.io.File(cacheDir, "recovered_${System.currentTimeMillis()}_$safeName")
+                    // Preserve the original name (Chinese + spaces intact) in
+                    // the temp file — no timestamp prefix, no .bin.
+                    val safeName = com.easytransfer.app.scan.FileNameUtil.sanitize(f.name)
+                    val tmp = java.io.File(cacheDir, "recovered_$safeName")
                     tmp.writeBytes(f.data)
                     paths.add(tmp.absolutePath)
                     names.add(f.name)
@@ -489,23 +491,21 @@ class ScanActivity : ComponentActivity() {
             // user still gets something rather than a dead end.
         }
 
-        // Single-file path (unchanged behaviour).
-        val tmp = java.io.File(cacheDir, "recovered_${System.currentTimeMillis()}.bin")
+        // Single-file path. Preserve the original name + extension in the temp
+        // file (was recovered_<ts>.bin, which dropped the extension).
+        val finalName = if (displayName.isNotEmpty()) displayName else "received_file"
+        val safeName = com.easytransfer.app.scan.FileNameUtil.sanitize(finalName)
+        val tmp = java.io.File(cacheDir, "recovered_$safeName")
         tmp.writeBytes(bytes)
         val intent = Intent(this, ReceiveDetailActivity::class.java).apply {
             putExtra("FILE_PATH", tmp.absolutePath)
             putExtra("FILE_SIZE", if (originalSize > 0) originalSize else bytes.size.toLong())
-            putExtra("FILE_NAME", if (displayName.isNotEmpty()) displayName else "received_file")
+            putExtra("FILE_NAME", finalName)
             putExtra("CRC32", expectedCrc)
             putExtra("CRC32_RECEIVED", receivedCrc)
             putExtra("CRC32_UNKNOWN", expectedCrc == 0L)
         }
         startActivity(intent)
-    }
-
-    /** Sanitize a filename for use on the local filesystem. */
-    private fun sanitizeFileName(name: String): String {
-        return name.takeLast(64).replace(Regex("[^a-zA-Z0-9._\\u4e00-\\u9fff-]"), "_")
     }
 
     /** Persist every unpacked bundle file to the received dir + write sidecars. */
@@ -516,10 +516,11 @@ class ScanActivity : ComponentActivity() {
             for (i in paths.indices) {
                 val src = java.io.File(paths[i])
                 if (!src.exists()) continue
-                val safeName = sanitizeFileName(names.getOrElse(i) { src.name })
-                val target = java.io.File(dir, "${System.currentTimeMillis()}_$safeName")
-                src.copyTo(target, overwrite = true)
+                // No timestamp prefix: dedupe with (1)(2) so the on-disk name
+                // matches the original the user sent.
                 val name = names.getOrElse(i) { src.name }
+                val target = com.easytransfer.app.scan.FileNameUtil.uniqueTarget(dir, name)
+                src.copyTo(target, overwrite = true)
                 val size = sizes.getOrElse(i) { "0" }
                 java.io.File(dir, "${target.name}.meta").writeText("$name\n$size\nunknown\ntrue")
             }

@@ -261,13 +261,16 @@ class ReceiveBundleActivity : ComponentActivity() {
         }
         try {
             val shareDir = File(cacheDir, "share").also { if (!it.exists()) it.mkdirs() }
-            val safeName = sanitizeFileName(info.name)
-            val shareFile = File(shareDir, safeName)
+            val shareFile = com.easytransfer.app.scan.FileNameUtil.uniqueTarget(shareDir, info.name)
             src.copyTo(shareFile, overwrite = true)
             val uri = FileProvider.getUriForFile(this, "${packageName}.fileprovider", shareFile)
             val intent = Intent(Intent.ACTION_SEND).apply {
                 type = "application/octet-stream"
                 putExtra(Intent.EXTRA_STREAM, uri)
+                // Original name (Chinese + spaces intact) for apps that read
+                // EXTRA_TITLE / EXTRA_TEXT to derive the display name.
+                putExtra(Intent.EXTRA_TITLE, info.name)
+                putExtra(Intent.EXTRA_TEXT, info.name)
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }
             startActivity(Intent.createChooser(intent, "分享 ${info.name}"))
@@ -281,13 +284,14 @@ class ReceiveBundleActivity : ComponentActivity() {
         try {
             val shareDir = File(cacheDir, "share").also { if (!it.exists()) it.mkdirs() }
             val uris = ArrayList<Uri>()
+            val names = ArrayList<String>()
             for (f in files) {
                 val src = File(f.filePath)
                 if (!src.exists()) continue
-                val safeName = sanitizeFileName(f.name)
-                val shareFile = File(shareDir, safeName)
+                val shareFile = com.easytransfer.app.scan.FileNameUtil.uniqueTarget(shareDir, f.name)
                 src.copyTo(shareFile, overwrite = true)
                 uris.add(FileProvider.getUriForFile(this, "${packageName}.fileprovider", shareFile))
+                names.add(f.name)
             }
             if (uris.isEmpty()) {
                 Toast.makeText(this, "没有可分享的文件", Toast.LENGTH_SHORT).show()
@@ -296,16 +300,15 @@ class ReceiveBundleActivity : ComponentActivity() {
             val intent = Intent(Intent.ACTION_SEND_MULTIPLE).apply {
                 type = "application/octet-stream"
                 putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris)
+                // Title: the joined names (or a count) so receiving apps have a
+                // display string instead of a raw FileProvider URI slug.
+                putExtra(Intent.EXTRA_TITLE, if (names.size == 1) names[0] else "${names.size} 个文件")
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }
             startActivity(Intent.createChooser(intent, "分享全部文件"))
         } catch (e: Exception) {
             Toast.makeText(this, "分享失败: ${e.message}", Toast.LENGTH_LONG).show()
         }
-    }
-
-    private fun sanitizeFileName(name: String): String {
-        return name.takeLast(64).replace(Regex("[^a-zA-Z0-9._\\u4e00-\\u9fff-]"), "_")
     }
 
     private fun formatSize(bytes: Long): String {

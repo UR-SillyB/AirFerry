@@ -219,19 +219,23 @@ class ReceiveDetailActivity : ComponentActivity() {
 
     /**
      * Share the recovered file directly via ACTION_SEND without requiring
-     * the user to save it first.  Copies the temp file (recovered_*.bin)
+     * the user to save it first.  Copies the temp file (recovered_*.<ext>)
      * to a correctly-named file so the share target sees the real filename,
      * then uses FileProvider to securely expose it.
+     *
+     * EXTRA_TITLE carries the *original* filename (with spaces / Chinese
+     * intact) so receiving apps (WeChat / QQ / mail) that derive their
+     * display name from this field show it correctly.
      */
     private fun shareFile() {
         try {
             val src = recoveredFile ?: return
             // Copy to a correctly-named file so the receiving app shows the
-            // real filename instead of "recovered_*.bin".
-            val safeName = fileName.replace(Regex("[^a-zA-Z0-9._\\u4e00-\\u9fff-]"), "_")
+            // real filename (spaces + CJK preserved) instead of a temp name.
+            val safeName = com.easytransfer.app.scan.FileNameUtil.sanitize(fileName)
             val shareDir = File(cacheDir, "share")
             if (!shareDir.exists()) shareDir.mkdirs()
-            val shareFile = File(shareDir, safeName)
+            val shareFile = com.easytransfer.app.scan.FileNameUtil.uniqueTarget(shareDir, safeName)
             src.copyTo(shareFile, overwrite = true)
 
             val authority = "${packageName}.fileprovider"
@@ -239,7 +243,10 @@ class ReceiveDetailActivity : ComponentActivity() {
             val shareIntent = Intent(Intent.ACTION_SEND).apply {
                 type = "application/octet-stream"
                 putExtra(Intent.EXTRA_STREAM, uri)
+                // Original name (un-sanitized) as the display title — keeps
+                // Chinese + spaces for apps that read EXTRA_TITLE.
                 putExtra(Intent.EXTRA_TITLE, fileName)
+                putExtra(Intent.EXTRA_TEXT, fileName)
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }
             startActivity(Intent.createChooser(shareIntent, "分享文件"))
@@ -253,9 +260,9 @@ class ReceiveDetailActivity : ComponentActivity() {
             val src = recoveredFile ?: return
             val dir = File(getExternalFilesDir(null), "received")
             if (!dir.exists()) dir.mkdirs()
-            // Use the real filename if available
-            val safeName = fileName.takeLast(64).replace(Regex("[^a-zA-Z0-9._-]"), "_")
-            val target = File(dir, "${System.currentTimeMillis()}_$safeName")
+            // Use the real filename (no timestamp prefix); dedupe with (1)(2)
+            // on collision so the on-disk name matches what the user sent.
+            val target = com.easytransfer.app.scan.FileNameUtil.uniqueTarget(dir, fileName)
             src.copyTo(target, overwrite = true)
             // Also write a small metadata sidecar for file size + crc.
             // Write "unknown" when no expected CRC was supplied so the file
