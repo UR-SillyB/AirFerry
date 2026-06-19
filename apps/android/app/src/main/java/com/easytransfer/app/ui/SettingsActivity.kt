@@ -11,9 +11,11 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.easytransfer.app.scan.HighSpeedCaptureController
 
 private val BgDark = Color(0xFF0F172A)
 private val CardBg = Color(0xFF1E293B)
@@ -31,6 +33,9 @@ class SettingsActivity : ComponentActivity() {
     private fun SettingsScreen() {
         val prefs = remember { getSharedPreferences("easytransfer", MODE_PRIVATE) }
         var redundancy by remember { mutableFloatStateOf(prefs.getInt("default_redundancy", 10).toFloat()) }
+        val context = LocalContext.current
+        val highSpeedSupported = remember { HighSpeedCaptureController.isSupported(context) }
+        var highSpeedMode by remember { mutableStateOf(prefs.getBoolean("highspeed_mode", false)) }
 
         Column(modifier = Modifier.fillMaxSize().background(BgDark)) {
             Text(
@@ -60,6 +65,40 @@ class SettingsActivity : ComponentActivity() {
                         colors = SliderDefaults.colors(thumbColor = Accent, activeTrackColor = Accent)
                     )
                     Text("冗余率越高，抗丢帧能力越强，但传输速度越慢。推荐 10–20%。", color = TextSecondary, fontSize = 12.sp)
+                }
+            }
+
+            Card(
+                modifier = Modifier.fillMaxWidth().padding(16.dp),
+                shape = RoundedCornerShape(12.dp),
+                colors = CardDefaults.cardColors(containerColor = CardBg)
+            ) {
+                Column(modifier = Modifier.padding(20.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("实验性：高速相机录制", color = TextPrimary, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                            Text(
+                                if (highSpeedSupported)
+                                    "用 120/240fps 高速摄像录制后台批量解码。仅旗舰机支持，有损压缩可能降低识别率，失败会自动回退普通模式。"
+                                else
+                                    "当前设备不支持高速摄像（无 constrained high-speed 能力）。",
+                                color = TextSecondary, fontSize = 12.sp
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Switch(
+                            checked = highSpeedMode && highSpeedSupported,
+                            enabled = highSpeedSupported,
+                            onCheckedChange = {
+                                highSpeedMode = it
+                                prefs.edit().putBoolean("highspeed_mode", it).apply()
+                            }
+                        )
+                    }
                 }
             }
 

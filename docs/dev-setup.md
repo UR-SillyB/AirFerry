@@ -85,7 +85,7 @@ export JAVA_HOME=$(/usr/libexec/java_home -v 17)
 git clone <repo-url> EasyTransfer
 cd EasyTransfer
 
-# 1. 测试核心库（38 个单元 + 集成测试）
+# 1. 测试核心库（全部单元 + 集成测试，跨 raptorq-core / qr-protocol / transfer-engine）
 cargo test
 
 # 2. 构建 WASM 核心

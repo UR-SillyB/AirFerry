@@ -35,11 +35,12 @@ EOF
 # 构建 Debug APK
 ./gradlew :app:assembleDebug
 
-# 构建 Release APK（需签名配置）
+# 构建 Release APK（当前 release 块未配置签名 → 产出未签名 APK，安装前需自行签名）
 ./gradlew :app:assembleRelease
 ```
 
 产物：`app/build/outputs/apk/debug/app-debug.apk`
+（Release：`app/build/outputs/apk/release/app-release-unsigned.apk`）
 
 ## 安装到设备
 
@@ -89,17 +90,19 @@ apps/android/
         │   ├── CMakeLists.txt    # ZXing-C++ 构建
         │   └── scan_jni.cpp      # ZXing JNI 桥接
         ├── java/com/easytransfer/app/
-        │   ├── native/
+        │   ├── nativelib/
         │   │   └── NativeBridge.kt       # Rust JNI 绑定
         │   ├── scan/
         │   │   ├── ZxingDecoder.kt       # ZXing JNI 绑定
-        │   │   ├── QrStreamAnalyzer.kt   # CameraX 分析器
+        │   │   ├── QrStreamAnalyzer.kt   # CameraX 分析器（生产者）
+        │   │   ├── QrDecodePool.kt       # 并行解码池 + 串行 JNI 摄入
+        │   │   ├── HighSpeedCaptureController.kt  # 实验性高速录制→批量解码
         │   │   └── ReceiverSessionManager.kt
         │   └── ui/
         │       ├── ScanActivity.kt       # 扫描页
         │       ├── ReceiveDetailActivity.kt
         │       ├── FileListActivity.kt
-        │       └── SettingsActivity.kt
+        │       └── SettingsActivity.kt   # 设置（含实验性高速开关）
         ├── jniLibs/arm64-v8a/    # Rust .so（cargo-ndk 产物）
         └── res/                  # 布局 + 资源
 ```

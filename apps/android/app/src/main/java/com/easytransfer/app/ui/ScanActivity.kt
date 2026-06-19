@@ -8,6 +8,7 @@ import android.os.Bundle
 import android.util.Log
 import android.util.Range
 import android.util.Size
+import android.view.Surface
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -31,7 +32,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -41,9 +41,12 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import com.easytransfer.app.nativelib.NativeBridge
 import com.easytransfer.app.scan.BundleParser
+import com.easytransfer.app.scan.HighSpeedCaptureController
+import com.easytransfer.app.scan.QrDecodePool
 import com.easytransfer.app.scan.QrStreamAnalyzer
 import com.easytransfer.app.scan.ReceiverSessionManager
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 
 // Design tokens
 private val BgDark = Color(0xFF0F172A)
@@ -60,6 +63,22 @@ class ScanActivity : ComponentActivity() {
     private val cameraExecutor = Executors.newSingleThreadExecutor()
     private var cameraStarted = false
 
+    /** Parallel QR decode pool (capture → queue → N workers → serialized ingest). */
+    private var decodePool: QrDecodePool? = null
+    // Decode-rate sampling (computed on the throttled UI snapshot).
+    private var lastRateTimeMs = 0L
+    private var lastDecodedCount = 0L
+    private var decodePerSec = 0
+
+    // Experimental high-speed (record → batch decode) mode.
+    private var highSpeedEnabled = false
+    /** Live UI flag: starts == highSpeedEnabled, flips to false to fall back to
+     *  the normal CameraX pipeline if the high-speed path fails at runtime. */
+    private val useHighSpeedMode = mutableStateOf(false)
+    private var highSpeedController: HighSpeedCaptureController? = null
+    private var highSpeedSurface: Surface? = null
+    private val highSpeedRecording = mutableStateOf(false)
+
     // Reactive state observed by Compose
     private val uiState = mutableStateOf(UiState())
 
@@ -72,6 +91,8 @@ class ScanActivity : ComponentActivity() {
         val totalBlocks: Int = 0,
         val lossPct: Int = 0,
         val framesSeen: Long = 0,
+        val decodePerSec: Int = 0,
+        val framesDropped: Long = 0,
         val fileName: String = "",
         val fileSize: Long = 0,
         val complete: Boolean = false,
@@ -85,6 +106,16 @@ class ScanActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // Experimental high-speed (record → batch decode) mode: opt-in setting AND
+        // the device must advertise constrained-high-speed support.
+        highSpeedEnabled = try {
+            getSharedPreferences("easytransfer", MODE_PRIVATE).getBoolean("highspeed_mode", false) &&
+                HighSpeedCaptureController.isSupported(this)
+        } catch (e: Exception) {
+            false
+        }
+        useHighSpeedMode.value = highSpeedEnabled
 
         // JNI self-test
         val jniOk = try {
@@ -112,19 +143,40 @@ class ScanActivity : ComponentActivity() {
     @Composable
     private fun ScanScreen() {
         val state by uiState
-        val context = LocalContext.current
+        val highSpeed by useHighSpeedMode
 
         Box(modifier = Modifier.fillMaxSize().background(BgDark)) {
-            // Camera preview (full screen)
-            AndroidView(
-                factory = { ctx ->
-                    PreviewView(ctx).also { pv ->
-                        pv.scaleType = PreviewView.ScaleType.FILL_CENTER
-                    }
-                },
-                modifier = Modifier.fillMaxSize(),
-                update = { pv -> bindCameraIfNeeded(pv) }
-            )
+            // Camera preview (full screen). High-speed mode uses a raw SurfaceView
+            // (Camera2 high-speed sessions can't target a CameraX PreviewView);
+            // the normal path uses CameraX's PreviewView.
+            if (highSpeed) {
+                AndroidView(
+                    factory = { ctx ->
+                        android.view.SurfaceView(ctx).also { sv ->
+                            sv.holder.addCallback(object : android.view.SurfaceHolder.Callback {
+                                override fun surfaceCreated(holder: android.view.SurfaceHolder) {
+                                    highSpeedSurface = holder.surface
+                                }
+                                override fun surfaceChanged(holder: android.view.SurfaceHolder, format: Int, width: Int, height: Int) {}
+                                override fun surfaceDestroyed(holder: android.view.SurfaceHolder) {
+                                    highSpeedSurface = null
+                                }
+                            })
+                        }
+                    },
+                    modifier = Modifier.fillMaxSize()
+                )
+            } else {
+                AndroidView(
+                    factory = { ctx ->
+                        PreviewView(ctx).also { pv ->
+                            pv.scaleType = PreviewView.ScaleType.FILL_CENTER
+                        }
+                    },
+                    modifier = Modifier.fillMaxSize(),
+                    update = { pv -> bindCameraIfNeeded(pv) }
+                )
+            }
 
             Column(
                 modifier = Modifier.fillMaxSize().padding(16.dp),
@@ -153,6 +205,10 @@ class ScanActivity : ComponentActivity() {
                             InfoRow("已解码块", "${state.decodedBlocks} / ${state.totalBlocks}")
                             InfoRow("丢帧率", "${state.lossPct}%")
                             InfoRow("已扫描帧", "${state.framesSeen}")
+                            InfoRow("解码速率", "${state.decodePerSec}/秒")
+                            if (state.framesDropped > 0) {
+                                InfoRow("采集丢弃", "${state.framesDropped}")
+                            }
                             if (state.fileName.isNotEmpty()) {
                                 InfoRow("文件名", state.fileName)
                             }
@@ -181,6 +237,21 @@ class ScanActivity : ComponentActivity() {
                 )
 
                 Spacer(modifier = Modifier.height(16.dp))
+
+                // Experimental high-speed record / stop-and-decode control.
+                if (highSpeed) {
+                    val recording by highSpeedRecording
+                    Button(
+                        onClick = { if (recording) stopHighSpeed() else startHighSpeed() },
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = if (recording) Color(0xFFDC2626) else Accent
+                        )
+                    ) {
+                        Text(if (recording) "停止并解码" else "开始高速录制", fontSize = 16.sp)
+                    }
+                    Spacer(modifier = Modifier.height(12.dp))
+                }
 
                 // Action buttons row
                 Row(
@@ -286,62 +357,125 @@ class ScanActivity : ComponentActivity() {
         // Will be triggered by AndroidView update once a PreviewView is available.
     }
 
+    /** Lazily create + start the shared parallel decode pool. */
+    private fun ensurePool(): QrDecodePool {
+        var p = decodePool
+        if (p == null) {
+            p = QrDecodePool { payload -> handleFrameAsync(payload) }.also { it.start() }
+            decodePool = p
+        }
+        return p
+    }
+
+    /** Experimental: begin a high-speed recording; decoded frames flow into the
+     *  same pool/receiver as the normal path once decoding starts. */
+    private fun startHighSpeed() {
+        val surface = highSpeedSurface
+        if (surface == null || !surface.isValid) {
+            updateUi { it.copy(statusText = "预览未就绪，请稍候再试…") }
+            return
+        }
+        ensurePool()
+        // Start a fresh receiver for this capture (coordinated with the pool).
+        val reset = {
+            session.destroy()
+            session = ReceiverSessionManager()
+            ingestStopped.set(false)
+        }
+        decodePool?.runExclusive(reset) ?: reset()
+        completedHandled = false
+
+        val controller = HighSpeedCaptureController(
+            context = this,
+            previewSurface = surface,
+            onYFrame = { buf, w, h, rs -> decodePool?.submit(buf, w, h, rs) },
+            onStatus = { msg -> runOnUiThread { updateUi { it.copy(statusText = msg) } } },
+            onError = { msg ->
+                runOnUiThread {
+                    highSpeedRecording.value = false
+                    // Fall back to the normal real-time CameraX pipeline: releasing
+                    // the controller and flipping useHighSpeedMode recomposes the
+                    // preview to the PreviewView, whose update→bindCameraIfNeeded
+                    // starts the standard QrDecodePool scanning path.
+                    highSpeedController?.release()
+                    highSpeedController = null
+                    highSpeedSurface = null
+                    useHighSpeedMode.value = false
+                    updateUi { it.copy(statusText = "高速模式失败，已回退普通模式：$msg") }
+                }
+            }
+        )
+        highSpeedController = controller
+        highSpeedRecording.value = true
+        controller.startRecording()
+    }
+
+    /** Experimental: stop recording and kick off background decode of the clip. */
+    private fun stopHighSpeed() {
+        highSpeedRecording.value = false
+        highSpeedController?.stopAndDecode()
+    }
+
     @androidx.annotation.OptIn(androidx.camera.camera2.interop.ExperimentalCamera2Interop::class)
     private fun startCameraWithView(previewView: PreviewView) {
         val cameraProviderFuture = ProcessCameraProvider.getInstance(this)
         cameraProviderFuture.addListener({
             try {
                 val cameraProvider = cameraProviderFuture.get()
+
+                // Get/create the parallel decode pool. Each decoded payload is fed
+                // to the native receiver via handleFrameAsync, serialized by the
+                // pool's ingest lock so the non-thread-safe JNI handle is only ever
+                // touched by one thread at a time.
+                val pool = ensurePool()
+
                 val preview = Preview.Builder().build().also {
                     it.setSurfaceProvider(previewView.surfaceProvider)
                 }
-                val analyzer = ImageAnalysis.Builder()
-                    .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                    // Request a 720p analysis stream. The default ImageAnalysis
-                    // resolution (~640×480) leaves too few camera pixels per QR
-                    // module to decode reliably, so data frames were silently
-                    // dropped and the receiver stuck at "恢复中 0%". 720p gives
-                    // ~8 px/module for our 81×81 codes with margin to spare.
-                    .setResolutionSelector(
-                        ResolutionSelector.Builder()
-                            .setResolutionStrategy(
-                                ResolutionStrategy(
-                                    Size(1280, 720),
-                                    ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER
-                                )
-                            )
-                            .build()
-                    )
-                    .also { builder ->
-                        // Request a high sensor frame rate so ImageAnalysis receives up
-                        // to ~60 fps where the device supports it (2x throughput vs the
-                        // ~30 fps default). CameraX 1.3.x has no public
-                        // ImageAnalysis.Builder#setTargetFrameRate, so we set the Camera2
-                        // CONTROL_AE_TARGET_FPS_RANGE via Camera2Interop instead. A
-                        // variable range (30..60) is preferred over a fixed (60,60):
-                        // devices that don't reach 60 fps fall back to 30 instead of
-                        // failing to open the camera.
-                        Camera2Interop.Extender(builder).setCaptureRequestOption(
-                            CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE,
-                            Range(30, 60)
+
+                // Request a 720p analysis stream. The default ImageAnalysis
+                // resolution (~640×480) leaves too few camera pixels per QR module
+                // to decode reliably; 720p gives ample px/module for our codes.
+                val resolutionSelector = ResolutionSelector.Builder()
+                    .setResolutionStrategy(
+                        ResolutionStrategy(
+                            Size(1280, 720),
+                            ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER
                         )
-                    }
+                    )
                     .build()
-                    .also {
-                        it.setAnalyzer(cameraExecutor, QrStreamAnalyzer(this@ScanActivity) { payload ->
-                            // Heavy work (ZXing decode already ran above): feed the
-                            // frame to the native receiver here, ON THE ANALYSIS
-                            // THREAD. This is a background executor, so the JNI call
-                            // (RaptorQ ingest + JSON serialization) does NOT compete
-                            // with Compose rendering on the main thread. Only the
-                            // throttled UI snapshot is posted to the main thread.
-                            handleFrameAsync(payload)
-                        })
-                    }
+
+                fun buildAnalysis(fpsRange: Range<Int>): ImageAnalysis =
+                    ImageAnalysis.Builder()
+                        .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                        .setResolutionSelector(resolutionSelector)
+                        .also { builder ->
+                            // Pin the sensor frame-rate via Camera2Interop (CameraX
+                            // 1.3.x has no public ImageAnalysis#setTargetFrameRate).
+                            Camera2Interop.Extender(builder).setCaptureRequestOption(
+                                CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE,
+                                fpsRange
+                            )
+                        }
+                        .build()
+                        .also { it.setAnalyzer(cameraExecutor, QrStreamAnalyzer(pool)) }
+
+                // Pin a steady 60fps so low-light AE can't trade frame rate for a
+                // longer exposure (the on-screen QR is a bright emissive source, so
+                // a fixed 60 is usually fine and reduces motion / rolling-shutter
+                // smear). Some devices reject a fixed [60,60]; fall back to [30,60].
                 cameraProvider.unbindAll()
-                cameraProvider.bindToLifecycle(
-                    this, CameraSelector.DEFAULT_BACK_CAMERA, preview, analyzer
-                )
+                try {
+                    cameraProvider.bindToLifecycle(
+                        this, CameraSelector.DEFAULT_BACK_CAMERA, preview, buildAnalysis(Range(60, 60))
+                    )
+                } catch (e: Exception) {
+                    Log.w(TAG, "fixed 60fps bind failed; falling back to 30–60", e)
+                    cameraProvider.unbindAll()
+                    cameraProvider.bindToLifecycle(
+                        this, CameraSelector.DEFAULT_BACK_CAMERA, preview, buildAnalysis(Range(30, 60))
+                    )
+                }
             } catch (e: Exception) {
                 Log.e(TAG, "Camera bind failed", e)
                 updateUi { it.copy(statusText = "相机启动失败") }
@@ -351,13 +485,16 @@ class ScanActivity : ComponentActivity() {
 
     private var lastUiUpdate = 0L
     private var completedHandled = false
+    /** Once recovery completes, stop feeding the native receiver so the
+     *  main-thread assemble() (a `&` borrow) can't race a worker ingest (`&mut`). */
+    private val ingestStopped = AtomicBoolean(false)
 
     /**
-     * Pure-data snapshot produced on the analysis thread and handed to the main
-     * thread. Keeping every JNI / JSON / RaptorQ step off the main thread is what
-     * lets the receiver keep up at 60 fps — previously the whole ingest chain ran
-     * under runOnUiThread and competed with Compose rendering, capping the
-     * effective receive rate well below the camera frame rate.
+     * Pure-data snapshot produced on a decode-worker thread and handed to the
+     * main thread. Keeping every JNI / JSON / RaptorQ step off the main thread is
+     * what lets the receiver keep up with the camera — the heavy ingest chain
+     * runs on the [QrDecodePool]'s serialized ingest path, and only the throttled
+     * UI snapshot is posted to the main thread.
      */
     private data class FrameSnapshot(
         val progress: ReceiverSessionManager.Progress,
@@ -365,8 +502,13 @@ class ScanActivity : ComponentActivity() {
         val fileSize: Long
     )
 
-    /** Analysis-thread entry: do all heavy work here, post only a snapshot over. */
+    /** Ingest-thread entry (serialized by the pool): heavy work here, post a snapshot. */
     private fun handleFrameAsync(payload: ByteArray) {
+        // After completion, drop further frames: the main thread is (or will be)
+        // calling assemble() on the receiver, which must not run concurrently
+        // with another ingest. This runs under the pool's ingest lock, so the
+        // check+ingest+stop sequence is atomic w.r.t. other workers.
+        if (ingestStopped.get()) return
         val progress = session.ingest(payload) ?: return
 
         // Read file metadata from session (JNI) — keep on this background thread.
@@ -381,8 +523,9 @@ class ScanActivity : ComponentActivity() {
 
         val snapshot = FrameSnapshot(progress, fn, fs)
         if (progress.complete) {
-            // Completion path involves file I/O + Activity start → must run on
-            // the main thread. Handle UI update + completion together.
+            // Block any further ingest before the completion path (assemble +
+            // file I/O + Activity start) runs on the main thread.
+            ingestStopped.set(true)
             runOnUiThread { applySnapshot(snapshot, handleCompletion = true) }
         } else {
             runOnUiThread { applySnapshot(snapshot, handleCompletion = false) }
@@ -418,6 +561,22 @@ class ScanActivity : ComponentActivity() {
                 "接收中… ${progress.receivedSymbols}/${progress.totalSymbols} 符号 (等待解码)"
             else -> "恢复中… $pct%"
         }
+        // Sample the parallel decode rate (~1 Hz) from the pool's counters.
+        val pool = decodePool
+        if (pool != null) {
+            val nowMs = System.currentTimeMillis()
+            val decoded = pool.decodedCount()
+            if (lastRateTimeMs == 0L) {
+                lastRateTimeMs = nowMs
+                lastDecodedCount = decoded
+            } else if (nowMs - lastRateTimeMs >= 1000) {
+                decodePerSec = ((decoded - lastDecodedCount) * 1000 / (nowMs - lastRateTimeMs)).toInt()
+                lastRateTimeMs = nowMs
+                lastDecodedCount = decoded
+            }
+        }
+        val droppedTotal = decodePool?.droppedCount() ?: 0L
+
         updateUi {
             it.copy(
                 progressPct = pct,
@@ -427,6 +586,8 @@ class ScanActivity : ComponentActivity() {
                 totalBlocks = progress.totalBlocks,
                 lossPct = (progress.lossRatio * 100).toInt(),
                 framesSeen = progress.framesSeen,
+                decodePerSec = decodePerSec,
+                framesDropped = droppedTotal,
                 fileName = s.fileName,
                 fileSize = s.fileSize,
                 statusText = statusMsg,
@@ -528,10 +689,19 @@ class ScanActivity : ComponentActivity() {
     }
 
     private fun resetSession() {
-        session.destroy()
-        session = ReceiverSessionManager()
+        // Swap the receiver under the pool's ingest lock so no worker is mid-ingest
+        // while we destroy the old native handle.
+        val swap = {
+            session.destroy()
+            session = ReceiverSessionManager()
+            ingestStopped.set(false)
+        }
+        decodePool?.runExclusive(swap) ?: swap()
         completedHandled = false
         lastUiUpdate = 0
+        lastRateTimeMs = 0
+        lastDecodedCount = 0
+        decodePerSec = 0
         updateUi {
             UiState(jniReady = true, statusText = "就绪 — 对准二维码…")
         }
@@ -545,9 +715,17 @@ class ScanActivity : ComponentActivity() {
         super.onResume()
         // If returning from ReceiveDetailActivity after completion, reset for next scan.
         if (completedHandled) {
-            session.destroy()
+            val swap = {
+                session.destroy()
+                session = ReceiverSessionManager()
+                ingestStopped.set(false)
+            }
+            decodePool?.runExclusive(swap) ?: swap()
             completedHandled = false
             lastUiUpdate = 0
+            lastRateTimeMs = 0
+            lastDecodedCount = 0
+            decodePerSec = 0
             updateUi { UiState(jniReady = true, statusText = "就绪 — 对准二维码…") }
         }
     }
@@ -555,7 +733,20 @@ class ScanActivity : ComponentActivity() {
     override fun onDestroy() {
         super.onDestroy()
         cameraExecutor.shutdown()
-        session.destroy()
+        // Stop the high-speed controller (if any) first so it stops feeding frames.
+        highSpeedController?.release()
+        highSpeedController = null
+        // Stop workers, then destroy the native receiver UNDER the ingest lock so a
+        // straggler that outran shutdown()'s join timeout can't still be mid-ingest
+        // (&mut) when destroy() frees the handle (use-after-free).
+        val pool = decodePool
+        decodePool = null
+        if (pool != null) {
+            pool.shutdown()
+            pool.runExclusive { session.destroy() }
+        } else {
+            session.destroy()
+        }
     }
 
     companion object {

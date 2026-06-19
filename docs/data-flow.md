@@ -17,7 +17,7 @@
                      ▼
               ┌──────────────┐
               │ 零填充对齐    │  chunker::pad_to_symbols
-              │ → N×1024B    │
+              │ → N×T 字节   │  T = symbol_size（浏览器默认 512）
               └────┬─────────┘
                    │
                    ▼
@@ -25,115 +25,140 @@
         │ RaptorQ 编码         │  Encoder::with_defaults
         │ RFC 6330 自动分块    │  → ObjectMeta (OTI + 每块K)
         └────┬────────────────┘
-             │ 源符号 + 修复符号
+             │
              ▼
-      ┌───────────────┐
-      │ 发射计划生成   │  build_emission_plan
-      │ 源符号 × K    │  + 修复符号 × K×冗余率
-      └────┬──────────┘
-           │ (sbn, esi) 序列
-           ▼
-    ┌──────────────────┐     每 N 帧
+   ┌──────────────────────────────┐
+   │ 发射策略 (sender::next_frame) │
+   │ ① 源符号阶段：跨块轮询，仅一遍 │  build_source_plan
+   │ ② 无限新鲜修复符号：跨块轮询，  │  repair_symbol_id
+   │    ESI 单调递增、永不重复       │  → 无重复帧
+   └────┬─────────────────────────┘
+        │ (sbn, esi) 序列
+        ▼
+    ┌──────────────────┐     每 16 帧 / 首帧
     │ 帧封装           │ ◄─── 插入描述符帧
     │ Header+Payload   │     (FLAG_DESCRIPTOR)
     │ +Footer+CRC×2    │
     └────┬─────────────┘
-         │ 1088B 帧字节
+         │ (60+T+4) 字节帧
          ▼
    ┌──────────────┐
-   │ QR 编码       │  qrcode crate → QrMatrix (177×177)
-   └────┬─────────┘
+   │ QR 编码       │  qr_render::encode → 按帧长选最小版本
+   └────┬─────────┘    （576B 帧 → V16 81×81）
         │ 模块矩阵
         ▼
   ┌──────────────┐
-  │ Canvas 渲染   │  30/60 fps, 全屏, 亮度优化
+  │ Canvas 渲染   │  30/45/60 fps, 全屏, 亮度优化
   └──────┬───────┘
          │
          ▼
     屏幕二维码视频流 ▶ ▶ ▶ (单向光学信道)
 ```
 
-## 接收端数据流
+> **无重复帧**：源符号发完后，每一帧都携带接收端从未见过的修复符号（ESI 永不回绕）。接收端因此不会再收到发送端造成的重复，进度近似线性。`redundancy_pct` 仅用于 UI 时长估算，不限制实际修复符号数量。
+
+## 接收端数据流（并行解码管线）
 
 ```
               屏幕二维码视频流 ▶ ▶ ▶
                        │
                        ▼
             ┌───────────────────┐
-            │ CameraX 视频流     │  ImageAnalysis
+            │ CameraX 视频流     │  ImageAnalysis @ 锁定 ~60fps
             │ YUV_420_888       │  STRATEGY_KEEP_ONLY_LATEST
             └────┬──────────────┘
-                 │ 每帧
+                 │ 每帧（分析线程，生产者）
                  ▼
-          ┌──────────────┐
-          │ Y 平面提取    │  planes[0].buffer
-          └────┬─────────┘
-               │ ByteArray
+          ┌────────────────────────┐
+          │ 复制 Y 平面 → 入有界队列 │  QrStreamAnalyzer → QrDecodePool.submit
+          │ 立即 image.close()      │  满则丢最新（喷泉码下任意新符号等价）
+          └────┬───────────────────┘
+               │ ArrayBlockingQueue
                ▼
-        ┌───────────────┐
-        │ ZXing-C++     │  decodeY() → ByteArray?
-        │ QR 解码       │  (实时, 非截图)
-        └────┬──────────┘
-             │ 帧字节 (或 null)
+        ┌──────────────────────────────┐
+        │ N 个解码 worker（并行）        │  N ≈ CPU 核数−2（钳 2–6）
+        │ 中心 ROI 裁剪 → ZXing-C++     │  ROI 失败周期性回退整帧
+        │ decodeY() → Frame 字节?       │
+        └────┬─────────────────────────┘
+             │ 解码载荷（乱序无妨）
              ▼
-      ┌──────────────┐
-      │ 帧解析 + 校验 │  Frame::from_bytes
-      │ magic + CRC  │  失败 → 丢弃
-      └────┬─────────┘
-           │ Frame
-           │
-     ┌─────┴─────┐
-     ▼           ▼
- 描述符帧?    数据帧?
-     │           │
-     ▼           ▼
-┌─────────┐  ┌──────────────┐
-│ 更新     │  │ 去重          │  per-block ESI HashSet
-│ ObjectMeta│ │ (sbn,esi)   │  重复 → 丢弃
-└─────────┘  └────┬─────────┘
-                  │ 唯一符号
+        ┌──────────────────────────┐
+        │ 串行 JNI 摄入 (ingest 锁) │  原生 receiver 句柄非线程安全
+        │ 帧校验 magic + CRC×2      │  → 一次仅一个线程
+        └────┬─────────────────────┘
+             │ Frame
+             │
+       ┌─────┴─────┐
+       ▼           ▼
+   描述符帧?    数据帧?
+       │           │
+       ▼           ▼
+  ┌─────────┐  ┌──────────────┐
+  │ 更新     │  │ 去重          │  per-block ESI HashSet
+  │ObjectMeta│  │ (sbn,esi)   │  重复 → 丢弃
+  └─────────┘  └────┬─────────┘
+                    │ 唯一符号（O(1) 更新源计数器）
+                    ▼
+             ┌──────────────┐
+             │ RaptorQ 解码 │  Decoder::add_symbol
+             │ 块满即解码   │
+             └────┬─────────┘
+                  │ 解码块
                   ▼
            ┌──────────────┐
-           │ RaptorQ 解码 │  Decoder::add_symbol
-           │ 块满即解码   │
+           │ 重组          │  assemble() → 全块拼接 → 截断真实长度
            └────┬─────────┘
-                │ 解码块
+                │ 恢复字节
                 ▼
-         ┌──────────────┐
-         │ 重组          │  assemble() → 全块拼接
-         │ → 截断真实长度│
-         └────┬─────────┘
-              │ 恢复字节
-              ▼
-        ┌──────────────┐
-        │ (可选) 解压   │  若发送端启用压缩
-        └────┬─────────┘
-             │
-             ▼
-       ┌──────────┐
-       │ 文件保存  │  SAF / app 专属目录
-       └──────────┘
+          ┌──────────────┐
+          │ (可选) 解压   │  若发送端启用压缩
+          └────┬─────────┘
+               ▼
+         ┌──────────┐
+         │ 文件保存  │  app 专属目录 / 分享
+         └──────────┘
+```
+
+> **解码/摄入分离**：采集线程从不阻塞于 ZXing；解码在 N 个 worker 上并行，但所有摄入经一把 `ingest` 锁串行化（原生句柄非线程安全）。完成时接收端先置 `ingestStopped` 再在主线程 `assemble()`，确保 `&mut` 摄入与 `&` 重组不并发。会话切换/销毁通过 `runExclusive` 在锁内完成，杜绝 use-after-free。
+
+## 实验性高速录制数据流
+
+```
+开启「高速相机录制」设置（旗舰机 + 能力检测）
+        │
+        ▼
+ Camera2 高速会话 (120/240fps)
+   └─► MediaCodec 全 I 帧 H.264 编码器 (KEY_I_FRAME_INTERVAL=0)
+         └─► MediaMuxer → 临时 .mp4
+        │ 用户停止录制
+        ▼
+ MediaExtractor + MediaCodec 解码器 → ImageReader(YUV)
+   └─► 每帧 Y 平面 → 复用 QrDecodePool（与实时路径相同的串行摄入）
+        │
+        ▼
+   与常规路径相同的 RaptorQ 恢复 / 重组 / 保存
+（任一步失败 → onError → 释放控制器 → 回退常规实时管线）
 ```
 
 ## 进度反馈流
 
 ```
-ReceiverSession.ingest(frame)
+QrDecodePool worker → (ingest 锁) → ReceiverSession.ingest(frame)
         │
-        ├──► RaptorQ Decoder (块解码)
+        ├──► RaptorQ Decoder（块解码）
         │
         ▼
    Progress {
-     decoded_symbols,     // 已解码源符号数
+     decoded_symbols,     // 已解码源符号数（含 O(1) 增量源计数器近似）
      total_symbols,       // K
      received_symbols,    // 去重后接收数
      decoded_blocks,      // 已完成块数
      total_blocks,
-     frames_seen/dropped/corrupt,
-     decoded_fraction,    // 0.0–1.0
+     frames_seen/duplicate/corrupt,
+     decoded_fraction,    // 0.0–1.0（近似线性增长）
      loss_ratio,          // 丢帧率
    }
         │
-        ▼ (JSON via JNI)
-   Kotlin UI → 实时进度条 + 统计
+        ▼ (JSON via JNI，节流 ~7Hz)
+   Kotlin UI → 进度条 + 解码速率/秒 + 统计
 ```

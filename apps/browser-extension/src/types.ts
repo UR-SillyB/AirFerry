@@ -19,11 +19,13 @@ export const DEFAULT_CONFIG: TransferConfig = {
   // headroom for bursty loss without wasting as much as 50%. Tune up for
   // higher-loss links, down for clean ones.
   redundancyPct: 25,
-  // 30fps (not 60): a QR needs to stay on screen long enough for the receiver
-  // camera to capture a clean frame. 60fps showed each frame ~16ms — too brief
-  // for reliable capture, so large files never accumulated enough symbols and
-  // stuck at "恢复中 0%".
-  fps: 30,
+  // 45fps default: a balance between scan reliability and throughput. The
+  // sender's distinct-frames/sec is the real cap on receive speed — at 30fps a
+  // receiver (even a fast parallel-decode one) can capture at most 30 distinct
+  // frames/sec. 45fps lifts that ceiling while keeping each QR on screen long
+  // enough (~22ms) for a 60fps-capturing camera to grab a clean frame. Users on
+  // clean, well-lit setups can pick 60; high-loss setups can drop to 30.
+  fps: 45,
   // 512-byte symbols keep each frame at QR Version 16 (81×81) instead of the
   // 1024-byte / V23 (109×109) code, scanning far more reliably from a phone
   // camera. The header carries symbol_size, so the receiver adapts automatically.

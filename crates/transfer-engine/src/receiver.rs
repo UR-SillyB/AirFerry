@@ -29,6 +29,12 @@ pub struct ReceiverSession {
     /// File metadata learned from the descriptor frame (filename, size, CRC32).
     file_meta: crate::descriptor::FileMeta,
     received: Vec<HashSet<u32>>,
+    /// Per-block count of distinct *source* symbols received (esi < K_block),
+    /// maintained incrementally so [`refresh_decoded_counts`] is O(1)/frame
+    /// instead of re-scanning every block's received-set each frame (which was
+    /// O(n²) over a full transfer — a real slowdown on large files). Index is
+    /// block position, matching `meta.blocks` / `received`.
+    source_recv: Vec<u32>,
     symbol_cache: HashMap<(u32, u32), Vec<u8>>,
     progress: Progress,
     /// Consecutive session-mismatch count (reset on successful ingest).
@@ -69,6 +75,10 @@ impl ReceiverSession {
             .as_ref()
             .map(|m| m.blocks.iter().map(|_| HashSet::new()).collect())
             .unwrap_or_default();
+        let source_recv = meta
+            .as_ref()
+            .map(|m| vec![0u32; m.blocks.len()])
+            .unwrap_or_default();
         let progress = Progress {
             total_symbols,
             total_blocks,
@@ -81,6 +91,7 @@ impl ReceiverSession {
             meta_confirmed: false,
             file_meta: crate::descriptor::FileMeta::default(),
             received,
+            source_recv,
             symbol_cache: HashMap::new(),
             progress,
             pending_symbol_size: symbol_size,
@@ -197,6 +208,12 @@ impl ReceiverSession {
             return Ok(self.is_complete());
         }
         self.progress.received_symbols += 1;
+        // O(1) source-symbol counter for progress (counts distinct esi < K_block).
+        if let Some(meta) = &self.meta {
+            if esi < meta.blocks[sbn].num_source_symbols {
+                self.source_recv[sbn] += 1;
+            }
+        }
 
         // NOTE: we do NOT cache the payload here. The replay cache is only
         // populated while `!meta_confirmed` (above) for the case where the
@@ -226,6 +243,7 @@ impl ReceiverSession {
         self.progress.total_symbols = meta.blocks.iter().map(|b| b.num_source_symbols).sum();
         self.progress.total_blocks = meta.blocks.len() as u32;
         self.received = meta.blocks.iter().map(|_| HashSet::new()).collect();
+        self.source_recv = vec![0u32; meta.blocks.len()];
         self.decoder = Some(Decoder::new(meta));
 
         // Replay all cached symbols into the new decoder. We do NOT re-cache
@@ -233,10 +251,17 @@ impl ReceiverSession {
         // meta_confirmed = true and clears the cache, and no further rebuild
         // can occur, so keeping the bytes around would just leak memory.
         for ((sbn, esi), data) in cached_symbols {
+            let bi = sbn as usize;
             // Validate the symbol still fits in the new layout.
-            if (sbn as usize) < self.received.len() {
+            if bi < self.received.len() {
                 // Re-insert into received set and decoder.
-                if self.received[sbn as usize].insert(esi) {
+                if self.received[bi].insert(esi) {
+                    // Keep the O(1) source counter in sync with the replay.
+                    if let Some(meta) = self.meta.as_ref() {
+                        if esi < meta.blocks[bi].num_source_symbols {
+                            self.source_recv[bi] += 1;
+                        }
+                    }
                     let symbol = Symbol::new(sbn, esi, data);
                     // Ignore errors during replay; the symbol might not fit the new layout.
                     if let Some(dec) = self.decoder.as_mut() {
@@ -264,13 +289,11 @@ impl ReceiverSession {
                 decoded_symbols += b.num_source_symbols;
                 decoded_blocks += 1;
             } else {
-                // Approximate: count unique source symbols received for this block.
+                // Approximate progress from the incrementally-maintained source
+                // counter — O(1) here, replacing the old per-block rescan of the
+                // received-set that made this O(n²) over a full transfer.
                 let k = b.num_source_symbols;
-                let got = self.received[i]
-                    .iter()
-                    .filter(|&&esi| esi < k)
-                    .count() as u32;
-                decoded_symbols += got.min(k);
+                decoded_symbols += self.source_recv[i].min(k);
             }
         }
         self.progress.decoded_symbols = decoded_symbols;

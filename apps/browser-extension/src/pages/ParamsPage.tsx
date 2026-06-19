@@ -139,8 +139,16 @@ export function ParamsPage({
           onChange={(e) => onChange({ fps: Number(e.target.value) })}
         >
           <option value={30}>30 FPS（稳定）</option>
+          <option value={45}>45 FPS（推荐）</option>
           <option value={60}>60 FPS（高速）</option>
         </select>
+        <span
+          className="muted"
+          style={{ display: "block", marginTop: 4, lineHeight: 1.5 }}
+        >
+          提示：接收端摄像头需以 ≥2× 发送帧率采集才能稳定抓到每个不同帧。45 FPS
+          在扫描可靠性与吞吐之间较平衡；接收端开启并行解码后可尝试 60 FPS。
+        </span>
       </div>
 
       <div className="field">
