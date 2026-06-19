@@ -6,7 +6,7 @@
 
 #![cfg(feature = "jni")]
 
-use crate::receiver::{derive_meta_from_totals, ReceiverSession};
+use crate::receiver::ReceiverSession;
 use crate::Progress;
 use jni::objects::{JByteArray, JClass};
 use jni::sys::{jint, jlong, jsize};
@@ -19,18 +19,18 @@ pub extern "system" fn Java_com_easytransfer_app_nativelib_NativeBridge_receiver
     _class: JClass,
     session_id_lo: jlong,
     session_id_hi: jlong,
-    total_blocks: jint,
-    total_symbols: jint,
-    symbol_size: jint,
+    _total_blocks: jint,
+    _total_symbols: jint,
+    _symbol_size: jint,
 ) -> jlong {
     let sid: SessionIdRaw =
         ((session_id_hi as u64 as u128) << 64) | (session_id_lo as u64 as u128);
-    let meta = derive_meta_from_totals(
-        total_blocks as u32,
-        total_symbols as u32,
-        symbol_size as u32,
-    );
-    let session = ReceiverSession::new(sid, meta);
+    // Cache-only bootstrap: do NOT build a decoder from these caller-supplied
+    // totals (a guessed early layout, and `derive_meta_from_totals`'s OTI build
+    // can itself assert on large values). Data frames are buffered until the
+    // first *validated* descriptor frame supplies the authoritative, sanity-
+    // checked OTI (see ReceiverSession::ingest), which builds the real decoder.
+    let session = ReceiverSession::new_pending(sid);
     Box::into_raw(Box::new(session)) as jlong
 }
 

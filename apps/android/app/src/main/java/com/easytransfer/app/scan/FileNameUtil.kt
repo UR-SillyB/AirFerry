@@ -17,25 +17,37 @@ import java.io.File
  * Android filesystems (and the SAF) accept a wide range of characters; only
  * a handful are genuinely illegal across filesystems. These helpers strip
  * *only* those, preserving spaces and all CJK characters.
+ *
+ * The recovered filename is attacker-controllable (decoded from a scanned QR),
+ * so [sanitize] also defends against path traversal: it keeps only the final
+ * path component, strips separators and control characters, and removes leading
+ * dots so the result can never be `.`/`..`/a hidden traversal name. Call sites
+ * that write into a directory should use [uniqueTarget], which additionally
+ * verifies the resolved path stays inside that directory.
  */
 object FileNameUtil {
 
     /**
-     * Strip only characters that are illegal in filenames across common
-     * filesystems: forward slash, backslash, colon, asterisk, question mark,
-     * double-quote, angle brackets, pipe, and C0 control characters
-     * (0x00–0x1F). Spaces, full-width punctuation and all Unicode letters
-     * (including CJK extension planes) are kept intact.
+     * Strip characters that are illegal in filenames across common filesystems
+     * (slash, backslash, colon, asterisk, question mark, double-quote, angle
+     * brackets, pipe, and C0 control characters), reduce to the final path
+     * component, and drop leading dots. Spaces, full-width punctuation and all
+     * Unicode letters (including CJK extension planes) are kept intact.
      *
-     * Trims leading/trailing whitespace and collapses the result so it is never
-     * empty (falls back to `received_file`). Truncates to 200 chars to stay
-     * well under any filesystem path-component limit.
+     * Never returns blank, `.`, or `..` (falls back to `received_file`).
+     * Truncates to 200 chars to stay under filesystem path-component limits.
      */
     fun sanitize(name: String): String {
-        val cleaned = name.trim()
-            .replace(Regex("[/\\\\:*?\"<>|\u0000-\u001F]"), "_")
+        // Reduce to the final path component first so an attacker-controlled name
+        // can't smuggle directory separators / traversal through; then strip
+        // illegal chars and leading dots.
+        val base = name.substringAfterLast('/').substringAfterLast('\\')
+        val cleaned = base
+            .replace(Regex("[/\\\\:*?\"<>|\\p{Cntrl}]"), "_")
+            .trim()
             .takeLast(200)
             .trim()
+            .trimStart('.')
         return cleaned.ifBlank { "received_file" }
     }
 
@@ -46,10 +58,19 @@ object FileNameUtil {
      *   报告.docx → 报告.docx
      *   报告.docx (exists) → 报告(1).docx
      *   报告(1).docx (exists) → 报告(2).docx
+     *
+     * Defensively verifies the resolved path stays inside `dir` (belt-and-
+     * suspenders on top of [sanitize]); falls back to a safe name otherwise.
      */
     fun uniqueTarget(dir: File, name: String): File {
         val safe = sanitize(name)
+        fun within(f: File): Boolean = try {
+            f.canonicalPath.startsWith(dir.canonicalPath + File.separator)
+        } catch (_: Exception) {
+            false
+        }
         val first = File(dir, safe)
+        if (!within(first)) return File(dir, "received_file")
         if (!first.exists()) return first
         val dot = safe.lastIndexOf('.')
         val (base, ext) = if (dot in 1 until safe.length - 1) {

@@ -86,6 +86,52 @@ pub fn decompress_with(data: &[u8], compression: u8) -> Result<Vec<u8>> {
     }
 }
 
+/// Like [`decompress_with`] but bounds the **output** size to `max_output` bytes.
+///
+/// The receiver decompresses data recovered from an untrusted optical stream. A
+/// tiny zstd/xz payload can legitimately expand 1000×+ (a "decompression bomb"),
+/// so without an output cap a crafted transfer would OOM the Android receiver at
+/// assemble time. The caller passes the descriptor's expected original size as
+/// the cap; if the stream produces more than that, it's rejected.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn decompress_with_limit(data: &[u8], compression: u8, max_output: usize) -> Result<Vec<u8>> {
+    match compression {
+        COMPRESSION_ZSTD => {
+            let dec = zstd::stream::read::Decoder::new(data)
+                .map_err(|e| Error::Compress(e.to_string()))?;
+            read_capped(dec, max_output)
+        }
+        COMPRESSION_XZ => read_capped(xz2::read::XzDecoder::new(data), max_output),
+        _ => {
+            if data.len() > max_output {
+                return Err(Error::Compress("payload exceeds size limit".into()));
+            }
+            Ok(data.to_vec())
+        }
+    }
+}
+
+/// Read a decoder fully but refuse to produce more than `max_output` bytes.
+#[cfg(not(target_arch = "wasm32"))]
+fn read_capped<R: std::io::Read>(r: R, max_output: usize) -> Result<Vec<u8>> {
+    use std::io::Read;
+    let mut out = Vec::new();
+    // Read one byte past the cap so an over-limit stream can be detected.
+    r.take(max_output as u64 + 1)
+        .read_to_end(&mut out)
+        .map_err(|e| Error::Compress(e.to_string()))?;
+    if out.len() > max_output {
+        return Err(Error::Compress("decompressed output exceeds expected size".into()));
+    }
+    Ok(out)
+}
+
+/// Stub for wasm32 (receiver never runs in the browser).
+#[cfg(target_arch = "wasm32")]
+pub fn decompress_with_limit(data: &[u8], _compression: u8, _max_output: usize) -> Result<Vec<u8>> {
+    Ok(data.to_vec())
+}
+
 /// Stub for wasm32: the receiver is never exercised in the browser, but the
 /// module must compile so that the transfer-engine crate links under wasm-pack.
 #[cfg(target_arch = "wasm32")]
@@ -178,5 +224,22 @@ mod tests {
         let data = vec![1u8, 2, 3, 4];
         assert_eq!(compress_with(&data, 99).unwrap(), data);
         assert_eq!(decompress_with(&data, 99).unwrap(), data);
+    }
+
+    #[test]
+    fn decompress_with_limit_rejects_bomb() {
+        // Highly compressible input expands far beyond a tiny cap.
+        let data = vec![0u8; 1_000_000];
+        let z = compress(&data, DEFAULT_LEVEL).unwrap();
+        assert!(z.len() < 10_000, "should compress tiny");
+        // Cap below the true output → rejected (bomb defense).
+        assert!(decompress_with_limit(&z, COMPRESSION_ZSTD, 1000).is_err());
+        // Cap at the true output → ok.
+        assert_eq!(decompress_with_limit(&z, COMPRESSION_ZSTD, data.len()).unwrap(), data);
+
+        // XZ path behaves the same.
+        let x = xz_compress(&data).unwrap();
+        assert!(decompress_with_limit(&x, COMPRESSION_XZ, 1000).is_err());
+        assert_eq!(decompress_with_limit(&x, COMPRESSION_XZ, data.len()).unwrap(), data);
     }
 }

@@ -69,6 +69,15 @@ impl Decoder {
                 total: self.blocks.len() as u32,
             });
         }
+        // Defensive: drop hostile symbol coordinates that would panic raptorq.
+        // `PayloadId::new` asserts ESI < 2^24, and sub-block unpacking slices
+        // `symbol_size` bytes out of the payload — a short/oversized payload is
+        // an out-of-range slice. A fountain code just needs other symbols, so
+        // silently ignoring a malformed one is safe. This guards both the live
+        // path and the cache-replay path (which also calls add_symbol).
+        if symbol.id.esi >= (1 << 24) || symbol.data.len() != self.meta.symbol_size as usize {
+            return Ok(self.is_complete());
+        }
         let block = &mut self.blocks[sbn];
         if block.decoded.is_some() {
             // Already reconstructed; ignore further symbols for this block.

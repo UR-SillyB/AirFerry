@@ -28,17 +28,26 @@ Java_com_easytransfer_app_scan_ZxingDecoder_decodeY(
     jbyteArray yPlane, jint width, jint height, jint rowStride
 ) {
     jsize len = env->GetArrayLength(yPlane);
+    // Validate dimensions BEFORE allocating / copying. `width`/`height`/`rowStride`
+    // and the array length must be self-consistent, or the unpack loop below would
+    // read out of bounds (SIGSEGV) or the allocation could throw outside the
+    // try-block. Use 64-bit math so the region size can't overflow.
+    if (width <= 0 || height <= 0 || rowStride < width ||
+        static_cast<int64_t>(height - 1) * static_cast<int64_t>(rowStride) +
+            static_cast<int64_t>(width) > static_cast<int64_t>(len)) {
+        return nullptr;
+    }
     jbyte *data = env->GetByteArrayElements(yPlane, nullptr);
     if (!data) {
         return nullptr;
     }
 
     // Unpack the Y plane (may have row padding) into a compact greyscale buffer.
-    std::vector<uint8_t> grey(static_cast<size_t>(width) * height);
+    std::vector<uint8_t> grey(static_cast<size_t>(width) * static_cast<size_t>(height));
     const uint8_t *src = reinterpret_cast<const uint8_t *>(data);
     for (int y = 0; y < height; y++) {
-        std::memcpy(grey.data() + static_cast<size_t>(y) * width,
-                    src + static_cast<size_t>(y) * rowStride,
+        std::memcpy(grey.data() + static_cast<size_t>(y) * static_cast<size_t>(width),
+                    src + static_cast<size_t>(y) * static_cast<size_t>(rowStride),
                     static_cast<size_t>(width));
     }
     env->ReleaseByteArrayElements(yPlane, data, JNI_ABORT);
@@ -60,9 +69,17 @@ Java_com_easytransfer_app_scan_ZxingDecoder_decodeY(
                 const auto &bytes = result.bytes();
                 if (!bytes.empty()) {
                     jbyteArray out = env->NewByteArray(static_cast<jsize>(bytes.size()));
-                    if (out) {
-                        env->SetByteArrayRegion(out, 0, static_cast<jsize>(bytes.size()),
-                            reinterpret_cast<const jbyte *>(bytes.data()));
+                    if (!out) {
+                        // NewByteArray failed (OOM) → clear the pending exception
+                        // so it doesn't surface on the next unrelated JNI call.
+                        if (env->ExceptionCheck()) env->ExceptionClear();
+                        return nullptr;
+                    }
+                    env->SetByteArrayRegion(out, 0, static_cast<jsize>(bytes.size()),
+                        reinterpret_cast<const jbyte *>(bytes.data()));
+                    if (env->ExceptionCheck()) {
+                        env->ExceptionClear();
+                        return nullptr;
                     }
                     return out;
                 }

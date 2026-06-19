@@ -160,6 +160,15 @@ impl ReceiverSession {
         // Descriptor frame: adopt authoritative metadata + file meta.
         if frame.header.flags & qr_protocol::frame::FLAG_DESCRIPTOR != 0 {
             if let Some(info) = crate::descriptor::parse_payload(&frame.payload) {
+                // Reject hostile descriptor metadata before it reaches raptorq.
+                // The descriptor is decoded off an arbitrary screen (attacker-
+                // controllable); invalid OTI/block params make raptorq panic
+                // (divide-by-zero / assert / slice OOB) or allocate gigabytes,
+                // and `panic = "abort"` would crash the whole receiver.
+                if info.meta.validate().is_err() {
+                    self.progress.frames_corrupt += 1;
+                    return Ok(self.is_complete());
+                }
                 // Only rebuild when the authoritative layout differs from what
                 // we currently hold (or we had none at all).
                 let needs_rebuild = match &self.meta {
@@ -203,6 +212,14 @@ impl ReceiverSession {
             return Ok(self.is_complete());
         }
         let esi = frame.header.esi;
+        // Reject hostile symbol coordinates that would panic the RaptorQ decoder:
+        // ESI must fit RFC 6330's 24-bit space, and the payload must be exactly
+        // symbol_size bytes (else sub-block unpacking slices out of range).
+        let sym_size = self.meta.as_ref().map(|m| m.symbol_size).unwrap_or(0);
+        if esi >= (1 << 24) || frame.payload.len() as u32 != sym_size {
+            self.progress.frames_corrupt += 1;
+            return Ok(self.is_complete());
+        }
         if !self.received[sbn].insert(esi) {
             self.progress.frames_duplicate += 1;
             return Ok(self.is_complete());
@@ -362,7 +379,15 @@ impl ReceiverSession {
         if self.file_meta.compression == qr_protocol::compress::COMPRESSION_NONE {
             Ok(Some(raw))
         } else {
-            qr_protocol::compress::decompress_with(&raw, self.file_meta.compression)
+            // Bound the decompressed output against a decompression bomb in the
+            // untrusted payload. The descriptor's original_size is the exact
+            // expected output; fall back to a conservative ceiling when unknown.
+            let cap = if self.file_meta.original_size > 0 {
+                self.file_meta.original_size as usize
+            } else {
+                256 * 1024 * 1024
+            };
+            qr_protocol::compress::decompress_with_limit(&raw, self.file_meta.compression, cap)
                 .map(Some)
                 .map_err(|e| Error::Compress(e.to_string()))
         }
@@ -578,5 +603,49 @@ mod tests {
         assert!(rx.is_complete(), "late-descriptor receiver must recover");
         let out = rx.assemble().unwrap();
         assert_eq!(&out[..data.len()], data);
+    }
+
+    /// A descriptor frame decoded off a hostile screen must be rejected (not
+    /// confirmed) without panicking, even though it passed magic/CRC.
+    #[test]
+    fn rejects_tampered_descriptor_without_panic() {
+        let data = payload(20_000);
+        let sid = SessionId::derive("evil", data.len() as u64, 0, &[]);
+        let sender = SenderSession::new(
+            &data, sid, SenderConfig::default(), crate::descriptor::FileMeta::default(),
+        ).unwrap();
+        let meta = sender.meta().clone();
+        let mut desc = crate::descriptor::build_frame(
+            &meta, &crate::descriptor::FileMeta::default(), sid.into(), 1, 0,
+        ).unwrap();
+        // Corrupt the descriptor's symbol_size field (offset 12..16) so it no
+        // longer matches the embedded OTI → validate() must reject it.
+        desc.payload[12..16].copy_from_slice(&999u32.to_be_bytes());
+
+        let mut rx = ReceiverSession::new_pending(sid.into());
+        let _ = rx.ingest(desc); // must not panic
+        assert!(!rx.is_meta_confirmed(), "tampered descriptor must be rejected");
+        assert!(rx.progress().frames_corrupt >= 1, "rejected descriptor counts as corrupt");
+    }
+
+    /// A data frame whose ESI exceeds RFC 6330's 24-bit space (which would panic
+    /// raptorq's PayloadId) must be dropped without panic or acceptance.
+    #[test]
+    fn drops_hostile_esi_frame_without_panic() {
+        let data = payload(20_000);
+        let sid = SessionId::derive("e", data.len() as u64, 0, &[]);
+        let meta = SenderSession::new(
+            &data, sid, SenderConfig::default(), crate::descriptor::FileMeta::default(),
+        ).unwrap().meta().clone();
+        let mut rx = ReceiverSession::new_confirmed(sid.into(), meta.clone());
+
+        let payload_bytes = vec![0u8; meta.symbol_size as usize];
+        let f = Frame::build(
+            sid.into(), 0, 0, 1u32 << 24,
+            meta.blocks.len() as u32, 1, meta.symbol_size, 1, 0, &payload_bytes,
+        );
+        let _ = rx.ingest(f); // must not panic
+        assert_eq!(rx.progress().received_symbols, 0, "hostile ESI must not be accepted");
+        assert!(rx.progress().frames_corrupt >= 1);
     }
 }
