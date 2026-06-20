@@ -15,9 +15,11 @@ build/
 *.log
 .DS_Store
 
-# Plasmo extension build output
+# Plasmo extension build output + generated typings/cache (both repo-root and
+# per-package). These are regenerable build artifacts, never source.
 apps/browser-extension/build/
 apps/browser-extension/.plasmo/
+.plasmo/
 
 # Android / Gradle
 apps/android/.gradle/

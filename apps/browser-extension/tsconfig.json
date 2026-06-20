@@ -20,8 +20,7 @@
     "isolatedModules": true,
     "noEmit": true,
     "types": [
-      "chrome",
-      "node"
+      "chrome"
     ],
     "baseUrl": ".",
     "paths": {

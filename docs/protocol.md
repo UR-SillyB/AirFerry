@@ -74,25 +74,45 @@ session_id = FNV1a_128(
 
 ### 描述符载荷布局（T 字节内）
 
-**协议 v3 格式**（当前版本）：
+载荷始终**零填充到 `symbol_size` 字节**。版本字段仅作提示——解析器按可用长度 + 内容判定每个扩展是否存在（见下方 v2 兼容说明）。
+
+**固定头部 + 块表**（所有版本共有）：
 
 | 偏移 | 长度 | 字段 | 说明 |
 |------|------|------|------|
 | 0 | 1 | magic | `0xD5` |
-| 1 | 1 | version | `3` |
+| 1 | 1 | version | `3`（当前；`2`/`1` 为旧版） |
 | 2 | 2 | num_blocks | u16 BE |
-| 4 | 8 | transfer_length | u64 BE（压缩后大小） |
+| 4 | 8 | transfer_length | u64 BE（RaptorQ 对象字节数，含填充） |
 | 12 | 4 | symbol_size | u32 BE |
 | 16 | 12 | oti_bytes | RFC 6330 OTI（12B 线格式） |
 | 28 | 16×B | blocks[] | 每块：sbn(u32) + num_source_symbols(u32) + block_length(u64) |
-| 28+16B | 1 | compression | u8：`0`=无压缩, `1`=Zstd, `2`=XZ |
-| 29+16B | 8 | compressed_size | u64 BE（压缩后负载大小） |
-| 37+16B | 4 | original_crc32 | u32 BE（原始文件 CRC32） |
-| 41+16B | 变长 | filename | UTF-8 文件名（剩余字节） |
 
-**v3 扩展尾部**（compression + compressed_size + original_crc32 + filename）按可用长度解析，因此 v2 接收端可读取 v3 描述符（忽略尾部扩展）。
+记块表末尾偏移为 `P = 28 + 16×B`。
 
-固定开销 28 字节 + 每块 16 字节 + v3 尾部 13 字节。对数百块以内的文件，轻松装入一个 T 字节符号（默认 512）。
+**v2 扩展**（紧跟块表；version ≥ 2 或剩余字节足够时解析）：
+
+| 偏移 | 长度 | 字段 | 说明 |
+|------|------|------|------|
+| P | 1 | filename_len | u8（0..=255） |
+| P+1 | filename_len | filename | UTF-8 文件名 |
+| P+1+fn | 8 | original_size | u64 BE（压缩前原始字节数） |
+| P+9+fn | 4 | crc32 | u32 BE（原始文件 CRC32） |
+
+记 v2 扩展末尾偏移为 `Q = P + 1 + filename_len + 12`。
+
+**v3 扩展**（紧跟 v2 扩展；version ≥ 3 或尾部非全零时解析）：
+
+| 偏移 | 长度 | 字段 | 说明 |
+|------|------|------|------|
+| Q | 1 | compression | u8：`0`=无压缩, `1`=Zstd, `2`=XZ |
+| Q+1 | 8 | compressed_size | u64 BE（压缩后负载字节数，RaptorQ 填充前） |
+
+剩余字节（从 `Q+9` 到符号末尾）为零填充。
+
+**v2 兼容说明**：真实 v2 发送端只写到 `crc32`，其后为补零区。由于载荷总是补齐到 `symbol_size`，仅凭"剩余 ≥ 9 字节"无法区分 v3 尾部与 v2 补零——全零的 9 字节尾部会被误读为 `compressed_size=0`，导致接收端把恢复结果截成空文件。解析器因此仅当 `version ≥ 3` **或**尾部非全零时才将其当作 v3 扩展；否则按 v2 处理（`compression=None`、`compressed_size == original_size`）。
+
+固定开销 28 字节 + 每块 16 字节 + v2 尾部 13 字节 + filename_len + v3 尾部 9 字节。默认 symbol_size 1024 下对数百块以内的文件轻松装入一个符号。
 
 ## 压缩 (Compression)
 
