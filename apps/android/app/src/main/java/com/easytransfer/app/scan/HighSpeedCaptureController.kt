@@ -1,5 +1,41 @@
 package com.easytransfer.app.scan
 
+// ── Future work ──────────────────────────────────────────────────────────
+//
+// TODO: 高速录像模式（120/240fps）不可用的调试
+//
+// 当前状态：HighSpeedCaptureController.isSupported() 对大多数设备返回
+// false，因为 constrained high-speed 会话需要设备固件支持 120/240fps
+// 的受限捕获。即使 isSupported() 返回 true，实际录像 + 批量解码的路径
+// 也存在以下已知问题：
+//
+//   1. Constrained high-speed session 的帧率由设备驱动决定，部分设备
+//      虽然声明支持但实际帧率远低于 120fps（如只跑 60fps）。
+//
+//   2. 录像模式下的 H.264 编码引入压缩伪影（block artifact），ZXing
+//      在低码率下解码率骤降。需要测试不同的 MediaCodec 比特率/质量
+//      设置（当前固定 CQ 模式 + BITRATE * 2）。
+//
+//   3. 解码延迟：录像 → MediaExtractor → 帧解码 → ingest 的管线延迟
+//      约 2-5 秒，用户感知为"扫描后等很久才出进度"。需要优化：
+//      - 边录边解（流水线化）
+//      - 关键帧间隔调小（当前 1 秒）
+//
+//   4. 内存压力：120fps × YUV420_888 1080p 约 370MB/s 的原始数据，
+//      ImageReader + MediaCodec 队列容易 OOM。需要监控并限制队列深度。
+//
+//   5. Android 16 (SDK 36) 新增了 Camera2 高帧率限制策略，部分 OEM
+//      设备可能完全禁用 constrained high-speed。需要逐设备兼容测试。
+//
+// 调试建议：
+//   - 先在支持的设备上用 `adb shell dumpsys media.camera` 确认实际
+//     high-speed 能力（最大帧率、支持的分辨率）
+//   - 用 `adb shell setprop persist.vendor.camera.fpsrange 120,120` 强制
+//     帧率（需 root 或 eng build）
+//   - 对比 ImageAnalysis 流水线 vs 高速录像的帧解码率
+//
+// ── End future work ──────────────────────────────────────────────────────
+
 import android.content.Context
 import android.graphics.ImageFormat
 import android.hardware.camera2.CameraCaptureSession
