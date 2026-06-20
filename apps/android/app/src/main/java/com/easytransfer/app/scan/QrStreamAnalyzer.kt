@@ -33,6 +33,11 @@ class QrStreamAnalyzer(
                 Log.i(TAG, "actual analysis stream: ${image.width}x${image.height}" +
                     " rs=${plane.rowStride} fps-target was set via Camera2Interop")
             }
+            // Publish the sensor rotation so the UI overlay can map analysis-stream
+            // pixel bboxes back into PreviewView space. Stable for the lifetime of a
+            // camera bind (a portrait phone is almost always 90°), so writing it
+            // every frame is cheap and race-free (last-write-wins, all equal).
+            pool.setAnalysisRotation(image.imageInfo.rotationDegrees)
             pool.submit(plane.buffer, image.width, image.height, plane.rowStride)
         } catch (e: Exception) {
             // Narrowed from Throwable: an OutOfMemoryError from a large frame

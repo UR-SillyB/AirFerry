@@ -25,14 +25,15 @@ import java.util.concurrent.locks.ReentrantLock
  * @param onDecoded invoked (serialized) with each decoded QR payload.
  */
 class QrDecodePool(
-    private val onDecoded: (ByteArray) -> Unit,
+    private val onDecoded: (ByteArray, IntArray?) -> Unit,
     /**
-     * Experimental multi-QR mode: when true, each frame is decoded with
-     * `ReadBarcodes` (plural) and *every* valid code's payload is ingested
-     * (not just the first), so a sender tiling N codes per frame yields ~N
-     * symbols/tick. Off (default) → single-code tracked-ROI path.
+     * Multi-QR mode: when true (the default + only mode ScanActivity uses),
+     * each frame is decoded with `ReadBarcodes` (plural) and *every* valid
+     * code's payload is ingested (not just the first), so a sender tiling N
+     * codes per frame yields ~N symbols/tick. The single-code tracked-ROI path
+     * (`decode`) is retained for completeness but no longer selected by the UI.
      */
-    private val multiMode: Boolean = false,
+    private val multiMode: Boolean = true,
 ) {
     /** A captured luminance frame; [y] is a pooled buffer (recycled after use). */
     private class YFrame(
@@ -94,6 +95,28 @@ class QrDecodePool(
     /** Consecutive tracked-region misses in multi mode → trigger re-lock. */
     private val multiMiss = AtomicLong(0)
 
+    /**
+     * Analysis-stream sensor rotation in degrees (0/90/180/270), published by
+     * [QrStreamAnalyzer] every frame. The UI overlay needs it to map analysis-
+     * stream pixel bboxes (e.g. 1920×1080 landscape sensor) into the portrait
+     * PreviewView space. Stable for a camera bind, so last-write-wins is fine.
+     */
+    @Volatile
+    private var analysisRotation: Int = 0
+    /** Analysis-stream width/height in pixels (the sensor's actual delivered
+     *  geometry, e.g. 1920×1080). Published with each submit(). */
+    @Volatile
+    private var analysisWidth: Int = 0
+    @Volatile
+    private var analysisHeight: Int = 0
+
+    /** Called by [QrStreamAnalyzer] to publish the per-frame sensor rotation. */
+    fun setAnalysisRotation(deg: Int) { analysisRotation = deg }
+    /** Current analysis-stream rotation (degrees). */
+    fun snapshotAnalysisRotation(): Int = analysisRotation
+    /** Current analysis-stream {width, height}. */
+    fun snapshotAnalysisSize(): Pair<Int, Int> = analysisWidth to analysisHeight
+
     fun start() {
         if (running.getAndSet(true)) return
         for (i in 0 until workerCount) {
@@ -127,6 +150,10 @@ class QrDecodePool(
             droppedFrames.incrementAndGet()
             return
         }
+        // Publish the analysis geometry so the UI overlay can map pixel bboxes
+        // into PreviewView space. Stable for a camera bind (last-write-wins).
+        analysisWidth = width
+        analysisHeight = height
         capturedFrames.incrementAndGet()
         val buf = obtainBuffer(len)
         src.get(buf, 0, len)
@@ -163,7 +190,7 @@ class QrDecodePool(
                         decodedFrames.addAndGet(results.size.toLong())
                         ingestLock.lock()
                         try {
-                            for (r in results) onDecoded(r.payload)
+                            for (r in results) onDecoded(r.payload, r.bbox)
                         } finally {
                             ingestLock.unlock()
                         }
@@ -179,7 +206,7 @@ class QrDecodePool(
                         // pending-ingest queue.
                         ingestLock.lock()
                         try {
-                            onDecoded(payload)
+                            onDecoded(payload, bboxOut.copyOf())
                         } finally {
                             ingestLock.unlock()
                         }
@@ -482,6 +509,16 @@ class QrDecodePool(
     /** Total decoded *symbols* (QR codes), not frames. See [decodedFrames]. */
     fun decodedCount(): Long = decodedFrames.get()
     fun droppedCount(): Long = droppedFrames.get()
+
+    /**
+     * Snapshot the current per-code bboxes (packed 4×N ints {minX,minY,maxX,maxY}
+     * in analysis-stream pixel coords) plus the live count. Returns null before
+     * the first full-frame lock. The returned array is the live tracker (treated
+     * as immutable by callers — copy if you need to retain it across frames).
+     * Intended to be read at the UI refresh cadence (~7 Hz), NOT per-frame.
+     */
+    fun snapshotMultiBboxes(): IntArray? = multiTrackedBboxes
+    fun snapshotMultiCount(): Int = multiLockedCount
 
     /**
      * Run [action] while holding the ingest lock, so it cannot overlap any

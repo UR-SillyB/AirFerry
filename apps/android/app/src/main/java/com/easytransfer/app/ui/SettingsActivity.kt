@@ -31,10 +31,6 @@ class SettingsActivity : ComponentActivity() {
     private fun SettingsScreen() {
         val prefs = remember { getSharedPreferences("easytransfer", MODE_PRIVATE) }
         var redundancy by remember { mutableFloatStateOf(prefs.getInt("default_redundancy", 5).toFloat()) }
-        // Multi-QR is on by default: paired with the sender's default 4 codes it
-        // multiplies throughput ~4×, and the host-verified decode path handles it
-        // reliably. Users who hit scan issues can still turn it off.
-        var multiQrMode by remember { mutableStateOf(prefs.getBoolean("multi_qr_mode", true)) }
 
         Column(modifier = Modifier.fillMaxSize().background(BgDark)) {
             Text(
@@ -63,37 +59,6 @@ class SettingsActivity : ComponentActivity() {
                         steps = 8,
                         colors = SliderDefaults.colors(thumbColor = Accent, activeTrackColor = Accent)
                     )
-                }
-            }
-
-            Card(
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
-                shape = RoundedCornerShape(12.dp),
-                colors = CardDefaults.cardColors(containerColor = CardBg)
-            ) {
-                Column(modifier = Modifier.padding(20.dp)) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text("多二维码同屏", color = TextPrimary, fontSize = 16.sp, fontWeight = FontWeight.Bold)
-                            Text(
-                                "每帧解码全部二维码（配合发送端 4 码提升吞吐）。不稳定可关闭",
-                                color = TextSecondary, fontSize = 12.sp
-                            )
-                        }
-                        Spacer(modifier = Modifier.width(12.dp))
-                        Switch(
-                            checked = multiQrMode,
-                            onCheckedChange = {
-                                multiQrMode = it
-                                prefs.edit().putBoolean("multi_qr_mode", it).apply()
-                            },
-                            colors = SwitchDefaults.colors(checkedThumbColor = Accent, checkedTrackColor = Accent)
-                        )
-                    }
                 }
             }
 
