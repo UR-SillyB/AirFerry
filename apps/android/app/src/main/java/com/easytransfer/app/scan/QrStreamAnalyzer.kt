@@ -24,6 +24,15 @@ class QrStreamAnalyzer(
             val planes = image.planes
             if (planes.isEmpty()) return
             val plane = planes[0]
+            // Log the actual delivered resolution once (diagnostics for the
+            // 1080p-vs-720p upgrade). CameraX picks the closest supported size
+            // to the requested ResolutionStrategy, so this confirms what the
+            // device actually hands us.
+            if (!loggedActualResolution) {
+                loggedActualResolution = true
+                Log.i(TAG, "actual analysis stream: ${image.width}x${image.height}" +
+                    " rs=${plane.rowStride} fps-target was set via Camera2Interop")
+            }
             pool.submit(plane.buffer, image.width, image.height, plane.rowStride)
         } catch (e: Exception) {
             // Narrowed from Throwable: an OutOfMemoryError from a large frame
@@ -39,5 +48,7 @@ class QrStreamAnalyzer(
 
     companion object {
         private const val TAG = "QrStreamAnalyzer"
+        /** Set true after the first frame logs the real delivered resolution. */
+        private var loggedActualResolution = false
     }
 }

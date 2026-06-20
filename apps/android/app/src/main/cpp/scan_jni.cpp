@@ -23,6 +23,7 @@
 
 #include <jni.h>
 #include <android/log.h>
+#include <algorithm>
 #include <climits>
 #include <vector>
 
@@ -99,17 +100,62 @@ static jbyteArray decodeInView(JNIEnv *env, const ZXing::ImageView &view, int *o
     return nullptr;
 }
 
-// Multi-code decode: run ReadBarcodes (plural) over `view` and collect every
-// valid QR's payload into a flat buffer for the experimental multi-QR mode.
-// Returns a freshly-allocated Java byte[] laid out as:
-//   [u32 count_LE][for each code: u32 len_LE + len bytes payload]
-// or nullptr if no valid QR is found. The Kotlin side parses this and ingests
-// each payload into the same RaptorQ session (codes are distinguished by their
-// embedded sbn/esi, so no protocol change is needed).
-//
-// Multi-QR codes are smaller (tiled), so keep tryHarder enabled here as well;
-// otherwise the receiver can miss every code on a browser screen frame.
-static jbyteArray decodeInViewMulti(JNIEnv *env, const ZXing::ImageView &view) {
+// Append one decoded result to `out` in the tracked-multi layout:
+//   [u32 len_LE][len bytes payload][4×s32 bbox {minX,minY,maxX,maxY}]
+// `bbox` is in the ImageView's LOCAL coordinate system; the caller translates
+// it back to full-frame coords by adding the region origin. `count` is bumped.
+static void appendMultiResult(std::vector<uint8_t> &out, uint32_t &count,
+                              const ZXing::Barcode &result) {
+    const auto &bytes = result.bytes();
+    if (bytes.empty()) return;
+    uint32_t len = static_cast<uint32_t>(bytes.size());
+    out.push_back(len & 0xFF);
+    out.push_back((len >> 8) & 0xFF);
+    out.push_back((len >> 16) & 0xFF);
+    out.push_back((len >> 24) & 0xFF);
+    out.insert(out.end(), bytes.begin(), bytes.end());
+    int bbox[4];
+    fillBbox(result.position(), bbox);
+    for (int i = 0; i < 4; i++) {
+        uint32_t v = static_cast<uint32_t>(bbox[i]);
+        out.push_back(v & 0xFF);
+        out.push_back((v >> 8) & 0xFF);
+        out.push_back((v >> 16) & 0xFF);
+        out.push_back((v >> 24) & 0xFF);
+    }
+    count++;
+}
+
+// Finalize the tracked-multi flat buffer (write the count header) and wrap it
+// into a fresh Java byte[]. Returns nullptr on allocation failure.
+static jbyteArray finalizeMultiBuf(JNIEnv *env, std::vector<uint8_t> &out,
+                                   uint32_t count) {
+    if (count == 0) return nullptr;
+    out[0] = count & 0xFF;
+    out[1] = (count >> 8) & 0xFF;
+    out[2] = (count >> 16) & 0xFF;
+    out[3] = (count >> 24) & 0xFF;
+
+    jbyteArray arr = env->NewByteArray(static_cast<jsize>(out.size()));
+    if (!arr) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        return nullptr;
+    }
+    env->SetByteArrayRegion(arr, 0, static_cast<jsize>(out.size()),
+        reinterpret_cast<const jbyte *>(out.data()));
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+        return nullptr;
+    }
+    return arr;
+}
+
+// Multi-code full-frame decode (ReadBarcodes plural). Collects every valid QR's
+// payload + bbox into a flat buffer:
+//   [u32 count_LE][for each: u32 len_LE + len bytes payload + 4×s32 bbox]
+// The bbox here is in FULL-FRAME coordinates (the view spans the whole frame).
+// Used as the cold path: first lock, periodic re-lock, or region fallback.
+static jbyteArray decodeInViewMultiFull(JNIEnv *env, const ZXing::ImageView &view) {
     ZXing::ReaderOptions options;
     options.setFormats(ZXing::BarcodeFormat::QRCode);
     options.setTryHarder(true);
@@ -117,47 +163,91 @@ static jbyteArray decodeInViewMulti(JNIEnv *env, const ZXing::ImageView &view) {
 
     try {
         auto results = ZXing::ReadBarcodes(view, options);
-        // Build the flat output in a std::vector first (count unknown until we
-        // filter valid/non-empty), then copy into the Java array in one shot.
         std::vector<uint8_t> out;
         out.resize(4);  // placeholder for count
         uint32_t count = 0;
         for (const auto &result : results) {
             if (!result.isValid()) continue;
+            appendMultiResult(out, count, result);
+        }
+        return finalizeMultiBuf(env, out, count);
+    } catch (const std::exception &e) {
+        LOGE("multi decode error: %s", e.what());
+    }
+    return nullptr;
+}
+
+// Multi-code REGION decode. For each tracked hint {minX,minY,maxX,maxY} (full-
+// frame coords), expand it by `marginFrac` of its size, crop a zero-copy square
+// sub-window, and run ReadBarcode (singular) inside it. The singular API
+// returns the first valid QR in that window and stops — far cheaper than
+// re-scanning the whole frame for every code. On success the bbox is translated
+// back to full-frame coords by adding the region origin.
+//
+// Returns the same flat layout as decodeInViewMultiFull. The Kotlin caller
+// falls back to a full-frame scan when too few regions succeed (motion /
+// re-lock needed). `hints` is a packed int[] of length 4*hintCount; `hintCount`
+// is the number of rects.
+static jbyteArray decodeInViewMultiRegions(
+        JNIEnv *env, const ZXing::ImageView &full,
+        const jint *hints, jint hintCount, jfloat marginFrac) {
+    ZXing::ReaderOptions options;
+    options.setFormats(ZXing::BarcodeFormat::QRCode);
+    options.setTryHarder(true);
+    options.setTryInvert(true);
+
+    std::vector<uint8_t> out;
+    out.resize(4);
+    uint32_t count = 0;
+    try {
+        for (jint i = 0; i < hintCount; i++) {
+            const jint *r = hints + i * 4;
+            int minX = r[0], minY = r[1], maxX = r[2], maxY = r[3];
+            if (maxX <= minX || maxY <= minY) continue;
+            int qw = maxX - minX, qh = maxY - minY;
+            int m = static_cast<int>(static_cast<float>(std::max(qw, qh)) * marginFrac);
+            int ex0 = std::max(0, minX - m);
+            int ey0 = std::max(0, minY - m);
+            int ex1 = std::min(static_cast<int>(full.width()), maxX + m);
+            int ey1 = std::min(static_cast<int>(full.height()), maxY + m);
+            int side = std::min(ex1 - ex0, ey1 - ey0);
+            if (side <= 0) continue;
+            // Square region centered on the bbox.
+            int cx = (ex0 + ex1) / 2, cy = (ey0 + ey1) / 2;
+            int half = side / 2;
+            int x0 = std::max(0, std::min(cx - half,
+                static_cast<int>(full.width()) - side));
+            int y0 = std::max(0, std::min(cy - half,
+                static_cast<int>(full.height()) - side));
+            ZXing::ImageView roi = full.cropped(x0, y0, side, side);
+            auto result = ZXing::ReadBarcode(roi, options);
+            if (!result.isValid()) continue;
             const auto &bytes = result.bytes();
             if (bytes.empty()) continue;
+            // Translate the view-local bbox to full-frame coords before append.
+            int bbox[4];
+            fillBbox(result.position(), bbox);
+            // Wrap a throwaway Result-free write: append payload then translated bbox.
             uint32_t len = static_cast<uint32_t>(bytes.size());
-            // length-prefix (little-endian u32) + payload
             out.push_back(len & 0xFF);
             out.push_back((len >> 8) & 0xFF);
             out.push_back((len >> 16) & 0xFF);
             out.push_back((len >> 24) & 0xFF);
             out.insert(out.end(), bytes.begin(), bytes.end());
+            for (int k = 0; k < 4; k++) {
+                int fv = bbox[k] + ((k == 0 || k == 2) ? x0 : y0);
+                uint32_t v = static_cast<uint32_t>(fv);
+                out.push_back(v & 0xFF);
+                out.push_back((v >> 8) & 0xFF);
+                out.push_back((v >> 16) & 0xFF);
+                out.push_back((v >> 24) & 0xFF);
+            }
             count++;
         }
-        if (count == 0) return nullptr;
-        // Write the actual count into the header slot.
-        out[0] = count & 0xFF;
-        out[1] = (count >> 8) & 0xFF;
-        out[2] = (count >> 16) & 0xFF;
-        out[3] = (count >> 24) & 0xFF;
-
-        jbyteArray arr = env->NewByteArray(static_cast<jsize>(out.size()));
-        if (!arr) {
-            if (env->ExceptionCheck()) env->ExceptionClear();
-            return nullptr;
-        }
-        env->SetByteArrayRegion(arr, 0, static_cast<jsize>(out.size()),
-            reinterpret_cast<const jbyte *>(out.data()));
-        if (env->ExceptionCheck()) {
-            env->ExceptionClear();
-            return nullptr;
-        }
-        return arr;
     } catch (const std::exception &e) {
-        LOGE("multi decode error: %s", e.what());
+        LOGE("multi region decode error: %s", e.what());
     }
-    return nullptr;
+    return finalizeMultiBuf(env, out, count);
 }
 
 // Write the axis-aligned bounding box of a ZXing position (a Quadrilateral of
@@ -330,11 +420,10 @@ Java_com_easytransfer_app_scan_ZxingDecoder_decodeYRegionTracked(
     return result;
 }
 
-// Multi-QR full-frame decode (experimental). Scans the whole frame with
-// ReadBarcodes and returns every valid QR's payload in a flat buffer (see
-// decodeInViewMulti). Used only when the receiver has multi-QR mode enabled;
-// otherwise the single-code tracked path is used. The Y plane is viewed in
-// place (rowStride honored) — no compacting copy.
+// Multi-QR full-frame decode. Scans the whole frame with ReadBarcodes and
+// returns every valid QR's payload + full-frame bbox in a flat buffer (see
+// decodeInViewMultiFull). Used as the cold path (first lock / periodic re-lock)
+// in the multi-QR tracked pipeline, or as the only path when no hints exist.
 JNIEXPORT jbyteArray JNICALL
 Java_com_easytransfer_app_scan_ZxingDecoder_decodeMultiY(
     JNIEnv *env, jobject /*thiz*/,
@@ -347,11 +436,48 @@ Java_com_easytransfer_app_scan_ZxingDecoder_decodeMultiY(
     try {
         ZXing::ImageView view(reinterpret_cast<const uint8_t *>(data),
                               width, height, ZXing::ImageFormat::Lum, rowStride);
-        result = decodeInViewMulti(env, view);
+        result = decodeInViewMultiFull(env, view);
     } catch (const std::exception &e) {
         LOGE("ImageView/multi error: %s", e.what());
     }
     env->ReleaseByteArrayElements(yPlane, data, JNI_ABORT);
+    return result;
+}
+
+// Multi-QR TRACKED region decode. For each bbox hint in `hints` (packed
+// {minX,minY,maxX,maxY} rects, hintCount of them), crops a zero-copy expanded
+// window and runs ReadBarcode (singular) — skipping the full-frame finder scan.
+// This is the hot path: once each on-screen code's bbox is known, only tiny
+// windows are scanned per code, not the whole frame. Returns the same flat
+// layout as decodeMultiY, with bboxes translated back to full-frame coords.
+JNIEXPORT jbyteArray JNICALL
+Java_com_easytransfer_app_scan_ZxingDecoder_decodeMultiYTracked(
+    JNIEnv *env, jobject /*thiz*/,
+    jbyteArray yPlane, jint width, jint height, jint rowStride,
+    jintArray hints, jint hintCount, jfloat marginFrac
+) {
+    if (hints == nullptr || hintCount <= 0) return nullptr;
+    jsize hintsLen = env->GetArrayLength(hints);
+    if (hintsLen < hintCount * 4) return nullptr;
+
+    // Pin the hints array read-only.
+    jint *hintPtr = env->GetIntArrayElements(hints, nullptr);
+    if (hintPtr == nullptr) return nullptr;
+
+    jbyte *data = pinYPlane(env, yPlane, width, height, rowStride, nullptr);
+    jbyteArray result = nullptr;
+    if (data != nullptr) {
+        try {
+            ZXing::ImageView full(reinterpret_cast<const uint8_t *>(data),
+                                  width, height, ZXing::ImageFormat::Lum, rowStride);
+            result = decodeInViewMultiRegions(env, full, hintPtr, hintCount, marginFrac);
+        } catch (const std::exception &e) {
+            LOGE("ImageView/multi-tracked error: %s", e.what());
+        }
+        env->ReleaseByteArrayElements(yPlane, data, JNI_ABORT);
+    }
+    // JNI_ABORT: we never wrote back to the hints array.
+    env->ReleaseIntArrayElements(hints, hintPtr, JNI_ABORT);
     return result;
 }
 

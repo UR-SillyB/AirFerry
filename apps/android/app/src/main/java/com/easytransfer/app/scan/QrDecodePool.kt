@@ -73,6 +73,20 @@ class QrDecodePool(
     @Volatile
     private var lastQrBbox: IntArray? = null
 
+    /**
+     * Multi-QR tracking: the last known bboxes of each on-screen code (a packed
+     * IntArray of 4×N ints: {minX,minY,maxX,maxY} per code). null before the
+     * first full-frame lock. Published as a single immutable reference so a
+     * worker reading a stale copy merely re-scans one extra frame harmlessly.
+     */
+    @Volatile
+    private var multiTrackedBboxes: IntArray? = null
+    /** Number of multi codes in [multiTrackedBboxes] (bboxes.length / 4). */
+    @Volatile
+    private var multiTrackedCount: Int = 0
+    /** Consecutive tracked-region misses in multi mode → trigger re-lock. */
+    private val multiMiss = AtomicLong(0)
+
     fun start() {
         if (running.getAndSet(true)) return
         for (i in 0 until workerCount) {
@@ -129,20 +143,20 @@ class QrDecodePool(
             } ?: continue
             try {
                 if (multiMode) {
-                    // Multi-QR: decode every code on screen, ingest them all under
-                    // one lock hold (the native receiver dedups by sbn/esi, so
-                    // duplicate codes across frames are free).
-                    val payloads = decodeMulti(frame)
-                    if (payloads.isNotEmpty()) {
-                        // decodedCount() measures decoded *symbols* (codes), not
-                        // frames: a multi-QR frame yields up to N symbols, so add
-                        // each one. This keeps the "解码速率" metric an accurate
-                        // symbols/sec throughput that scales correctly with the
-                        // on-screen code count (4× in 4-code mode).
-                        decodedFrames.addAndGet(payloads.size.toLong())
+                    // Multi-QR tracked pipeline:
+                    //  1. Hot path: if we have per-code bboxes from the last lock,
+                    //     decode each in a tight expanded window (ReadBarcode singular
+                    //     per window) — avoids the full-frame finder scan entirely.
+                    //  2. Cold path: a periodic full-frame ReadBarcodes re-locks all
+                    //     code positions (every MULTI_FULL_DECODE_EVERY misses, or on
+                    //     the very first frame). This is the only place that pays for
+                    //     a whole-frame scan.
+                    val results = decodeMultiTracked(frame)
+                    if (results.isNotEmpty()) {
+                        decodedFrames.addAndGet(results.size.toLong())
                         ingestLock.lock()
                         try {
-                            for (p in payloads) onDecoded(p)
+                            for (r in results) onDecoded(r.payload)
                         } finally {
                             ingestLock.unlock()
                         }
@@ -174,20 +188,88 @@ class QrDecodePool(
     }
 
     /**
-     * Multi-QR decode: full-frame `ReadBarcodes`, returns every valid code's
-     * payload. ROI tracking does not apply in multi mode (codes are spread
-     * across the frame, not centered), so we scan the whole frame each tick.
+     * Multi-QR decode with per-code ROI tracking.
+     *
+     * Hot path: each code's last-known bbox (from the previous lock) is passed
+     * to `decodeMultiYTracked`, which crops a zero-copy expanded window around
+     * each and runs ReadBarcode (singular) inside it. This skips the full-frame
+     * finder scan — the dominant cost of multi decode — reducing per-frame work
+     * from O(frame pixels) to O(Σ code module pixels).
+     *
+     * Cold path: every [MULTI_FULL_DECODE_EVERY] consecutive tracked misses, or
+     * on the first frame (no bboxes yet), run a full-frame `ReadBarcodes` to
+     * (re-)lock all on-screen code positions. A successful full-frame read seeds
+     * [multiTrackedBboxes] so subsequent frames use the fast region path.
+     *
+     * Returns the decoded codes (payloads). RaptorQ dedups by sbn/esi, so it's
+     * fine if a code occasionally fails to decode in its window.
      */
-    private fun decodeMulti(frame: YFrame): List<ByteArray> {
-        return try {
-            ZxingDecoder.parseMulti(
-                ZxingDecoder.decodeMultiY(frame.y, frame.width, frame.height, frame.rowStride)
+    private fun decodeMultiTracked(frame: YFrame): List<ZxingDecoder.MultiResult> {
+        val tracked = multiTrackedBboxes
+        val trackedCount = multiTrackedCount
+        // Hot path: region decode per code when we have hints AND we're not due
+        // for a full-frame re-lock.
+        val dueFullLock = tracked == null ||
+            multiMiss.get() % MULTI_FULL_DECODE_EVERY == 0L
+        if (!dueFullLock && tracked != null && trackedCount > 0) {
+            val buf = try {
+                ZxingDecoder.decodeMultiYTracked(
+                    frame.y, frame.width, frame.height, frame.rowStride,
+                    tracked, trackedCount, TRACK_MARGIN,
+                )
+            } catch (e: UnsatisfiedLinkError) {
+                Log.e(TAG, "ZXing native lib not loaded", e); null
+            } catch (e: Exception) {
+                null
+            }
+            val results = ZxingDecoder.parseMulti(buf)
+            if (results.isNotEmpty()) {
+                // Refresh tracked bboxes with the freshly decoded positions.
+                publishMultiBboxes(results)
+                multiMiss.set(0)
+                return results
+            }
+            // All-region miss → fall through to full-frame re-lock this frame.
+            multiMiss.incrementAndGet()
+        }
+        // Cold path: full-frame scan, seeds the tracker.
+        val buf = try {
+            ZxingDecoder.decodeMultiY(
+                frame.y, frame.width, frame.height, frame.rowStride
             )
         } catch (e: UnsatisfiedLinkError) {
-            Log.e(TAG, "ZXing native lib not loaded", e); emptyList()
+            Log.e(TAG, "ZXing native lib not loaded", e); return emptyList()
         } catch (e: Exception) {
-            emptyList()
+            return emptyList()
         }
+        val results = ZxingDecoder.parseMulti(buf)
+        if (results.isNotEmpty()) {
+            publishMultiBboxes(results)
+            multiMiss.set(0)
+        } else {
+            multiMiss.incrementAndGet()
+        }
+        return results
+    }
+
+    /**
+     * Publish the per-code bboxes from a decode round as the next frame's
+     * tracking hints. Packs {minX,minY,maxX,maxY} per code into a fresh IntArray
+     * and swaps it atomically (the old array is not mutated, so any in-flight
+     * worker reading the previous reference is safe).
+     */
+    private fun publishMultiBboxes(results: List<ZxingDecoder.MultiResult>) {
+        if (results.isEmpty()) return
+        val packed = IntArray(results.size * 4)
+        for (i in results.indices) {
+            val b = results[i].bbox
+            packed[i * 4] = b[0]
+            packed[i * 4 + 1] = b[1]
+            packed[i * 4 + 2] = b[2]
+            packed[i * 4 + 3] = b[3]
+        }
+        multiTrackedBboxes = packed
+        multiTrackedCount = results.size
     }
 
     /**
@@ -373,6 +455,13 @@ class QrDecodePool(
          * frames while keeping the window much smaller than the center ROI.
          */
         private const val TRACK_MARGIN = 0.35f
+        /**
+         * In multi-QR mode, re-run a full-frame scan (re-lock all code
+         * positions) this many consecutive tracked misses after the last
+         * success. Codes on a screen barely move frame-to-frame, so the tracked
+         * path stays locked; this only fires when motion/blur breaks the lock.
+         */
+        private const val MULTI_FULL_DECODE_EVERY = 3L
         /** Cap the recycled-buffer free-list so it can't grow unbounded. */
         private const val MAX_FREE = 12
     }

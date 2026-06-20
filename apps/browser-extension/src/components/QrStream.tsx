@@ -179,22 +179,27 @@ export function QrStream({
     }
   }, [render, fps])
 
-  const toggleFullscreen = useCallback(async () => {
-    const el = canvasRef.current?.parentElement ?? canvasRef.current
-    if (!el) return
-    if (!document.fullscreenElement) {
-      await el.requestFullscreen?.()
-      setFullscreen(true)
-    } else {
-      await document.exitFullscreen?.()
-      setFullscreen(false)
-    }
+  // Web-level "fullscreen": the SAME canvas/wrapper DOM node persists in both
+  // modes — only the wrapper's className flips. When .qr-fullscreen--active is
+  // applied, CSS turns the wrapper into a fixed inset:0 overlay and sizes the
+  // canvas to the viewport; without it, the wrapper is the normal centered
+  // .qr-canvas-wrap. Because React never remounts the canvas, the rAF loop and
+  // lastPxRef stay valid, and the next tick reads the new clientWidth to resize
+  // the backing store. This is deliberately NOT the browser Fullscreen API
+  // (no user-gesture/permission/OS handoff; covers only the page viewport).
+  const toggleFullscreen = useCallback(() => {
+    setFullscreen((f) => !f)
   }, [])
 
   return (
     <div className="qr-stream">
-      <div className="qr-canvas-wrap">
+      <div className={`qr-canvas-wrap${fullscreen ? " qr-fullscreen--active" : ""}`}>
         <canvas ref={canvasRef} className="qr-canvas" />
+        {fullscreen && (
+          <button onClick={toggleFullscreen} className="btn qr-fullscreen-exit">
+            退出全屏
+          </button>
+        )}
       </div>
       <button onClick={toggleFullscreen} className="btn">
         {fullscreen ? "退出全屏" : "全屏播放"}

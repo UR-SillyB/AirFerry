@@ -111,16 +111,17 @@ class ScanActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // High-speed (record → batch decode) mode is on by default when the device
-        // advertises constrained-high-speed support; the setting toggle was removed,
-        // and the controller falls back to the normal CameraX pipeline on any
-        // runtime failure (see startHighSpeed's onError handler).
-        highSpeedEnabled = try {
-            HighSpeedCaptureController.isSupported(this)
-        } catch (e: Exception) {
-            false
-        }
-        useHighSpeedMode.value = highSpeedEnabled
+        // 高速录像模式（record → batch decode）已下线。实测得不偿失：
+        //  1. H.264 all-intra 即使 120Mbps 仍引入块效应/振铃，破坏 QR 锐利
+        //     黑白边缘，ZXing 解码率骤降（40-70% 帧解码失败）。
+        //  2. 录像后批量解码引入 2-5 秒管线延迟，录制期间 0 进度反馈。
+        //  3. Camera2 ConstrainedHighSpeedCaptureSession 禁用 ImageReader，
+        //     无法"边录边解"，只能录像后批处理 → 上述延迟无法消除。
+        // 理论 2-4× 帧率优势被压缩损耗 + 延迟完全侵蚀，且仅旗舰机可用。
+        // 统一走 60fps 实时 + 多码管道（已验证、全设备可用、实时反馈）。
+        // HighSpeedCaptureController 源码保留供参考，但入口已关闭。
+        highSpeedEnabled = false
+        useHighSpeedMode.value = false
 
         // JNI self-test
         val jniOk = try {
@@ -244,6 +245,8 @@ class ScanActivity : ComponentActivity() {
                 Spacer(modifier = Modifier.height(16.dp))
 
                 // Experimental high-speed record / stop-and-decode control.
+                // 已下线：highSpeedEnabled 恒为 false，此分支永不渲染（dead
+                // branch）。保留代码结构供未来参考，但 Compose 编译器会移除它。
                 if (highSpeed) {
                     val recording by highSpeedRecording
                     Button(
@@ -382,7 +385,12 @@ class ScanActivity : ComponentActivity() {
     }
 
     /** Experimental: begin a high-speed recording; decoded frames flow into the
-     *  same pool/receiver as the normal path once decoding starts. */
+     *  same pool/receiver as the normal path once decoding starts.
+     *
+     *  已下线（@Deprecated）：高速录像模式因 H.264 损耗 + 录像后批处理延迟得不偿失，
+     *  入口已关闭（highSpeedEnabled 恒为 false，UI 永不调用此方法）。保留方法体供
+     *  未来参考，但不应再被调用。统一走 startCameraWithView 的 60fps 实时管道。 */
+    @Deprecated("高速录像模式已下线，统一走 60fps 实时 + 多码管道")
     private fun startHighSpeed() {
         val surface = highSpeedSurface
         if (surface == null || !surface.isValid) {
@@ -424,7 +432,9 @@ class ScanActivity : ComponentActivity() {
         controller.startRecording()
     }
 
-    /** Experimental: stop recording and kick off background decode of the clip. */
+    /** Experimental: stop recording and kick off background decode of the clip.
+     *  已下线（@Deprecated），见 [startHighSpeed]。 */
+    @Deprecated("高速录像模式已下线，统一走 60fps 实时 + 多码管道")
     private fun stopHighSpeed() {
         highSpeedRecording.value = false
         highSpeedController?.stopAndDecode()
@@ -447,13 +457,25 @@ class ScanActivity : ComponentActivity() {
                     it.setSurfaceProvider(previewView.surfaceProvider)
                 }
 
-                // Request a 720p analysis stream. The default ImageAnalysis
-                // resolution (~640×480) leaves too few camera pixels per QR module
-                // to decode reliably; 720p gives ample px/module for our codes.
+                // Request a 1080p analysis stream for more px/module (critical for
+                // the 2×2 multi-QR grid, where each code is only ~1/4 of the
+                // screen). CLOSEST_HIGHER_THEN_LOWER lets CameraX pick whatever
+                // the device's sensor actually supports: a 1080p-capable sensor
+                // delivers 1920×1080, an older/limited one falls back to 720p or
+                // 480p gracefully. The actual delivered size is logged once by
+                // QrStreamAnalyzer so we can confirm per-device behavior.
+                //
+                // The 60fps pin (below) is the real throughput guardrail: if a
+                // device can only sustain 1080p@30, the fixed-[60,60] bind throws
+                // and we retry at [30,60] — which still yields a usable 30fps. We
+                // accept that tradeoff rather than hard-capping at 720p, because
+                // modern flagships (2024+) comfortably do 1080p@60 on the YUV
+                // analysis stream, and the px/module gain materially improves
+                // multi-code decode rate (the dominant factor for multi-QR).
                 val resolutionSelector = ResolutionSelector.Builder()
                     .setResolutionStrategy(
                         ResolutionStrategy(
-                            Size(1280, 720),
+                            Size(1920, 1080),
                             ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER
                         )
                     )

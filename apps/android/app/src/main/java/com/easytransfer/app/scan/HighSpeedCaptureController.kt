@@ -1,40 +1,41 @@
 package com.easytransfer.app.scan
 
-// ── Future work ──────────────────────────────────────────────────────────
+// ── ⚠️ 已下线（DEPRECATED）─────────────────────────────────────────────────
 //
-// TODO: 高速录像模式（120/240fps）不可用的调试
+// 高速录像模式（120/240fps record → batch decode）已下线，入口在 ScanActivity
+// 中关闭（highSpeedEnabled 恒为 false）。本文件源码保留供未来参考，但当前不再
+// 被任何 UI 路径调用。
 //
-// 当前状态：HighSpeedCaptureController.isSupported() 对大多数设备返回
-// false，因为 constrained high-speed 会话需要设备固件支持 120/240fps
-// 的受限捕获。即使 isSupported() 返回 true，实际录像 + 批量解码的路径
-// 也存在以下已知问题：
+// 下线理由（实测得不偿失）：
+//   1. H.264 all-intra 即使 120Mbps（KEY_I_FRAME_INTERVAL=0）仍引入块效应 /
+//      振铃效应，破坏 QR 码密集黑白边缘，ZXing 解码率骤降（40-70% 帧失败）。
+//      720p@120fps 下约 0.83 bits/pixel，对保持锐利边缘仍不足。
 //
-//   1. Constrained high-speed session 的帧率由设备驱动决定，部分设备
-//      虽然声明支持但实际帧率远低于 120fps（如只跑 60fps）。
+//   2. 录像后批量解码引入 2-5 秒管线延迟，录制期间 0 进度反馈，用户感知为
+//      "扫描后等很久才出进度"。对比正常 CameraX 管道：实时解码、实时更新。
 //
-//   2. 录像模式下的 H.264 编码引入压缩伪影（block artifact），ZXing
-//      在低码率下解码率骤降。需要测试不同的 MediaCodec 比特率/质量
-//      设置（当前固定 CQ 模式 + BITRATE * 2）。
+//   3. Camera2 ConstrainedHighSpeedCaptureSession 只能喂 preview Surface 和
+//      video-encoder Surface，不能喂 ImageReader（平台限制），因此无法实现
+//      "边录边解"流水线，上述延迟无法消除。
 //
-//   3. 解码延迟：录像 → MediaExtractor → 帧解码 → ingest 的管线延迟
-//      约 2-5 秒，用户感知为"扫描后等很久才出进度"。需要优化：
-//      - 边录边解（流水线化）
-//      - 关键帧间隔调小（当前 1 秒）
+//   4. 理论 2-4× 帧率优势被 H.264 压缩损耗 + 管线延迟完全侵蚀，实际吞吐提升
+//      不到 2×，而用户体验大幅下降。且仅旗舰机（SoC + HAL 双重支持）可用。
 //
-//   4. 内存压力：120fps × YUV420_888 1080p 约 370MB/s 的原始数据，
-//      ImageReader + MediaCodec 队列容易 OOM。需要监控并限制队列深度。
+//   5. 已知遗留 bug（随下线失去意义）：
+//      - stopAndDecode 解码后仅 sleep 150ms，240fps 下最后一批帧可能丢失。
+//      - isSupported() 不检查 LENS_FACING，与 highSpeedCameraId()（要求后置）
+//        口径不一致，可能导致误判后反复失败回退。
 //
-//   5. Android 16 (SDK 36) 新增了 Camera2 高帧率限制策略，部分 OEM
-//      设备可能完全禁用 constrained high-speed。需要逐设备兼容测试。
+// 替代方案：60fps 实时 CameraX + 多码同屏（QrDecodePool multiMode），全设备可用、
+// 无压缩损耗、实时反馈，是已验证的提速路径。
 //
-// 调试建议：
-//   - 先在支持的设备上用 `adb shell dumpsys media.camera` 确认实际
-//     high-speed 能力（最大帧率、支持的分辨率）
-//   - 用 `adb shell setprop persist.vendor.camera.fpsrange 120,120` 强制
-//     帧率（需 root 或 eng build）
-//   - 对比 ImageAnalysis 流水线 vs 高速录像的帧解码率
+// 若未来重启此功能，调试建议：
+//   - 先用 `adb shell dumpsys media.camera` 确认实际 high-speed 能力。
+//   - 对比 ImageAnalysis 流水线 vs 高速录像的帧解码率。
+//   - 考虑是否可用 CameraX ImageAnalysis + setTargetFrameRate 尝试 90/120fps
+//     实时解码（部分 OEM 支持），绕过录像路径。
 //
-// ── End future work ──────────────────────────────────────────────────────
+// ── End deprecated ─────────────────────────────────────────────────────────
 
 import android.content.Context
 import android.graphics.ImageFormat
@@ -64,9 +65,11 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * EXPERIMENTAL: high-frame-rate "record → batch decode" capture (flagship only).
+ * ⚠️ 已下线（DEPRECATED）。高速录像模式的源码保留供参考，但入口已在 ScanActivity
+ * 关闭，当前无任何 UI 路径会调用此类。下线理由见文件顶部注释。
  *
- * Android's [CameraConstrainedHighSpeedCaptureSession] can only feed a preview
+ * 原设计（保留说明）：EXPERIMENTAL high-frame-rate "record → batch decode"
+ * capture (flagship only). Android's [CameraConstrainedHighSpeedCaptureSession] can only feed a preview
  * Surface and/or a video-encoder Surface — never an ImageReader for per-frame
  * CPU access. So the only way to exploit 120/240fps is to record, then decode the
  * recording afterward. To give dense QR codes a fighting chance through a lossy
@@ -499,14 +502,22 @@ class HighSpeedCaptureController(
         private const val BITRATE = 120_000_000
         private const val READER_BUFFERS = 6
 
-        /** True if any back camera advertises constrained high-speed video. */
+        /** True if any **back** camera advertises constrained high-speed video.
+         *
+         *  必须与 [highSpeedCameraId] 的口径一致：都要求后置摄像头
+         *  (LENS_FACING_BACK)。旧版 isSupported() 不检查朝向，只要任一相机
+         *  （含前置）宣告 high-speed 能力就返回 true，但实际开相机用的是
+         *  highSpeedCameraId()（只认后置）→ 部分只有前置 high-speed 的设备
+         *  （折叠屏/平板）会被误判为支持、启动后却找不到相机而反复失败回退。 */
         fun isSupported(context: Context): Boolean {
             return try {
                 val mgr = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
                 mgr.cameraIdList.any { id ->
                     val c = mgr.getCameraCharacteristics(id)
+                    val facing = c.get(CameraCharacteristics.LENS_FACING)
                     val caps = c.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES)
-                    caps?.contains(CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_CONSTRAINED_HIGH_SPEED_VIDEO) == true
+                    facing == CameraCharacteristics.LENS_FACING_BACK &&
+                        caps?.contains(CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_CONSTRAINED_HIGH_SPEED_VIDEO) == true
                 }
             } catch (e: Exception) {
                 false

@@ -145,6 +145,9 @@ class ReceiverSessionManager {
         val isDescriptor = (header.flags and FLAG_DESCRIPTOR) != 0
 
         // --- Lazy init: only from descriptor frames ---
+        // 未初始化时只接受 descriptor 帧（携带权威 OTI），数据帧直接丢弃等待。
+        // 这防止首个 QR 解码（仅过 magic+version 校验但 session_id 可能是垃圾）
+        // 用错误 session_id 永久锁死后续所有正确帧。
         if (!initialized) {
             if (!isDescriptor) return null  // wait for a descriptor
             createReceiver(header)
@@ -152,18 +155,12 @@ class ReceiverSessionManager {
         }
 
         // --- Session-mismatch re-init ---
-        // If streak is high and nothing was ever accepted, the initial
-        // descriptor was likely corrupted.  Destroy and wait for a fresh one.
+        // 若 mismatch streak 过高且从未接受过任何符号，首个 descriptor 很可能
+        // 已损坏 → 销毁，等下一个 descriptor 重建（下一帧 ingest 回到上面的 lazy
+        // init 块）。此处直接 return null，本帧不继续。
         if (initialized && !isDescriptor && mismatchStreak >= 3 && !everAccepted) {
             destroy()
             return null  // will re-init on next descriptor
-        }
-
-        // If we're waiting for re-init, only accept descriptors
-        if (!initialized) {
-            if (!isDescriptor) return null
-            createReceiver(header)
-            if (!initialized) return null
         }
 
         // receiverIngest returns a packed status word (see IngestStatus). The

@@ -58,7 +58,43 @@ body {
 .btn.primary:hover { background: var(--color-primary-hover); }
 .qr-stream { text-align: center; }
 .qr-canvas-wrap { display: flex; justify-content: center; margin: 24px 0; }
-.qr-canvas { width: 480px; height: 480px; max-width: 100%; background: #fff; border-radius: var(--radius); box-shadow: var(--shadow-lg); image-rendering: pixelated; }
+/* Larger default canvas (600px) so multi-QR codes have more px/module at the
+   normal (non-fullscreen) view. Each of 4 tiled codes gets ~300px instead of
+   240px — a meaningful decode-reliability gain for zero throughput cost. */
+.qr-canvas { width: 600px; height: 600px; max-width: 100%; background: #fff; border-radius: var(--radius); box-shadow: var(--shadow-lg); image-rendering: pixelated; }
+
+/* Web-level "fullscreen" — NOT the browser Fullscreen API. When the wrapper
+   gets .qr-fullscreen--active it becomes a fixed overlay covering the whole
+   page viewport, and the canvas inside is sized to the viewport so every QR
+   module gets as many pixels as the display offers. This avoids the OS-level
+   fullscreen handoff (user gesture + permission prompt + brittle exit) while
+   achieving the same visual goal for scanning: the codes tile the entire
+   viewport, maximizing px/module on the receiver camera. */
+.qr-canvas-wrap.qr-fullscreen--active {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  background: #000;
+  align-items: center;
+  justify-content: center;
+  margin: 0;
+}
+.qr-canvas-wrap.qr-fullscreen--active .qr-canvas {
+  /* Fill the viewport while staying square: the smaller viewport dimension
+     governs, so portrait phones get a full-height square and the QR grid fills
+     the screen width. No border-radius/shadow in fullscreen (clean white block). */
+  width: min(100vw, 100vh);
+  height: min(100vw, 100vh);
+  max-width: none;
+  border-radius: 0;
+  box-shadow: none;
+}
+.qr-fullscreen-exit {
+  position: fixed;
+  top: 12px;
+  right: 12px;
+  z-index: 10000;
+}
 .stats-bar { display: flex; gap: 32px; justify-content: center; padding: 16px; background: var(--color-bg); border-radius: var(--radius-sm); margin-top: 16px; }
 .stat-item { text-align: center; }
 .stat-value { font-size: 20px; font-weight: 700; color: var(--color-primary); }
