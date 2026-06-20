@@ -81,9 +81,16 @@ class QrDecodePool(
      */
     @Volatile
     private var multiTrackedBboxes: IntArray? = null
-    /** Number of multi codes in [multiTrackedBboxes] (bboxes.length / 4). */
+    /**
+     * Fixed number of on-screen codes, captured from the first full-frame lock.
+     * Once locked, the tracker ALWAYS maintains this many slots: a code that
+     * fails to decode in one frame keeps its last-known bbox (the native side
+     * expands the window by TRACK_MARGIN next frame, tolerating motion), instead
+     * of being dropped from the tracking list and permanently lost until a full
+     * re-lock. This fixes the partial-decode shrinking bug.
+     */
     @Volatile
-    private var multiTrackedCount: Int = 0
+    private var multiLockedCount: Int = 0
     /** Consecutive tracked-region misses in multi mode → trigger re-lock. */
     private val multiMiss = AtomicLong(0)
 
@@ -206,16 +213,18 @@ class QrDecodePool(
      */
     private fun decodeMultiTracked(frame: YFrame): List<ZxingDecoder.MultiResult> {
         val tracked = multiTrackedBboxes
-        val trackedCount = multiTrackedCount
-        // Hot path: region decode per code when we have hints AND we're not due
-        // for a full-frame re-lock.
-        val dueFullLock = tracked == null ||
+        val lockedCount = multiLockedCount
+        // Hot path: region decode per code when we have a lock AND we're not due
+        // for a full-frame re-lock. We track `lockedCount` slots (fixed since the
+        // first lock), NOT results.size — a partial decode (some codes missed)
+        // must still hint all original positions next frame.
+        val dueFullLock = tracked == null || lockedCount == 0 ||
             multiMiss.get() % MULTI_FULL_DECODE_EVERY == 0L
-        if (!dueFullLock && tracked != null && trackedCount > 0) {
+        if (!dueFullLock && tracked != null && lockedCount > 0) {
             val buf = try {
                 ZxingDecoder.decodeMultiYTracked(
                     frame.y, frame.width, frame.height, frame.rowStride,
-                    tracked, trackedCount, TRACK_MARGIN,
+                    tracked, lockedCount, TRACK_MARGIN,
                 )
             } catch (e: UnsatisfiedLinkError) {
                 Log.e(TAG, "ZXing native lib not loaded", e); null
@@ -224,15 +233,17 @@ class QrDecodePool(
             }
             val results = ZxingDecoder.parseMulti(buf)
             if (results.isNotEmpty()) {
-                // Refresh tracked bboxes with the freshly decoded positions.
-                publishMultiBboxes(results)
+                // Refresh the slots: update matched positions, KEEP stale bboxes
+                // for codes that missed this frame (so they're hinted again next
+                // frame instead of being permanently dropped).
+                updateTrackedSlots(results)
                 multiMiss.set(0)
                 return results
             }
             // All-region miss → fall through to full-frame re-lock this frame.
             multiMiss.incrementAndGet()
         }
-        // Cold path: full-frame scan, seeds the tracker.
+        // Cold path: full-frame scan, seeds/re-seeds the tracker.
         val buf = try {
             ZxingDecoder.decodeMultiY(
                 frame.y, frame.width, frame.height, frame.rowStride
@@ -244,7 +255,9 @@ class QrDecodePool(
         }
         val results = ZxingDecoder.parseMulti(buf)
         if (results.isNotEmpty()) {
-            publishMultiBboxes(results)
+            // Seed the fixed slot count from a full-frame lock. Subsequent frames
+            // maintain exactly this many slots regardless of partial decodes.
+            seedTrackedSlots(results)
             multiMiss.set(0)
         } else {
             multiMiss.incrementAndGet()
@@ -253,12 +266,12 @@ class QrDecodePool(
     }
 
     /**
-     * Publish the per-code bboxes from a decode round as the next frame's
-     * tracking hints. Packs {minX,minY,maxX,maxY} per code into a fresh IntArray
-     * and swaps it atomically (the old array is not mutated, so any in-flight
-     * worker reading the previous reference is safe).
+     * Seed the tracker from a full-frame decode: capture [multiLockedCount] and
+     * the initial bboxes. This count stays fixed for the life of the lock; a
+     * later partial decode updates positions via [updateTrackedSlots] but never
+     * shrinks the slot count.
      */
-    private fun publishMultiBboxes(results: List<ZxingDecoder.MultiResult>) {
+    private fun seedTrackedSlots(results: List<ZxingDecoder.MultiResult>) {
         if (results.isEmpty()) return
         val packed = IntArray(results.size * 4)
         for (i in results.indices) {
@@ -269,7 +282,50 @@ class QrDecodePool(
             packed[i * 4 + 3] = b[3]
         }
         multiTrackedBboxes = packed
-        multiTrackedCount = results.size
+        multiLockedCount = results.size
+    }
+
+    /**
+     * Update the tracked slots from a region decode. Each freshly decoded bbox
+     * is matched to its nearest current slot (by center distance — the codes are
+     * on a fixed screen grid, so the nearest slot is the same physical code) and
+     * that slot's position is refreshed. Slots with no match (codes that missed
+     * this frame) KEEP their last bbox, so they're hinted again next frame with
+     * only the native TRACK_MARGIN expansion compensating for motion. This is the
+     * fix for the partial-decode shrinking bug: a transient miss no longer drops
+     * a code from the tracking list.
+     */
+    private fun updateTrackedSlots(results: List<ZxingDecoder.MultiResult>) {
+        val old = multiTrackedBboxes ?: return seedTrackedSlots(results)
+        val n = multiLockedCount
+        if (n == 0) return seedTrackedSlots(results)
+        val updated = old.copyOf()  // preserve stale slots for unmatched codes
+        // Track which slots have been claimed to avoid double-updating one slot.
+        val claimed = BooleanArray(n)
+        for (r in results) {
+            val b = r.bbox
+            val cx = (b[0] + b[2]) / 2
+            val cy = (b[1] + b[3]) / 2
+            var bestSlot = -1
+            var bestDist = Long.MAX_VALUE
+            for (i in 0 until n) {
+                if (claimed[i]) continue
+                val ocx = (old[i * 4] + old[i * 4 + 2]) / 2
+                val ocy = (old[i * 4 + 1] + old[i * 4 + 3]) / 2
+                val dx = cx.toLong() - ocx
+                val dy = cy.toLong() - ocy
+                val d = dx * dx + dy * dy
+                if (d < bestDist) { bestDist = d; bestSlot = i }
+            }
+            if (bestSlot >= 0) {
+                claimed[bestSlot] = true
+                updated[bestSlot * 4] = b[0]
+                updated[bestSlot * 4 + 1] = b[1]
+                updated[bestSlot * 4 + 2] = b[2]
+                updated[bestSlot * 4 + 3] = b[3]
+            }
+        }
+        multiTrackedBboxes = updated
     }
 
     /**
