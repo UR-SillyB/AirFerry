@@ -11,11 +11,9 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.easytransfer.app.scan.HighSpeedCaptureController
 
 private val BgDark = Color(0xFF0F172A)
 private val CardBg = Color(0xFF1E293B)
@@ -32,11 +30,11 @@ class SettingsActivity : ComponentActivity() {
     @Composable
     private fun SettingsScreen() {
         val prefs = remember { getSharedPreferences("easytransfer", MODE_PRIVATE) }
-        var redundancy by remember { mutableFloatStateOf(prefs.getInt("default_redundancy", 10).toFloat()) }
-        val context = LocalContext.current
-        val highSpeedSupported = remember { HighSpeedCaptureController.isSupported(context) }
-        var highSpeedMode by remember { mutableStateOf(prefs.getBoolean("highspeed_mode", false)) }
-        var multiQrMode by remember { mutableStateOf(prefs.getBoolean("multi_qr_mode", false)) }
+        var redundancy by remember { mutableFloatStateOf(prefs.getInt("default_redundancy", 5).toFloat()) }
+        // Multi-QR is on by default: paired with the sender's default 4 codes it
+        // multiplies throughput ~4×, and the host-verified decode path handles it
+        // reliably. Users who hit scan issues can still turn it off.
+        var multiQrMode by remember { mutableStateOf(prefs.getBoolean("multi_qr_mode", true)) }
 
         Column(modifier = Modifier.fillMaxSize().background(BgDark)) {
             Text(
@@ -65,41 +63,6 @@ class SettingsActivity : ComponentActivity() {
                         steps = 8,
                         colors = SliderDefaults.colors(thumbColor = Accent, activeTrackColor = Accent)
                     )
-                    Text("冗余率越高，抗丢帧能力越强，但传输速度越慢。推荐 10–20%。", color = TextSecondary, fontSize = 12.sp)
-                }
-            }
-
-            Card(
-                modifier = Modifier.fillMaxWidth().padding(16.dp),
-                shape = RoundedCornerShape(12.dp),
-                colors = CardDefaults.cardColors(containerColor = CardBg)
-            ) {
-                Column(modifier = Modifier.padding(20.dp)) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text("实验性：高速相机录制", color = TextPrimary, fontSize = 16.sp, fontWeight = FontWeight.Bold)
-                            Text(
-                                if (highSpeedSupported)
-                                    "用 120/240fps 高速摄像录制后台批量解码。仅旗舰机支持，有损压缩可能降低识别率，失败会自动回退普通模式。"
-                                else
-                                    "当前设备不支持高速摄像（无 constrained high-speed 能力）。",
-                                color = TextSecondary, fontSize = 12.sp
-                            )
-                        }
-                        Spacer(modifier = Modifier.width(12.dp))
-                        Switch(
-                            checked = highSpeedMode && highSpeedSupported,
-                            enabled = highSpeedSupported,
-                            onCheckedChange = {
-                                highSpeedMode = it
-                                prefs.edit().putBoolean("highspeed_mode", it).apply()
-                            }
-                        )
-                    }
                 }
             }
 
@@ -115,9 +78,9 @@ class SettingsActivity : ComponentActivity() {
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Column(modifier = Modifier.weight(1f)) {
-                            Text("实验性：多二维码同屏", color = TextPrimary, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                            Text("多二维码同屏", color = TextPrimary, fontSize = 16.sp, fontWeight = FontWeight.Bold)
                             Text(
-                                "接收端每帧解码屏幕上的全部二维码（而非仅一个），配合发送端「同屏二维码数」可成倍提升吞吐。每个码更小更难扫，需近距离对准。默认关闭。",
+                                "每帧解码全部二维码（配合发送端 4 码提升吞吐）。不稳定可关闭",
                                 color = TextSecondary, fontSize = 12.sp
                             )
                         }
@@ -140,12 +103,8 @@ class SettingsActivity : ComponentActivity() {
                 colors = CardDefaults.cardColors(containerColor = CardBg)
             ) {
                 Column(modifier = Modifier.padding(20.dp)) {
-                    Text("关于", color = TextSecondary, fontSize = 14.sp)
-                    Spacer(modifier = Modifier.height(8.dp))
                     Text("易传 EasyTransfer", color = TextPrimary, fontSize = 16.sp, fontWeight = FontWeight.Bold)
                     Text("版本 ${appVersionName()}", color = TextSecondary, fontSize = 13.sp)
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text("完全离线的光学文件传输系统。通过屏幕二维码视频流传输文件，无需网络、蓝牙、USB。", color = TextSecondary, fontSize = 13.sp)
                 }
             }
 

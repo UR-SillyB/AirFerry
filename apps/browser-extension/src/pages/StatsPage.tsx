@@ -95,9 +95,6 @@ export function StatsPage({ session, fileSize }: Props) {
           </tr>
         </tbody>
       </table>
-      <p className="muted">
-        提示：由于采用喷泉码（RaptorQ）连续重播，接收端可在任意时刻加入并恢复完整文件。
-      </p>
     </div>
   )
 }

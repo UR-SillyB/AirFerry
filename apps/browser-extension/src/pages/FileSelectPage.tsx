@@ -1,4 +1,4 @@
-/** Page 1: file selection (drag-drop or picker). Supports multiple files. */
+/** Page 1: file selection (drag-drop or picker). Supports multiple files and folders. */
 import { useCallback, useRef, useState } from "react"
 
 interface Props {
@@ -17,15 +17,43 @@ function totalSize(files: File[]): number {
   return files.reduce((sum, f) => sum + f.size, 0)
 }
 
+/**
+ * Recursively walk a dropped DataTransferItem (file or directory entry) and
+ * collect all File objects. This enables dragging a folder from the OS file
+ * manager and having all files inside (recursively) available for transfer.
+ */
+async function walkEntry(entry: FileSystemEntry): Promise<File[]> {
+  const files: File[] = []
+  if (entry.isFile) {
+    const file = await new Promise<File>((resolve, reject) =>
+      (entry as FileSystemFileEntry).file(resolve, reject)
+    )
+    // Preserve the relative path via webkitRelativePath if available
+    Object.defineProperty(file, "webkitRelativePath", {
+      value: entry.fullPath.startsWith("/") ? entry.fullPath.slice(1) : entry.fullPath,
+      writable: false,
+    })
+    files.push(file)
+  } else if (entry.isDirectory) {
+    const reader = (entry as FileSystemDirectoryEntry).createReader()
+    const entries = await new Promise<FileSystemEntry[]>((resolve, reject) =>
+      reader.readEntries(resolve, reject)
+    )
+    for (const child of entries) {
+      files.push(...(await walkEntry(child)))
+    }
+  }
+  return files
+}
+
 export function FileSelectPage({ files, onSelected }: Props) {
   const inputRef = useRef<HTMLInputElement | null>(null)
+  const folderInputRef = useRef<HTMLInputElement | null>(null)
   const [dragging, setDragging] = useState(false)
 
   const handleFiles = useCallback(
     (fileList: FileList | null) => {
       if (!fileList || fileList.length === 0) return
-      // Preserve order and drop any directory entries (size 0 + no type) that
-      // some platforms include when dropping folders.
       const arr: File[] = []
       for (let i = 0; i < fileList.length; i++) {
         const f = fileList.item(i)
@@ -34,6 +62,43 @@ export function FileSelectPage({ files, onSelected }: Props) {
       if (arr.length > 0) onSelected(arr)
     },
     [onSelected]
+  )
+
+  /** Handle drag-and-drop, including folders (via DataTransferItem.webkitGetAsEntry). */
+  const handleDrop = useCallback(
+    async (e: React.DragEvent) => {
+      e.preventDefault()
+      setDragging(false)
+
+      // Check if the drop contains directory entries (folder drag).
+      const items = e.dataTransfer.items
+      let hasDir = false
+      if (items && items.length > 0) {
+        for (let i = 0; i < items.length; i++) {
+          const entry = items[i].webkitGetAsEntry()
+          if (entry && entry.isDirectory) {
+            hasDir = true
+            break
+          }
+        }
+      }
+
+      if (hasDir) {
+        // Walk folders recursively to collect all files.
+        const allFiles: File[] = []
+        for (let i = 0; i < items.length; i++) {
+          const entry = items[i].webkitGetAsEntry()
+          if (entry) {
+            allFiles.push(...(await walkEntry(entry)))
+          }
+        }
+        if (allFiles.length > 0) onSelected(allFiles)
+      } else {
+        // Plain file drop — use the existing FileList path.
+        handleFiles(e.dataTransfer.files)
+      }
+    },
+    [handleFiles, onSelected]
   )
 
   const removeFile = useCallback(
@@ -53,14 +118,10 @@ export function FileSelectPage({ files, onSelected }: Props) {
           setDragging(true)
         }}
         onDragLeave={() => setDragging(false)}
-        onDrop={(e) => {
-          e.preventDefault()
-          setDragging(false)
-          handleFiles(e.dataTransfer.files)
-        }}
+        onDrop={handleDrop}
         onClick={() => inputRef.current?.click()}
       >
-        {/* multiple: allow picking more than one file at once */}
+        {/* File picker (multi-file) */}
         <input
           ref={inputRef}
           type="file"
@@ -68,7 +129,19 @@ export function FileSelectPage({ files, onSelected }: Props) {
           style={{ display: "none" }}
           onChange={(e) => {
             handleFiles(e.target.files)
-            // Reset so picking the same file again still fires onChange.
+            e.target.value = ""
+          }}
+        />
+        {/* Hidden folder picker (webkitdirectory), triggered via the folder button. */}
+        <input
+          ref={folderInputRef}
+          type="file"
+          /* @ts-ignore - webkitdirectory is webkit-specific but widely supported */
+          webkitdirectory=""
+          multiple
+          style={{ display: "none" }}
+          onChange={(e) => {
+            handleFiles(e.target.files)
             e.target.value = ""
           }}
         />
@@ -85,9 +158,31 @@ export function FileSelectPage({ files, onSelected }: Props) {
               </span>
             </>
           ) : (
-            "拖拽文件到此处，或点击选择（支持多选）"
+            "拖拽文件或文件夹到此处，或点击选择"
           )}
         </p>
+        <div className="dropzone-actions" style={{ marginTop: 8, display: "flex", gap: 8, justifyContent: "center" }}>
+          <button
+            className="btn secondary"
+            style={{ fontSize: 12, padding: "4px 12px" }}
+            onClick={(e) => {
+              e.stopPropagation()
+              inputRef.current?.click()
+            }}
+          >
+            选择文件
+          </button>
+          <button
+            className="btn secondary"
+            style={{ fontSize: 12, padding: "4px 12px" }}
+            onClick={(e) => {
+              e.stopPropagation()
+              folderInputRef.current?.click()
+            }}
+          >
+            选择文件夹
+          </button>
+        </div>
       </div>
 
       {files.length > 0 && (
@@ -119,10 +214,10 @@ export function FileSelectPage({ files, onSelected }: Props) {
       )}
 
       {files.length > 0 && (
-        <p className="hint">
+        <p className="hint" style={{ marginTop: 8 }}>
           {files.length > 1
-            ? `已选择 ${files.length} 个文件，将打包为一次性传输。接收端合并接收后可分别保存每个文件。`
-            : "文件已就绪。点击「下一步」设置传输参数，然后开始播放二维码视频流。"}
+            ? `${files.length} 个文件将打包为一次性传输`
+            : "已就绪，点击下一步"}
         </p>
       )}
     </div>

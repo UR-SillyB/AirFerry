@@ -181,7 +181,7 @@ fn android_log_wasm(msg: &str) {
     web_sys::console::warn_1(&format!("EasyTransfer: {msg}").into());
 }
 
-/// Encode `frame_bytes` (a serialized Frame) into a Version-40 / L QR matrix.
+/// Encode `frame_bytes` (a serialized Frame) into a byte-mode EC-L QR matrix.
 ///
 /// Returns the flat module grid as a `Uint8Array` of `side*side` bytes
 /// (1 = dark, 0 = light), row-major. `out_side` is set to the side length.

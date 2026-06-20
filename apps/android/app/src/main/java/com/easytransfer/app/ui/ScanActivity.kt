@@ -111,11 +111,12 @@ class ScanActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // Experimental high-speed (record → batch decode) mode: opt-in setting AND
-        // the device must advertise constrained-high-speed support.
+        // High-speed (record → batch decode) mode is on by default when the device
+        // advertises constrained-high-speed support; the setting toggle was removed,
+        // and the controller falls back to the normal CameraX pipeline on any
+        // runtime failure (see startHighSpeed's onError handler).
         highSpeedEnabled = try {
-            getSharedPreferences("easytransfer", MODE_PRIVATE).getBoolean("highspeed_mode", false) &&
-                HighSpeedCaptureController.isSupported(this)
+            HighSpeedCaptureController.isSupported(this)
         } catch (e: Exception) {
             false
         }
@@ -209,7 +210,7 @@ class ScanActivity : ComponentActivity() {
                             InfoRow("已解码块", "${state.decodedBlocks} / ${state.totalBlocks}")
                             InfoRow("丢帧率", "${state.lossPct}%")
                             InfoRow("已扫描帧", "${state.framesSeen}")
-                            InfoRow("解码速率", "${state.decodePerSec}/秒")
+                            InfoRow("解码速率", "${state.decodePerSec} 符号/秒")
                             if (state.framesDropped > 0) {
                                 InfoRow("采集丢弃", "${state.framesDropped}")
                             }
@@ -365,12 +366,12 @@ class ScanActivity : ComponentActivity() {
     private fun ensurePool(): QrDecodePool {
         var p = decodePool
         if (p == null) {
-            // Multi-QR mode is an experimental receiver toggle: when on, the pool
-            // decodes every code on screen per frame (not just the first), so a
-            // sender tiling N codes yields ~N× throughput. Read from the same
-            // "easytransfer" prefs the Settings screen writes.
+            // Multi-QR mode: when on, the pool decodes every code on screen per
+            // frame (not just the first), so a sender tiling 4 codes yields ~4×
+            // throughput. On by default (matches the sender default); read from the
+            // same "easytransfer" prefs the Settings screen writes.
             val multiQr = getSharedPreferences("easytransfer", MODE_PRIVATE)
-                .getBoolean("multi_qr_mode", false)
+                .getBoolean("multi_qr_mode", true)
             p = QrDecodePool(
                 onDecoded = { payload -> handleFrameAsync(payload) },
                 multiMode = multiQr,

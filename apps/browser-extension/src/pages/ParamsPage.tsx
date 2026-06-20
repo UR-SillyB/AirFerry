@@ -121,16 +121,6 @@ export function ParamsPage({
         {/* Loss-aware tuning hint. RaptorQ needs K unique symbols/block; at a
             given loss rate L the receiver keeps ~(1-L) of each pass, so the
             redundancy should at least cover the loss to finish in one pass. */}
-        <span
-          className="muted"
-          style={{ display: "block", marginTop: 4, lineHeight: 1.5 }}
-        >
-          {config.redundancyPct < 20
-            ? "提示：若接收端丢帧率较高（>30%），建议将冗余率提高到 30%–50%，以减少需要重播的整轮次数。"
-            : config.redundancyPct > 40
-              ? "提示：冗余率较高会降低有效吞吐，仅在丢帧率很高的环境下使用。"
-              : "当前冗余率适合大多数场景。"}
-        </span>
       </div>
 
       <div className="field">
@@ -156,17 +146,6 @@ export function ParamsPage({
             <option value="custom">自定义（{config.symbolSize}B）</option>
           )}
         </select>
-        <span
-          className="muted"
-          style={{ display: "block", marginTop: 4, lineHeight: 1.5 }}
-        >
-          {(() => {
-            const p = presetForSymbolSize(config.symbolSize)
-            return p
-              ? `${p.blurb}。每帧 ${config.symbolSize}B 有效载荷。`
-              : "自定义符号大小。数值越大每帧携带数据越多，但 QR 越密越难扫。"
-          })()}
-        </span>
       </div>
 
       <div className="field">
@@ -179,13 +158,6 @@ export function ParamsPage({
           <option value={45}>45 FPS（推荐）</option>
           <option value={60}>60 FPS（高速）</option>
         </select>
-        <span
-          className="muted"
-          style={{ display: "block", marginTop: 4, lineHeight: 1.5 }}
-        >
-          提示：接收端摄像头需以 ≥2× 发送帧率采集才能稳定抓到每个不同帧。45 FPS
-          在扫描可靠性与吞吐之间较平衡；接收端开启并行解码后可尝试 60 FPS。
-        </span>
       </div>
 
       <div className="field">
@@ -214,21 +186,14 @@ export function ParamsPage({
       </div>
 
       <div className="field">
-        <label>同屏二维码数（实验性）</label>
+        <label>同屏二维码数（多码加速）</label>
         <select
-          value={config.multiQr}
-          onChange={(e) => onChange({ multiQr: Number(e.target.value) })}
+          value={config.multiQr > 1 ? 4 : 1}
+          onChange={(e) => onChange({ multiQr: Number(e.target.value) > 1 ? 4 : 1 })}
         >
-          <option value={1}>1 个（默认，最稳定）</option>
-          <option value={2}>2 个（~2× 吞吐）</option>
-          <option value={4}>4 个（~4× 吞吐）</option>
+          <option value={1}>关闭（每帧 1 个，最稳）</option>
+          <option value={4}>开启（每帧 4 个，~4× 吞吐）</option>
         </select>
-        <span
-          className="muted"
-          style={{ display: "block", marginTop: 4, lineHeight: 1.5 }}
-        >
-          实验性功能：每帧在屏幕上同时显示多个二维码，每个携带不同的数据符号，吞吐量近似翻倍/四倍。要求接收端也开启「多二维码同屏」。多码时每个码更小、更难扫，建议同时选「稳定」速度档（512B）并近距离对准。
-        </span>
       </div>
 
       <button

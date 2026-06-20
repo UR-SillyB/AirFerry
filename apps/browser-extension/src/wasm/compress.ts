@@ -83,6 +83,14 @@ interface ZstdWasmModule {
   ) => number
 }
 
+/**
+ * Pre-loaded WASM bytes, set from the main thread (see initZstdFromBytes).
+ * When set, loadWasm uses these bytes instead of fetching via chrome.runtime,
+ * which is critical when running inside a Web Worker where chrome.runtime.getURL
+ * may not be reliably available (the root cause of the "always 100% ratio" bug).
+ */
+let preloadedWasmBytes: ArrayBuffer | null = null
+
 /** Resolve to the loaded WASM instance (singleton). */
 let wasmInitPromise: Promise<ZstdWasmModule> | null = null
 
@@ -132,35 +140,63 @@ function createEmscriptenImports(): { imports: WebAssembly.Imports; ctx: Emscrip
   return { imports, ctx }
 }
 
+/** Instantiate zstd WASM from raw bytes. Shared by loadWasm and initZstdFromBytes. */
+function instantiateZstd(buffer: ArrayBuffer): ZstdWasmModule {
+  const { imports, ctx } = createEmscriptenImports()
+
+  const { instance } = new WebAssembly.Instance(new WebAssembly.Module(buffer), imports)
+  // Wire the module's own memory into our import stubs.
+  ctx.memory = instance.exports.c as WebAssembly.Memory
+
+  // Run C global constructors
+  const callCtors = instance.exports.d as () => number
+  callCtors()
+
+  return {
+    memory: ctx.memory,
+    _malloc: instance.exports.f as ZstdWasmModule["_malloc"],
+    _free: instance.exports.g as ZstdWasmModule["_free"],
+    _compressBound: instance.exports.h as ZstdWasmModule["_compressBound"],
+    _compress: instance.exports.i as ZstdWasmModule["_compress"],
+  }
+}
+
+/**
+ * Initialize the zstd WASM module from pre-loaded bytes (sent from the main
+ * thread). Call this BEFORE any compression request. Once set, the bytes are
+ * used instead of fetching via chrome.runtime.getURL, making the worker safe.
+ */
+export function initZstdFromBytes(bytes: ArrayBuffer): void {
+  preloadedWasmBytes = bytes
+  // Reset so the next getWasm() call uses these bytes
+  wasmInitPromise = null
+}
+
 function loadWasm(): Promise<ZstdWasmModule> {
-  // The .wasm file is at the extension root after the post-build copy step.
-  const wasmUrl = chrome.runtime.getURL("wasm-zstd.wasm")
+  // If we have pre-loaded bytes (sent from main thread), use them directly,
+  // bypassing chrome.runtime.getURL which may not work reliably in a worker.
+  if (preloadedWasmBytes) {
+    try {
+      return Promise.resolve(instantiateZstd(preloadedWasmBytes))
+    } catch (e) {
+      console.error("Zstd WASM instantiation from pre-loaded bytes failed:", e)
+      // fall through to the fetch path
+    }
+  }
+
+  // Fallback: fetch via chrome.runtime.getURL (works on main thread)
+  const wasmUrl =
+    typeof chrome !== "undefined" && chrome.runtime?.getURL
+      ? chrome.runtime.getURL("wasm-zstd.wasm")
+      : // Worker fallback: resolve relative to worker location
+        new URL("wasm-zstd.wasm", self.location.href).href
 
   return fetch(wasmUrl, { credentials: "same-origin" })
     .then((resp) => {
       if (!resp.ok) throw new Error(`Failed to fetch wasm-zstd.wasm: ${resp.status}`)
       return resp.arrayBuffer()
     })
-    .then((buffer) => {
-      const { imports, ctx } = createEmscriptenImports()
-
-      return WebAssembly.instantiate(buffer, imports).then(({ instance }) => {
-        // Wire the module's own memory into our import stubs.
-        ctx.memory = instance.exports.c as WebAssembly.Memory
-
-        // Run C global constructors
-        const callCtors = instance.exports.d as () => number
-        callCtors()
-
-        return {
-          memory: ctx.memory,
-          _malloc: instance.exports.f as ZstdWasmModule["_malloc"],
-          _free: instance.exports.g as ZstdWasmModule["_free"],
-          _compressBound: instance.exports.h as ZstdWasmModule["_compressBound"],
-          _compress: instance.exports.i as ZstdWasmModule["_compress"],
-        }
-      })
-    })
+    .then((buffer) => instantiateZstd(buffer))
 }
 
 async function getWasm(): Promise<ZstdWasmModule> {
@@ -227,15 +263,24 @@ async function compressXz(data: Uint8Array): Promise<Uint8Array> {
  * Pick the smallest payload among raw / zstd / xz.
  *
  * Strategy (see module docs): all algorithms run at their maximum level;
- * whichever produces the fewest bytes is shipped. To save time, xz (the
+ * whichever produced the fewest bytes is shipped. To save time, xz (the
  * slowest) is skipped when zstd's result is ≥ 95% of the original — a strong
  * signal the file is already compressed and xz won't help. The final pick is
  * then the minimum over whichever candidates actually ran (2 or 3).
  *
  * Always returns a transmissible payload, falling back to the raw bytes on any
  * compression failure.
+ *
+ * @param onProgress Optional stage callback. Invoked when each compress phase
+ *   completes (`"zstd"` after the zstd pass, `"xz"` after the xz pass). Used by
+ *   the compress worker to report stage progress to the UI. The compress itself
+ *   is synchronous WASM, so no mid-phase percentage is possible — the callback
+ *   only marks phase boundaries. Omitting it preserves the original behaviour.
  */
-export async function preparePayload(data: Uint8Array): Promise<PrepareResult> {
+export async function preparePayload(
+  data: Uint8Array,
+  onProgress?: (phase: "zstd" | "xz") => void
+): Promise<PrepareResult> {
   const originalSize = data.length
   if (!COMPRESSION_ENABLED || originalSize === 0) {
     return {
@@ -273,6 +318,7 @@ export async function preparePayload(data: Uint8Array): Promise<PrepareResult> {
   // zstd barely shrank the file (≥ 95% of original) → it's already compressed.
   // Skip the expensive xz pass; pick the smaller of raw / zstd only.
   if (zstdSize / originalSize >= ZSTD_ALREADY_COMPRESSED_RATIO) {
+    onProgress?.("zstd")
     return pickSmallest(candidates, originalSize)
   }
 
@@ -285,6 +331,7 @@ export async function preparePayload(data: Uint8Array): Promise<PrepareResult> {
   } catch (e) {
     console.warn("XZ compression failed:", e)
   }
+  onProgress?.("xz")
 
   // Pick the smallest of raw / zstd / xz.
   return pickSmallest(candidates, originalSize)

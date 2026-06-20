@@ -102,17 +102,22 @@ export function QrStream({
     ctx.fillStyle = "#ffffff"
     ctx.fillRect(0, 0, px, px)
 
-    // Each code occupies an equal cell with a small gap between cells (white
-    // gutter also serves as quiet zone). The cell is square.
-    const gap = wantMulti ? Math.round(px * 0.02) : 0
-    const cellW = Math.floor((px - gap * (cols + 1)) / cols)
-    const cellH = Math.floor((px - gap * (rows + 1)) / rows)
+    // Each code occupies an equal square cell, packed edge-to-edge. No inter-cell
+    // gap is needed: drawMatrix() already renders a 4-module quiet zone inside
+    // every cell, so two adjacent codes already have 8 modules of white between
+    // their data — twice the QR-spec minimum. Adding another gutter (the old
+    // 2%×N padding) just produced a wide white band between codes for no benefit.
+    // A 1px visual separator keeps the white strip crisp on fractional-DPR cells
+    // without stealing measurable area from the codes.
+    const sep = wantMulti ? 1 : 0
+    const cellW = Math.floor((px - sep * (cols - 1)) / cols)
+    const cellH = Math.floor((px - sep * (rows - 1)) / rows)
     const cell = Math.min(cellW, cellH)
     for (let i = 0; i < n; i++) {
       const c = i % cols
       const r = Math.floor(i / cols)
-      const ox = gap + c * (cell + gap)
-      const oy = gap + r * (cell + gap)
+      const ox = c * (cell + sep)
+      const oy = r * (cell + sep)
       drawMatrix(ctx, matrices[i].modules, matrices[i].side, ox, oy, cell)
     }
 

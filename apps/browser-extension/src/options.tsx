@@ -8,18 +8,48 @@
  * bundle magic after recovery and unpacks every file. A single-file selection
  * keeps the original (non-bundled) path for full backward compatibility.
  */
-import { useState, useCallback, useEffect } from "react"
+import { useState, useCallback, useEffect, useRef } from "react"
 import "@/assets/app.css"
 import { ensureWasm, SenderSessionWasm } from "@/wasm/loader"
-import { deriveSessionId, contentFingerprint } from "@/wasm/session"
-import { preparePayload, CompressionAlgorithm } from "@/wasm/compress"
-import { crc32 } from "@/wasm/crc32"
-import { buildBundle } from "@/wasm/bundle"
 import { FileSelectPage } from "@/pages/FileSelectPage"
 import { ParamsPage } from "@/pages/ParamsPage"
 import { PlayPage } from "@/pages/PlayPage"
 import { StatsPage } from "@/pages/StatsPage"
-import { DEFAULT_CONFIG, type Page, type TransferConfig } from "@/types"
+import { CompressProgress, type CompressPhase } from "@/components/CompressProgress"
+import { loadConfig, saveConfig, type Page, type TransferConfig } from "@/types"
+
+/**
+ * The compress worker. Built by Parcel 2 into a separate bundle per target
+ * (chrome-mv2/mv3, firefox-mv2/mv3). It runs the heavy, synchronous-WASM file
+ * prep (bundle → compress → crc → fingerprint → session id) off the main thread
+ * so the UI stays responsive — without this the compressors freeze the page.
+ */
+const compressWorker = new Worker(
+  new URL("./workers/compress.worker.ts", import.meta.url),
+  { type: "module" }
+)
+
+/**
+ * Pre-load zstd WASM bytes on the main thread and transfer them to the worker.
+ * Inside a Web Worker, chrome.runtime.getURL() + fetch() may fail silently,
+ * causing compression to always fall back to raw (100% ratio). By loading the
+ * bytes here and passing them as a transferable, we guarantee the worker always
+ * has the WASM binary available regardless of its execution context.
+ */
+;(async () => {
+  try {
+    const wasmUrl = chrome.runtime.getURL("wasm-zstd.wasm")
+    const resp = await fetch(wasmUrl, { credentials: "same-origin" })
+    if (resp.ok) {
+      const bytes = await resp.arrayBuffer()
+      compressWorker.postMessage({ type: "wasm-init", zstd: bytes }, [bytes])
+    } else {
+      console.warn("Failed to pre-load wasm-zstd.wasm:", resp.status)
+    }
+  } catch (e) {
+    console.warn("Failed to pre-load wasm-zstd.wasm:", e)
+  }
+})()
 
 export type { Page, TransferConfig }
 
@@ -27,8 +57,8 @@ export type { Page, TransferConfig }
 interface PreparedPayload {
   /** Final bytes fed to the RaptorQ encoder (already compressed). */
   compressed: Uint8Array
-  /** Compression algorithm applied to `compressed`. */
-  compressionAlgorithm: CompressionAlgorithm
+  /** Compression algorithm applied to `compressed` (mirrors compress.rs tags). */
+  compressionAlgorithm: number
   /** CRC32 of the *pre-compression* bytes (single file, or whole bundle). */
   preCrc32: number
   /** Display name for the descriptor. Single file → its name; bundle → "N files". */
@@ -49,7 +79,13 @@ export interface AppState {
   config: TransferConfig
   /** Loading state while WASM encoder is being initialized (can be slow for large files). */
   initializing: boolean
-  /** Error message if WASM session creation fails. */
+  /**
+   * Compress-worker phase. While set (not null/done), a full-screen progress
+   * overlay is shown — the prep runs in the worker so this spinner keeps
+   * animating even during the slow synchronous-WASM compress.
+   */
+  compressPhase: CompressPhase | null
+  /** Error message if WASM session creation or compression fails. */
   error: string | null
 }
 
@@ -58,94 +94,95 @@ export default function App() {
     document.title = "易传 · 文件传输"
   }, [])
 
+  // Initialize config from localStorage (so the user's last-used transfer
+  // params — redundancy, fps, symbol size, brightness, multi-QR — carry over to
+  // every subsequent transfer instead of resetting to defaults each time).
   const [state, setState] = useState<AppState>({
     page: "select",
     files: [],
     prepared: null,
     session: null,
-    config: DEFAULT_CONFIG,
+    config: loadConfig(),
     initializing: false,
+    compressPhase: null,
     error: null
   })
 
   const go = useCallback((page: Page) => setState((s) => ({ ...s, page })), [])
 
   /**
-   * Stage 1: files chosen → pack (if >1), compress, derive session id, go to
-   * params. A single file skips bundling so the old single-file flow is
-   * byte-identical for old receivers.
+   * Handle the compress worker's messages: stage progress updates and the final
+   * prepared payload. Registered once (the worker is a module singleton); a ref
+   * tracks whether we're actively awaiting a result so stale messages from a
+   * superseded selection don't clobber state.
    */
-  const onFilesSelected = useCallback(async (files: File[]) => {
+  const awaitingResult = useRef(false)
+  useEffect(() => {
+    const handler = (e: MessageEvent) => {
+      const msg = e.data
+      if (!msg || typeof msg.phase !== "string") return
+
+      if (msg.phase === "done") {
+        if (!awaitingResult.current) return
+        awaitingResult.current = false
+        // Convert the transferable ArrayBuffer back into a Uint8Array view and
+        // the decimal-string session-id halves back into bigint.
+        const compressed = new Uint8Array(msg.compressed as ArrayBuffer)
+        setState((s) => ({
+          ...s,
+          prepared: {
+            compressed,
+            compressionAlgorithm: msg.algorithm,
+            preCrc32: msg.preCrc32,
+            displayName: msg.displayName,
+            originalSize: msg.originalSize,
+            sessionId: {
+              lo: BigInt(msg.sessionId.lo),
+              hi: BigInt(msg.sessionId.hi),
+            },
+          },
+          compressPhase: null,
+          page: "params",
+          error: null,
+        }))
+      } else if (msg.phase === "error") {
+        awaitingResult.current = false
+        setState((s) => ({
+          ...s,
+          compressPhase: null,
+          error: `文件处理失败: ${msg.message}`,
+        }))
+      } else {
+        // stage progress: reading / bundling / zstd / xz
+        if (awaitingResult.current) {
+          setState((s) => ({ ...s, compressPhase: msg.phase as CompressPhase }))
+        }
+      }
+    }
+    compressWorker.addEventListener("message", handler)
+    return () => compressWorker.removeEventListener("message", handler)
+  }, [])
+
+  /**
+   * Stage 1: files chosen → hand them to the compress worker, which packs (if
+   * >1), compresses, and derives the session id OFF the main thread while the
+   * UI shows a progress overlay. A single file skips bundling so the old
+   * single-file flow is byte-identical for old receivers.
+   */
+  const onFilesSelected = useCallback((files: File[]) => {
     if (files.length === 0) {
       // User removed the last file → reset back to the select screen.
       setState((s) => ({ ...s, files: [], prepared: null, page: "select" }))
       return
     }
-    await ensureWasm()
-
-    const isBundle = files.length > 1
-    let raw: Uint8Array
-    let displayName: string
-    if (isBundle) {
-      const built = await buildBundle(files)
-      raw = built.bytes
-      displayName = `${files.length}个文件打包`
-      console.log(`Bundle: ${files.length} files, ${raw.length} bytes pre-compress`)
-    } else {
-      raw = new Uint8Array(await files[0].arrayBuffer())
-      displayName = files[0].name
-    }
-
-    const { payload: compressed, algorithm, compressedSize } = await preparePayload(raw)
-    console.log(
-      `Compression: ${raw.length} → ${compressedSize} bytes ` +
-        `(${raw.length > 0 ? ((compressedSize / raw.length) * 100).toFixed(1) : "0"}%)`
-    )
-    const crc = crc32(raw)
-    // Content fingerprint: first 1KB + last 1KB (of the pre-compress bytes).
-    const head = raw.slice(0, 1024)
-    const tail = raw.slice(Math.max(0, raw.length - 1024))
-    const fp = contentFingerprint(head, tail)
-    // Session id derived from transfer identity. For a bundle we fold in the
-    // count + names so different file sets never collide. For a single file we
-    // pass its name/size/mtime exactly as before.
-    let sessionId: { lo: bigint; hi: bigint }
-    if (isBundle) {
-      const mtimeMax = files.reduce(
-        (m, f) => (f.lastModified > m ? f.lastModified : m),
-        0
-      )
-      const namesJoined = files.map((f) => f.name).join("\u0001")
-      sessionId = deriveSessionId(
-        namesJoined,
-        BigInt(raw.length),
-        BigInt(mtimeMax),
-        fp
-      )
-    } else {
-      const f = files[0]
-      sessionId = deriveSessionId(
-        f.name,
-        BigInt(f.size),
-        BigInt(f.lastModified),
-        fp
-      )
-    }
-
+    awaitingResult.current = true
     setState((s) => ({
       ...s,
       files,
-      prepared: {
-        compressed,
-        compressionAlgorithm: algorithm,
-        preCrc32: crc,
-        displayName,
-        originalSize: raw.length,
-        sessionId
-      },
-      page: "params",
-      error: null
+      compressPhase: "reading",
+      error: null,
     }))
+    compressWorker.postMessage({ files })
   }, [])
 
   /** Stage 2: params confirmed → build the WASM sender session, go to play. */
@@ -180,7 +217,13 @@ export default function App() {
 
   const updateConfig = useCallback(
     (patch: Partial<TransferConfig>) =>
-      setState((s) => ({ ...s, config: { ...s.config, ...patch } })),
+      setState((s) => {
+        const next = { ...s.config, ...patch }
+        // Persist every change so the chosen params survive a page reload / next
+        // transfer. saveConfig swallows storage errors, so this never throws.
+        saveConfig(next)
+        return { ...s, config: next }
+      }),
     []
   )
 
@@ -244,6 +287,14 @@ export default function App() {
           />
         )}
       </main>
+      {/* Compress progress overlay — shown while the worker prepares the file.
+          The worker keeps the main thread free, so this spinner animates even
+          during the slow xz pass. */}
+      <CompressProgress
+        phase={state.compressPhase}
+        displayName={state.files.length > 0 ? (state.files.length > 1 ? `${state.files.length}个文件` : state.files[0].name) : undefined}
+        originalSize={state.files.reduce((sum, f) => sum + f.size, 0) || undefined}
+      />
     </div>
   )
 }

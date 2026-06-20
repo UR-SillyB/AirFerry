@@ -27,6 +27,17 @@ object ZxingDecoder {
     external fun decodeY(yPlane: ByteArray, width: Int, height: Int, rowStride: Int): ByteArray?
 
     /**
+     * Full-frame decode with bbox write-back. Used as a recovery path when the
+     * center/tracked ROI has not locked onto the browser screen QR yet.
+     *
+     * On success [outBbox] receives `{minX, minY, maxX, maxY}` in full-frame
+     * coordinates; on a miss it is left untouched.
+     */
+    external fun decodeYTracked(
+        yPlane: ByteArray, width: Int, height: Int, rowStride: Int, outBbox: IntArray,
+    ): ByteArray?
+
+    /**
      * Zero-copy center-ROI decode. The native side builds a `cropped()` sub-view
      * of the padded Y plane at `(x0, y0)` of size `side×side`, so no per-row
      * arraycopy is needed to feed a region to ZXing.

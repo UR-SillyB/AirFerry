@@ -51,11 +51,7 @@ export function PlayPage({ session, config, sessionId, totalBytes }: Props) {
 
   return (
     <div className="page">
-      <h2>正在播放二维码</h2>
-      <p className="hint">
-        用接收端手机的摄像头对准下方二维码即可接收文件。
-        {loopsDone > 0 && " 持续循环传输中，可随时让接收端开始扫描。"}
-      </p>
+      <h2>正在播放</h2>
       {error && <p className="error">{error}</p>}
       <QrStream
         session={session}
@@ -70,7 +66,7 @@ export function PlayPage({ session, config, sessionId, totalBytes }: Props) {
         <div className="stats-bar">
           <div className="stat-item">
             <div className="stat-value">{stats.fps.toFixed(0)}</div>
-            <div className="stat-label">FPS</div>
+            <div className="stat-label">符号/秒</div>
           </div>
           <div className="stat-item">
             <div className="stat-value">{(stats.throughputBps / 1024).toFixed(1)}</div>

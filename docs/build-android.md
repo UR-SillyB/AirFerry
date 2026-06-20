@@ -35,17 +35,45 @@ EOF
 # 构建 Debug APK
 ./gradlew :app:assembleDebug
 
-# 构建 Release APK（当前 release 块未配置签名 → 产出未签名 APK，安装前需自行签名）
+# 构建 Release APK
+# Release 块已用 debug keystore 签名（signingConfig = debug），产出可直接安装的 APK
 ./gradlew :app:assembleRelease
 ```
 
 产物：`app/build/outputs/apk/debug/app-debug.apk`
-（Release：`app/build/outputs/apk/release/app-release-unsigned.apk`）
+（Release：`app/build/outputs/apk/release/app-release.apk`）
+
+### 关于 Release 签名
+
+Release 构建目前使用 **debug keystore** 签名（`app/build.gradle.kts` 中
+`signingConfig = signingConfigs.getByName("debug")`）。这样产出的 APK 可直接通过
+`adb install` 安装，无需额外的签名步骤，适合当前的自托管分发（不上架 Play Store）。
+
+debug keystore 位于 `~/.android/debug.keystore`，由 Android SDK 首次使用时自动生成。
+若要发布到应用商店，应替换为专用的 release 签名配置：
+
+```kotlin
+// app/build.gradle.kts — 发布到商店时改用正式签名
+signingConfigs {
+    create("release") {
+        storeFile = file("release.keystore")
+        storePassword = System.getenv("KEYSTORE_PASSWORD")
+        keyAlias = System.getenv("KEY_ALIAS")
+        keyPassword = System.getenv("KEY_PASSWORD")
+    }
+}
+buildTypes {
+    release {
+        signingConfig = signingConfigs.getByName("release")
+        // ...
+    }
+}
+```
 
 ## 安装到设备
 
 ```bash
-adb install app/build/outputs/apk/debug/app-debug.apk
+adb install app/build/outputs/apk/release/app-release.apk
 ```
 
 ## 原生库说明
@@ -71,6 +99,31 @@ FetchContent_Declare(zxing
 ```
 
 **注意**：首次构建需要网络访问；构建缓存后离线可用。
+
+### 16 KiB page size 对齐（重要）
+
+Android 15+ 支持以 16 KiB page size 运行的设备，2025 年的旗舰机（如 Android 16 的小米新机）
+默认采用 16 KiB。内核**拒绝 `dlopen` LOAD 段只对齐到 4 KiB（0x1000）的 `.so`**——
+`System.loadLibrary` 会抛 `UnsatisfiedLinkError`，ZXing 解码库加载失败后**所有 QR 解码静默
+失败，表现为扫码端完全扫不出任何码**。
+
+`CMakeLists.txt` 通过链接器选项强制 LOAD 段对齐到 16 KiB：
+
+```cmake
+# app/src/main/cpp/CMakeLists.txt
+add_link_options("-Wl,-z,max-page-size=16384")
+```
+
+这样同一个 `.so` 在 4 KiB 和 16 KiB page-size 的设备上都能加载。Rust 侧的
+`libtransfer_engine.so` 由 cargo-ndk/LLVM 默认对齐到 16 KiB，无需额外配置。
+
+**验证对齐**（NDK 自带 `llvm-readelf`）：
+
+```bash
+READELF=$NDK_HOME/toolchains/llvm/prebuilt/<host>/bin/llvm-readelf
+# LOAD 段 Align 列应为 0x4000（16 KiB）；若是 0x1000 则在 16 KiB 设备上会加载失败
+$READELF -l lib/arm64-v8a/libeasytransfer_zxing.so | grep LOAD
+```
 
 ## 项目结构
 

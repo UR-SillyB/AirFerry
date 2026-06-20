@@ -88,3 +88,35 @@ code { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 11px; 
 .popup button { width: 100%; padding: 12px; background: var(--color-primary); color: #fff; border: none; border-radius: var(--radius-sm); cursor: pointer; font-size: 15px; }
 .popup button:hover { background: var(--color-primary-hover); }
 .popup button:disabled { opacity: 0.6; }
+
+/* Compress progress overlay (CompressProgress.tsx)
+   Full-screen, blocks interaction while the worker prepares the file. The
+   spinner animates on the compositor thread, so it keeps spinning even while
+   the worker does heavy synchronous-WASM compression. */
+.compress-overlay {
+  position: fixed; inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(15, 23, 42, 0.45);
+  backdrop-filter: blur(2px);
+  z-index: 1000;
+}
+.compress-card {
+  background: var(--color-card);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-lg);
+  padding: 32px 40px;
+  text-align: center;
+  min-width: 280px; max-width: 90vw;
+}
+.compress-spinner {
+  width: 40px; height: 40px;
+  margin: 0 auto 18px;
+  border: 3px solid var(--color-border);
+  border-top-color: var(--color-primary);
+  border-radius: 50%;
+  animation: compress-spin 0.8s linear infinite;
+}
+@keyframes compress-spin { to { transform: rotate(360deg); } }
+.compress-title { font-size: 16px; font-weight: 600; color: var(--color-text); }
+.compress-sub { font-size: 13px; color: var(--color-text-secondary); margin-top: 6px; }
+.compress-hint { font-size: 12px; color: var(--color-text-muted); margin-top: 12px; line-height: 1.5; }

@@ -47,17 +47,20 @@ static void fillBbox(const Pos &pos, int *bbox);
 // aligned bounding box in the *view's* pixel coordinates:
 //   outBbox[0]=minX, outBbox[1]=minY, outBbox[2]=maxX, outBbox[3]=maxY.
 // The caller uses this to crop a tighter ROI on the next frame (adaptive
-// tracking) instead of always scanning the fixed 70% center region.
+// tracking) instead of always scanning the fixed center region.
 static jbyteArray decodeInView(JNIEnv *env, const ZXing::ImageView &view, int *outBbox) {
     // The configuration is identical for every frame; building it here keeps it
     // on the stack (no global-lifetime/threading concerns) at negligible cost
     // relative to the decode itself.
     ZXing::ReaderOptions options;
     options.setFormats(ZXing::BarcodeFormat::QRCode);
-    // tryHarder=false: the aggressive geometry path (SampleQR/intersect) is
-    // what triggers asserts on dense V40 codes. Our QRs are high-contrast and
-    // well-formed, so the fast path suffices and is more stable.
-    options.setTryHarder(false);
+    // Keep ZXing's accuracy-oriented path enabled. Browser-rendered QR streams
+    // are high contrast, but camera frames can be blurred, perspective-skewed,
+    // or partially cropped by the analysis ROI; the fast-only path misses those
+    // too often and the receiver appears to "not recognize" the screen code.
+    // NDEBUG is set for this native target, so ZXing's internal asserts do not
+    // abort the process on partial/dense frames.
+    options.setTryHarder(true);
     options.setTryInvert(true);
 
     try {
@@ -67,8 +70,8 @@ static jbyteArray decodeInView(JNIEnv *env, const ZXing::ImageView &view, int *o
         auto result = ZXing::ReadBarcode(view, options);
         if (result.isValid()) {
             // Capture the QR's bounding box for adaptive ROI tracking. The
-            // position is in the view's coordinate system (already accounts for
-            // any cropped() offset applied to the ImageView).
+            // position is in the current ImageView's local coordinate system;
+            // callers using cropped() translate it back to full-frame coords.
             if (outBbox) {
                 fillBbox(result.position(), outBbox);
             }
@@ -104,13 +107,12 @@ static jbyteArray decodeInView(JNIEnv *env, const ZXing::ImageView &view, int *o
 // each payload into the same RaptorQ session (codes are distinguished by their
 // embedded sbn/esi, so no protocol change is needed).
 //
-// tryHarder stays false: multi-QR codes are deliberately smaller (tiled), but
-// they are still high-contrast screen codes, so the fast path is stable and
-// avoids the assert-prone aggressive geometry path.
+// Multi-QR codes are smaller (tiled), so keep tryHarder enabled here as well;
+// otherwise the receiver can miss every code on a browser screen frame.
 static jbyteArray decodeInViewMulti(JNIEnv *env, const ZXing::ImageView &view) {
     ZXing::ReaderOptions options;
     options.setFormats(ZXing::BarcodeFormat::QRCode);
-    options.setTryHarder(false);
+    options.setTryHarder(true);
     options.setTryInvert(true);
 
     try {
@@ -223,6 +225,37 @@ Java_com_easytransfer_app_scan_ZxingDecoder_decodeY(
     return result;
 }
 
+// Full-frame decode with QR bbox write-back. Used as the fallback path when
+// the center/tracked ROI has not locked yet. A successful full-frame read seeds
+// the Kotlin ROI tracker, so subsequent frames can use the faster tight crop.
+JNIEXPORT jbyteArray JNICALL
+Java_com_easytransfer_app_scan_ZxingDecoder_decodeYTracked(
+    JNIEnv *env, jobject /*thiz*/,
+    jbyteArray yPlane, jint width, jint height, jint rowStride, jintArray outBbox
+) {
+    jbyte *data = pinYPlane(env, yPlane, width, height, rowStride, nullptr);
+    if (!data) return nullptr;
+
+    int bbox[4] = {0, 0, width, height};
+    jbyteArray result = nullptr;
+    try {
+        ZXing::ImageView view(reinterpret_cast<const uint8_t *>(data),
+                              width, height, ZXing::ImageFormat::Lum, rowStride);
+        result = decodeInView(env, view, bbox);
+    } catch (const std::exception &e) {
+        LOGE("ImageView/tracked full error: %s", e.what());
+    }
+    env->ReleaseByteArrayElements(yPlane, data, JNI_ABORT);
+
+    if (result != nullptr && outBbox != nullptr) {
+        if (env->GetArrayLength(outBbox) >= 4) {
+            env->SetIntArrayRegion(outBbox, 0, 4, bbox);
+            if (env->ExceptionCheck()) env->ExceptionClear();
+        }
+    }
+    return result;
+}
+
 // Zero-copy center-ROI decode: views a (x0, y0, side, side) sub-window of the
 // padded Y plane via ImageView::cropped(), avoiding the per-row arraycopy the
 // caller used to do in Kotlin. `x0`/`y0` are top-left pixel coordinates.
@@ -255,7 +288,7 @@ Java_com_easytransfer_app_scan_ZxingDecoder_decodeYRegion(
 // success also writes the QR's full-frame bounding box into `outBbox[4]`
 // {minX, minY, maxX, maxY}. The caller feeds that bbox back as the next frame's
 // ROI hint, so once the QR is locked the decoder scans a tight window around it
-// instead of the fixed 70% center region — less ZXing work per frame, higher
+// instead of the fixed center region — less ZXing work per frame, higher
 // sustainable decode rate at 720p/60fps.
 //
 // `outBbox` is a 4-int array the caller pre-allocates; on a miss it is left

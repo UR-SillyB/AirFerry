@@ -14,6 +14,18 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # call abort(), crashing the app. NDEBUG makes assert() a no-op.
 add_compile_definitions(NDEBUG)
 
+# Align ELF LOAD segments to 16 KiB (0x4000). Android 15+ devices may run with
+# a 16 KiB page size (notably 2025 flagship devices on Android 16), and the
+# kernel refuses to dlopen() a .so whose LOAD segments are only 4 KiB
+# (0x1000) aligned — System.loadLibrary then throws UnsatisfiedLinkError and
+# every QR decode silently fails, so the receiver "cannot scan anything".
+# NDK r27's clang/ld supports 16 KiB; -z max-page-size=16384 forces the linker
+# to round segment alignment up to 16 KiB so the same .so loads on both 4 KiB
+# and 16 KiB page-size devices. This must be a target option (not a global
+# CMAKE_EXE_LINKER_FLAGS) so it also reaches the link step of the ZXing static
+# lib we link in.
+add_link_options("-Wl,-z,max-page-size=16384")
+
 # --- Fetch ZXing-C++ (zxing-cpp) ---
 # Correct repo: github.com/zxing-cpp/zxing-cpp. Pin stable v3.0.2.
 set(ZXING_TAG "v3.0.2")

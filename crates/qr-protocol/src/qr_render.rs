@@ -11,15 +11,15 @@
 //! for a frame that only needs ~V23 wastes module budget and makes the code
 //! hard for a phone camera to resolve, which manifests as the receiver never
 //! accepting data symbols (stuck at "恢复中 0%"). We therefore pick the
-//! smallest version whose *byte-mode* L capacity fits the frame: byte mode is
-//! the worst case, so the optimally-segmented encoding always fits, and —
-//! because the frame size is constant within a session — every frame renders
-//! at the same fixed version, keeping the on-screen QR size stable for the
-//! scanning camera. A 1088-byte frame drops from V40 (177²) to V23 (109²); the
-//! smaller 576-byte default frame lands on V16 (81²), far easier to scan.
+//! smallest version whose *byte-mode* L capacity fits the frame, then encode the
+//! payload explicitly in QR byte mode. Because the frame size is constant within
+//! a session, every frame renders at the same fixed version, keeping the
+//! on-screen QR size stable for the scanning camera. A 1088-byte frame drops
+//! from V40 (177²) to V23 (109²); the smaller 576-byte default frame lands on
+//! V16 (81²), far easier to scan.
 
 use crate::{Error, Result};
-use qrcode::{EcLevel, QrCode, Version};
+use qrcode::{bits::Bits, EcLevel, QrCode, Version};
 use std::vec::Vec;
 
 /// QR parameters used by EasyTransfer.
@@ -64,15 +64,10 @@ impl QrMatrix {
 /// Encode `data` into the smallest EC-L QR version that holds it.
 ///
 /// Starts at the version suggested by the byte-mode capacity table
-/// ([`min_version_for`]) and, if that exact version refuses to encode the data,
-/// walks upward version by version up to Version 40. This fallback matters for
-/// the high-speed symbol sizes: a payload exactly at a version's nominal
-/// byte-mode capacity can still fail `with_version` for certain byte patterns
-/// (the segmenter/bit-stream packing occasionally needs one more version than
-/// the table predicts). Without the fallback, a single un-encodable repair
-/// frame aborts the whole render tick; empirically ~3 in 500 random 1024-byte
-/// repair frames fail at V23. Walking up guarantees every in-range frame
-/// renders, so the high-speed tier never stutters.
+/// ([`min_version_for`]) and, if that exact version refuses the byte-mode bit
+/// stream, walks upward version by version up to Version 40. Walking up
+/// guarantees every in-range frame renders, so the high-speed tier never
+/// stutters on a rare capacity-edge symbol.
 ///
 /// `data` must be ≤ [`QR_MAX_BYTES`]; the caller (frame layer) guarantees this
 /// since frames are fixed-size and well under a Version-40 payload.
@@ -89,7 +84,16 @@ pub fn encode(data: &[u8]) -> Result<QrMatrix> {
         _ => 1,
     };
     for v in start_v..=40 {
-        if let Ok(code) = QrCode::with_version(data, Version::Normal(v), QR_EC_LEVEL) {
+        let version = Version::Normal(v);
+        let mut bits = Bits::new(version);
+        if bits
+            .push_byte_data(data)
+            .and_then(|_| bits.push_terminator(QR_EC_LEVEL))
+            .is_err()
+        {
+            continue;
+        }
+        if let Ok(code) = QrCode::with_bits(bits, QR_EC_LEVEL) {
             let size = code.width();
             let modules = code
                 .to_colors()

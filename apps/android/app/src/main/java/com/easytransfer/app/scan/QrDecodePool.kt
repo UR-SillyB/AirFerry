@@ -56,6 +56,9 @@ class QrDecodePool(
     // Metrics (read by the UI for live diagnostics).
     private val capturedFrames = AtomicLong(0)
     private val droppedFrames = AtomicLong(0)
+    /** Count of decoded *symbols* (QR codes), not frames. A multi-QR frame that
+     *  yields N codes increments this by N, so the UI's "解码速率" reads as
+     *  symbols/sec and scales correctly with the on-screen code count. */
     private val decodedFrames = AtomicLong(0)
     /** Consecutive ROI misses, used to throttle full-frame fallback decodes. */
     private val roiMiss = AtomicLong(0)
@@ -131,7 +134,12 @@ class QrDecodePool(
                     // duplicate codes across frames are free).
                     val payloads = decodeMulti(frame)
                     if (payloads.isNotEmpty()) {
-                        decodedFrames.incrementAndGet()
+                        // decodedCount() measures decoded *symbols* (codes), not
+                        // frames: a multi-QR frame yields up to N symbols, so add
+                        // each one. This keeps the "解码速率" metric an accurate
+                        // symbols/sec throughput that scales correctly with the
+                        // on-screen code count (4× in 4-code mode).
+                        decodedFrames.addAndGet(payloads.size.toLong())
                         ingestLock.lock()
                         try {
                             for (p in payloads) onDecoded(p)
@@ -142,6 +150,7 @@ class QrDecodePool(
                 } else {
                     val payload = decode(frame, bboxOut)
                     if (payload != null) {
+                        // Single-code path: one decoded symbol per frame.
                         decodedFrames.incrementAndGet()
                         // Serialize native ingest: one thread in onDecoded at a time.
                         // The lock (not a single-thread executor) also applies natural
@@ -188,12 +197,13 @@ class QrDecodePool(
      *  1. **Tracked tight ROI**: if we recently locked the QR ([lastQrBbox]),
      *     crop a small window (the bbox expanded by [TRACK_MARGIN]) and decode
      *     it. On a screen QR the code barely moves frame-to-frame, so this
-     *     window is far smaller than the 70% center region — much less ZXing
+     *     window is far smaller than the fixed center region — much less ZXing
      *     work, raising the sustainable decode rate.
-     *  2. **Center ROI**: the fixed 70% center region (the QR is nominally
+     *  2. **Center ROI**: the fixed large center region (the QR is nominally
      *     centered). Used on a tracked miss, or before the first lock.
      *  3. **Full frame**: only 1 in [FULL_DECODE_EVERY] consecutive ROI misses,
-     *     to catch an off-center QR without paying for a full decode every frame.
+     *     to catch an off-center/oversized browser QR without paying for a full
+     *     decode every frame. A full-frame hit also seeds [lastQrBbox].
      *
      * Both ROI tiers use the zero-copy native crop and report the QR's bbox, so
      * any successful decode refreshes [lastQrBbox] for the next frame's tier-1.
@@ -255,14 +265,21 @@ class QrDecodePool(
             if (roiMiss.incrementAndGet() % FULL_DECODE_EVERY != 0L) return null
         }
 
-        // Tier 3: occasional full-frame decode.
-        return try {
-            ZxingDecoder.decodeY(frame.y, w, h, rs)
+        // Tier 3: occasional full-frame decode. If this succeeds, keep the
+        // reported bbox so the next frames use the fast tracked ROI instead of
+        // repeatedly falling back to expensive full-frame scans.
+        val p = try {
+            ZxingDecoder.decodeYTracked(frame.y, w, h, rs, bboxOut)
         } catch (e: UnsatisfiedLinkError) {
             Log.e(TAG, "ZXing native lib not loaded", e); null
         } catch (e: Exception) {
             null
         }
+        if (p != null) {
+            roiMiss.set(0)
+            lastQrBbox = bboxOut.copyOf()
+        }
+        return p
     }
 
     /**
@@ -324,6 +341,7 @@ class QrDecodePool(
     }
 
     fun capturedCount(): Long = capturedFrames.get()
+    /** Total decoded *symbols* (QR codes), not frames. See [decodedFrames]. */
     fun decodedCount(): Long = decodedFrames.get()
     fun droppedCount(): Long = droppedFrames.get()
 
@@ -344,15 +362,15 @@ class QrDecodePool(
     companion object {
         private const val TAG = "QrDecodePool"
         /** Center-crop side as a fraction of the shorter frame dimension. */
-        private const val ROI_FRACTION = 0.7f
+        private const val ROI_FRACTION = 0.9f
         /** Don't ROI-crop below this side length (too few px/module to decode). */
         private const val MIN_ROI = 240
         /** When the ROI keeps missing, do a full-frame decode this often. */
-        private const val FULL_DECODE_EVERY = 8L
+        private const val FULL_DECODE_EVERY = 3L
         /**
          * How much the tracked ROI expands beyond the last QR bbox, as a
          * fraction of the QR size. 0.35 tolerates hand/phone motion between
-         * frames while keeping the window much smaller than the 70% center ROI.
+         * frames while keeping the window much smaller than the center ROI.
          */
         private const val TRACK_MARGIN = 0.35f
         /** Cap the recycled-buffer free-list so it can't grow unbounded. */
