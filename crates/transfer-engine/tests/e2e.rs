@@ -38,6 +38,7 @@ fn cycle(data: &[u8], redundancy: u8, drop_every: u32, dup_some: bool, shuffle: 
         compression: qr_protocol::compress::COMPRESSION_NONE,
         compressed_size: padded_len,
         compressed_size_known: true,
+        crc32_known: false,
     };
     let mut sender = SenderSession::new(
         data,

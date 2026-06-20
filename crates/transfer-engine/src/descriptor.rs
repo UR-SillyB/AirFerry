@@ -40,6 +40,15 @@ pub struct FileMeta {
     /// `FileMeta::default()`). The previous design used `compressed_size == 0`
     /// as a sentinel for "unknown", which silently broke empty/tiny payloads.
     pub compressed_size_known: bool,
+    /// Whether `crc32` carries a real value (vs. "unknown").
+    ///
+    /// Like `compressed_size_known`, this is a *runtime-only* flag (not on the
+    /// wire). CRC32 is a 32-bit hash whose output can legitimately be 0, so the
+    /// old `crc32 == 0` sentinel for "unknown" mislabelled ~1 in 2^32 files as
+    /// unverified. The descriptor v3 tail always carries a real CRC; v1 and
+    /// `FileMeta::default()` set this false so the receiver skips verification
+    /// instead of comparing against a meaningless 0.
+    pub crc32_known: bool,
 }
 
 impl Default for FileMeta {
@@ -51,6 +60,7 @@ impl Default for FileMeta {
             compression: qr_protocol::compress::COMPRESSION_NONE,
             compressed_size: 0,
             compressed_size_known: false,
+            crc32_known: false,
         }
     }
 }
@@ -152,12 +162,16 @@ pub fn build_payload(meta: &ObjectMeta, file_meta: &FileMeta) -> Result<Vec<u8>>
 
 /// Parse a descriptor payload. Accepts v1, v2, and v3 descriptors.
 ///
-/// **Forward-compatibility by length, not version byte.** The version field is
-/// only a hint: every extension is parsed based on whether enough trailing
-/// bytes are present, so a v3 receiver can read a v2 descriptor, and a future
-/// v4 descriptor's v1/v2/v3 fields will still parse correctly here. A v2-only
-/// receiver that hard-rejects `version > 2` cannot read v3 — but this parser
-/// never rejects on version alone (it only needs the magic byte).
+/// **Forward-compatibility by length + content, not version byte alone.** The
+/// version field is only a hint. The catch: a descriptor payload is *always*
+/// zero-padded up to a full symbol, so a genuine v2 sender (which stops writing
+/// after the v2 crc32 field) leaves 9+ trailing zero bytes — exactly the size of
+/// the v3 tail. A naive "are there ≥ 9 trailing bytes?" check would therefore
+/// read that all-zero padding as a v3 tail (`compression=0, compressed_size=0`),
+/// and because `compressed_size_known` would be set true, the receiver would
+/// `truncate(0)` the recovered payload into an empty file. We guard against this
+/// by treating the v3 tail as present only when the version byte claims ≥ 3 *or*
+/// the tail is not the all-zero pattern a v2 sender's padding produces.
 ///
 /// Returns `None` only if the payload is not a descriptor at all (bad magic or
 /// truncated below the fixed header + declared block table).
@@ -165,8 +179,7 @@ pub fn parse_payload(payload: &[u8]) -> Option<DescriptorInfo> {
     if payload.len() < DESC_FIXED_OVERHEAD || payload[0] != DESC_MAGIC {
         return None;
     }
-    // Version is recorded but no longer gates parsing — see method docs.
-    let _version = payload[1];
+    let version = payload[1];
 
     let num_blocks = u16::from_be_bytes([payload[2], payload[3]]) as usize;
     let blocks_end = DESC_FIXED_OVERHEAD + num_blocks * 16;
@@ -221,10 +234,16 @@ pub fn parse_payload(payload: &[u8]) -> Option<DescriptorInfo> {
             let crc32 = u32::from_be_bytes(payload[o..o + 4].try_into().unwrap());
             o += 4;
 
-            // v3 extension: compression + compressed_size. A v2 descriptor
-            // simply omits these trailing bytes; fall back to "uncompressed,
-            // payload is exactly original_size" so old senders keep working.
-            if payload.len() >= o + DESC_V3_TAIL_FIXED {
+            // v3 extension: compression + compressed_size. The descriptor is
+            // always zero-padded to a full symbol, so a genuine v2 sender leaves
+            // an all-zero region here that a pure length-check would mistake for
+            // "compressed_size = 0" (→ receiver truncates to empty). Only treat
+            // the tail as a real v3 extension when the version byte advertises it
+            // (>= 3) OR the bytes are not the all-zero v2-padding signature.
+            let v3_present = payload.len() >= o + DESC_V3_TAIL_FIXED
+                && (version >= DESC_VERSION
+                    || payload[o..o + DESC_V3_TAIL_FIXED].iter().any(|&b| b != 0));
+            if v3_present {
                 let compression = payload[o];
                 o += 1;
                 let compressed_size = u64::from_be_bytes(payload[o..o + 8].try_into().unwrap());
@@ -235,6 +254,7 @@ pub fn parse_payload(payload: &[u8]) -> Option<DescriptorInfo> {
                     compression,
                     compressed_size,
                     compressed_size_known: true,
+                    crc32_known: true,
                 }
             } else {
                 FileMeta {
@@ -242,8 +262,15 @@ pub fn parse_payload(payload: &[u8]) -> Option<DescriptorInfo> {
                     original_size,
                     crc32,
                     compression: qr_protocol::compress::COMPRESSION_NONE,
+                    // v2/v1 never carries a compressed payload length: assume the
+                    // RaptorQ object is exactly the original file (no compression,
+                    // no trimming). `compressed_size_known=false` would also be
+                    // defensible, but the v3 spec defines the uncompressed case as
+                    // "payload == original_size", so mirror that to stay correct
+                    // for the (theoretical) v2 single-file sender.
                     compressed_size: original_size,
                     compressed_size_known: true,
+                    crc32_known: true,
                 }
             }
         }
@@ -284,8 +311,28 @@ mod tests {
     use crate::sender::{SenderConfig, SenderSession};
     use qr_protocol::SessionId;
 
+    /// Build a v3 descriptor's payload, then simulate exactly what a *real* v2
+    /// sender would have produced: drop the v3 tail and zero-fill the rest of the
+    /// symbol. This is the layout an actual legacy v2 endpoint writes (it stops
+    /// after crc32 and pads with zeros), distinct from the old test which kept the
+    /// v3 bytes around and only changed the version byte.
+    fn build_real_v2_payload(meta: &ObjectMeta, file_meta: &FileMeta) -> Vec<u8> {
+        let mut full = build_payload(meta, file_meta).unwrap();
+        // Recompute where the v2 body ends (fixed + blocks + fn_len + filename +
+        // original_size + crc32) and clear everything from there to the end of the
+        // symbol, exactly as a real v2 sender's zero-pad would.
+        let blocks_len = meta.blocks.len() * 16;
+        let fn_len = file_meta.filename.as_bytes().len();
+        let v2_body_end = DESC_FIXED_OVERHEAD + blocks_len + 1 + fn_len + 8 + 4;
+        full[1] = 2; // downgrade version byte
+        for b in &mut full[v2_body_end..] {
+            *b = 0;
+        }
+        full
+    }
+
     #[test]
-    fn descriptor_roundtrip_v2() {
+    fn descriptor_roundtrip_v3() {
         let data: Vec<u8> = (0..50_000).map(|i| (i & 0xff) as u8).collect();
         let sender = SenderSession::new(
             &data,
@@ -298,6 +345,7 @@ mod tests {
                 compression: qr_protocol::compress::COMPRESSION_NONE,
                 compressed_size: 50_000,
                 compressed_size_known: true,
+                crc32_known: true,
             },
         )
         .unwrap();
@@ -312,6 +360,7 @@ mod tests {
         assert_eq!(info.file_meta.crc32, 0xDEADBEEF);
         assert_eq!(info.file_meta.compression, qr_protocol::compress::COMPRESSION_NONE);
         assert_eq!(info.file_meta.compressed_size, 50_000);
+        assert!(info.file_meta.crc32_known);
     }
 
     #[test]
@@ -329,6 +378,7 @@ mod tests {
                 compression: qr_protocol::compress::COMPRESSION_ZSTD,
                 compressed_size: 18_000,
                 compressed_size_known: true,
+                crc32_known: true,
             },
         )
         .unwrap();
@@ -341,12 +391,16 @@ mod tests {
         assert_eq!(info.file_meta.compressed_size, 18_000);
         assert_eq!(info.file_meta.original_size, 50_000);
         assert_eq!(info.file_meta.crc32, 0xCAFEBABE);
+        assert!(info.file_meta.crc32_known);
     }
 
+    /// A genuine v2 descriptor — exactly what a real legacy v2 sender transmits:
+    /// the v2 body (through crc32) followed by an all-zero padded tail. This must
+    /// NOT be misread as a v3 tail with `compressed_size = 0` (which would make
+    /// the receiver truncate the recovered payload to an empty file). The fix
+    /// treats an all-zero trailing region as v2 padding, not a v3 extension.
     #[test]
-    fn parse_legacy_v2_descriptor_falls_back_to_none() {
-        // Hand-craft a v2 descriptor (no v3 tail) and verify the receiver
-        // treats it as uncompressed with compressed_size == original_size.
+    fn real_v2_descriptor_is_not_misread_as_empty_v3() {
         let data: Vec<u8> = (0..50_000).map(|i| (i & 0xff) as u8).collect();
         let sender = SenderSession::new(
             &data,
@@ -356,29 +410,97 @@ mod tests {
         )
         .unwrap();
         let meta = sender.meta().clone();
-        let mut payload = build_payload(&meta, &FileMeta {
-            filename: "legacy.bin".to_string(),
-            original_size: 1_234,
-            crc32: 0x11223344,
-            compression: qr_protocol::compress::COMPRESSION_NONE,
-            compressed_size: 1_234,
-            compressed_size_known: true,
-        })
-        .unwrap();
-        // Downgrade the version byte and truncate the v3 tail so it parses as
-        // a genuine v2 descriptor.
-        payload[1] = 2;
-        let v3_start = payload.len() - DESC_V3_TAIL_FIXED;
-        payload.truncate(v3_start);
-        // Pad back to symbol size so the length checks in parse still hold.
-        payload.resize(meta.symbol_size as usize, 0);
+        let v2 = build_real_v2_payload(
+            &meta,
+            &FileMeta {
+                filename: "legacy.bin".to_string(),
+                original_size: 1_234,
+                crc32: 0x11223344,
+                compression: qr_protocol::compress::COMPRESSION_NONE,
+                compressed_size: 1_234,
+                compressed_size_known: true,
+                crc32_known: true,
+            },
+        );
 
-        let info = parse_payload(&payload).unwrap();
+        let info = parse_payload(&v2).unwrap();
+        // The v2 fields are intact.
         assert_eq!(info.file_meta.filename, "legacy.bin");
         assert_eq!(info.file_meta.original_size, 1_234);
         assert_eq!(info.file_meta.crc32, 0x11223344);
+        // The all-zero tail must NOT be read as a v3 extension claiming a 0-byte
+        // compressed payload — that would truncate the recovered file to empty.
         assert_eq!(info.file_meta.compression, qr_protocol::compress::COMPRESSION_NONE);
-        assert_eq!(info.file_meta.compressed_size, 1_234);
+        assert_eq!(
+            info.file_meta.compressed_size, 1_234,
+            "v2 descriptor must fall back to compressed_size == original_size, not 0"
+        );
+    }
+
+    /// Regression for the full bug: a receiver fed a real v2 descriptor must
+    /// recover the original bytes, not an empty file. Before the fix, the all-zero
+    /// padding was parsed as a v3 tail with compressed_size=0, so assemble()
+    /// truncated the payload to 0 bytes.
+    #[test]
+    fn receiver_recovers_from_real_v2_descriptor_not_empty() {
+        use crate::receiver::ReceiverSession;
+        use raptorq_core::Config;
+
+        let data: Vec<u8> = (0..40_000).map(|i| (i & 0xff) as u8).collect();
+        // Build the sender with FileMeta whose compressed_size equals the padded
+        // transfer length (the uncompressed path), then craft a real v2 descriptor
+        // that drops the v3 tail and zero-pads.
+        let probe = SenderSession::new(
+            &data,
+            SessionId::zero(),
+            SenderConfig {
+                codec: Config::default(),
+                redundancy_pct: 20,
+            },
+            FileMeta::default(),
+        )
+        .unwrap();
+        let meta = probe.meta().clone();
+        let padded_len = meta.transfer_length;
+        let fm = FileMeta {
+            filename: "legacy.bin".to_string(),
+            original_size: data.len() as u64,
+            crc32: 0,
+            compression: qr_protocol::compress::COMPRESSION_NONE,
+            compressed_size: padded_len,
+            compressed_size_known: true,
+            crc32_known: false,
+        };
+        let mut sender = SenderSession::new(
+            &data,
+            SessionId::zero(),
+            SenderConfig {
+                codec: Config::default(),
+                redundancy_pct: 20,
+            },
+            fm,
+        )
+        .unwrap();
+        sender.set_descriptor_interval(8);
+
+        // Drive a receiver purely from frames, mimicking the wire path.
+        let first = sender.next_frame().unwrap();
+        let mut rx = ReceiverSession::from_first_frame(&Frame::from_bytes(&first.to_bytes()).unwrap());
+        let mut guard = 0;
+        while !rx.is_complete() {
+            let f = sender.next_frame().unwrap();
+            let parsed = Frame::from_bytes(&f.to_bytes()).unwrap();
+            let _ = rx.ingest(parsed);
+            guard += 1;
+            assert!(guard < 400_000, "v2 receiver did not recover");
+        }
+        let out = rx.assemble().expect("must assemble");
+        // The killer assertion: recovered bytes are the full file, NOT empty.
+        assert_eq!(
+            &out[..data.len()],
+            &data[..],
+            "v2 descriptor must not truncate the recovered payload to empty"
+        );
     }
 
     #[test]

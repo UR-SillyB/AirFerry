@@ -4,6 +4,7 @@ use qr_protocol::SessionId;
 use raptorq_core::Config;
 
 #[test]
+#[ignore]
 #[ignore = "diagnostic benchmark — run with: cargo test -- --ignored diag_blockcount"]
 fn diag_blockcount_sizes() {
     for size in [500_000usize, 1_000_000, 2_000_000, 2_430_754, 3_000_000, 5_000_000] {

@@ -32,6 +32,7 @@ fn zstd_pipeline_recovers_original_bytes() {
         compression: compress::COMPRESSION_ZSTD,
         compressed_size: compressed.len() as u64,
         compressed_size_known: true,
+        crc32_known: false,
     };
     let mut sender = SenderSession::new(
         &compressed,
@@ -92,6 +93,7 @@ fn uncompressed_pipeline_still_works() {
         compression: compress::COMPRESSION_NONE,
         compressed_size: original.len() as u64,
         compressed_size_known: true,
+        crc32_known: false,
     };
     let mut sender = SenderSession::new(
         &original,

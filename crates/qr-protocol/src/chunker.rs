@@ -26,11 +26,6 @@ pub fn pad_to_symbols(data: &[u8], config: Config) -> Vec<u8> {
     }
 }
 
-/// Total number of source symbols (K across all blocks) after padding.
-pub fn total_source_symbols(padded_len: usize, config: Config) -> u32 {
-    (padded_len as u64 / config.symbol_size as u64) as u32
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -40,7 +35,6 @@ mod tests {
         let cfg = Config::default(); // T=1024
         let padded = pad_to_symbols(&[0u8; 1500], cfg);
         assert_eq!(padded.len(), 2048);
-        assert_eq!(total_source_symbols(padded.len(), cfg), 2);
     }
 
     #[test]

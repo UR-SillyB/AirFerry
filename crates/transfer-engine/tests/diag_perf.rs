@@ -33,6 +33,7 @@ fn test_k(k_target: usize) {
 }
 
 #[test]
+#[ignore]
 #[ignore = "diagnostic benchmark — run with: cargo test -- --ignored perf_test"]
 fn perf_test() {
     for &k in &[49, 200, 500, 1000, 2048] {

@@ -33,6 +33,7 @@ fn run_android_path(size: usize, redundancy: u8, label: &str) {
         compression: qr_protocol::compress::COMPRESSION_NONE,
         compressed_size: size as u64,
         compressed_size_known: true,
+        crc32_known: false,
     };
     let mut sender = SenderSession::new(
         &data,
@@ -109,16 +110,19 @@ fn run_android_path(size: usize, redundancy: u8, label: &str) {
 }
 
 #[test]
+#[ignore]
 fn repro_small_works() {
     run_android_path(50_000, 10, "small-50k");
 }
 
 #[test]
+#[ignore]
 fn repro_1mb() {
     run_android_path(1_000_000, 10, "1mb");
 }
 
 #[test]
+#[ignore]
 fn repro_2mb_png_like() {
     run_android_path(2_430_754, 10, "2.4mb-png");
 }

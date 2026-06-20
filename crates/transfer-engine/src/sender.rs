@@ -317,6 +317,7 @@ mod tests {
             compression: qr_protocol::compress::COMPRESSION_NONE,
             compressed_size: 0,
             compressed_size_known: true,
+            crc32_known: false,
         }
     }
 

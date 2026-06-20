@@ -571,6 +571,7 @@ mod tests {
             compression: qr_protocol::compress::COMPRESSION_NONE,
             compressed_size: padded_len,
             compressed_size_known: true,
+            crc32_known: false,
         };
         let mut sender = SenderSession::new(
             &data,

@@ -6,6 +6,7 @@ use raptorq_core::Config;
 use std::time::Instant;
 
 #[test]
+#[ignore]
 #[ignore = "diagnostic benchmark — run with: cargo test -- --ignored diag_2mb"]
 fn diag_2mb_from_first_frame() {
     let size = 2 * 1024 * 1024;

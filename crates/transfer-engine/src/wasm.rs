@@ -62,6 +62,7 @@ impl SenderSessionWasm {
             compression,
             compressed_size: compressed_payload.len() as u64,
             compressed_size_known: true,
+            crc32_known: true,
         };
         let inner = SenderSession::new(compressed_payload, sid, cfg, file_meta).map_err(err_to_js)?;
         Ok(SenderSessionWasm { inner })

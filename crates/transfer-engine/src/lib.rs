@@ -23,9 +23,16 @@ pub mod resume;
 pub mod descriptor;
 pub mod time;
 
-#[cfg(feature = "wasm")]
+// Platform bindings are gated on BOTH their feature flag AND their target, so
+// that `cargo build --all-features` on the dev host (macOS/linux) does not try to
+// compile the wasm module without wasm-bindgen (only present under
+// `target_arch = "wasm32"`) or the jni module without the `jni` crate (only
+// present under `target_os = "android"`). The feature flag remains the on/off
+// switch the build matrix controls; the target gate just keeps non-portable
+// code out of foreign targets.
+#[cfg(all(feature = "wasm", target_arch = "wasm32"))]
 pub mod wasm;
-#[cfg(feature = "jni")]
+#[cfg(all(feature = "jni", target_os = "android"))]
 pub mod jni;
 
 pub use progress::{Progress, Stats};
