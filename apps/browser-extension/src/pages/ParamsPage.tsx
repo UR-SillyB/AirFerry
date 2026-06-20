@@ -1,5 +1,6 @@
 /** Page 2: transfer parameters (redundancy, fps, symbol size, brightness). */
 import type { TransferConfig } from "@/types"
+import { SPEED_PRESETS, presetForSymbolSize } from "@/types"
 
 interface Props {
   /** Files chosen by the user (1 or more). */
@@ -133,6 +134,42 @@ export function ParamsPage({
       </div>
 
       <div className="field">
+        <label>速度档位（每帧数据量）</label>
+        <select
+          value={presetForSymbolSize(config.symbolSize)?.id ?? "custom"}
+          onChange={(e) => {
+            const preset = SPEED_PRESETS.find((p) => p.id === e.target.value)
+            if (preset) {
+              // Apply both the symbol size and the preset's recommended fps.
+              // The user can still nudge fps independently afterwards.
+              onChange({ symbolSize: preset.symbolSize, fps: preset.fps })
+            }
+          }}
+        >
+          {SPEED_PRESETS.map((p) => (
+            <option key={p.id} value={p.id}>
+              {p.label}
+            </option>
+          ))}
+          {/* Shown when symbolSize is a non-preset value (e.g. legacy 1024). */}
+          {!presetForSymbolSize(config.symbolSize) && (
+            <option value="custom">自定义（{config.symbolSize}B）</option>
+          )}
+        </select>
+        <span
+          className="muted"
+          style={{ display: "block", marginTop: 4, lineHeight: 1.5 }}
+        >
+          {(() => {
+            const p = presetForSymbolSize(config.symbolSize)
+            return p
+              ? `${p.blurb}。每帧 ${config.symbolSize}B 有效载荷。`
+              : "自定义符号大小。数值越大每帧携带数据越多，但 QR 越密越难扫。"
+          })()}
+        </span>
+      </div>
+
+      <div className="field">
         <label>帧率</label>
         <select
           value={config.fps}
@@ -174,6 +211,24 @@ export function ParamsPage({
           />{" "}
           自动优化亮度 / 对比度 / 边距
         </label>
+      </div>
+
+      <div className="field">
+        <label>同屏二维码数（实验性）</label>
+        <select
+          value={config.multiQr}
+          onChange={(e) => onChange({ multiQr: Number(e.target.value) })}
+        >
+          <option value={1}>1 个（默认，最稳定）</option>
+          <option value={2}>2 个（~2× 吞吐）</option>
+          <option value={4}>4 个（~4× 吞吐）</option>
+        </select>
+        <span
+          className="muted"
+          style={{ display: "block", marginTop: 4, lineHeight: 1.5 }}
+        >
+          实验性功能：每帧在屏幕上同时显示多个二维码，每个携带不同的数据符号，吞吐量近似翻倍/四倍。要求接收端也开启「多二维码同屏」。多码时每个码更小、更难扫，建议同时选「稳定」速度档（512B）并近距离对准。
+        </span>
       </div>
 
       <button

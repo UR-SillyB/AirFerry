@@ -63,25 +63,46 @@ impl QrMatrix {
 
 /// Encode `data` into the smallest EC-L QR version that holds it.
 ///
+/// Starts at the version suggested by the byte-mode capacity table
+/// ([`min_version_for`]) and, if that exact version refuses to encode the data,
+/// walks upward version by version up to Version 40. This fallback matters for
+/// the high-speed symbol sizes: a payload exactly at a version's nominal
+/// byte-mode capacity can still fail `with_version` for certain byte patterns
+/// (the segmenter/bit-stream packing occasionally needs one more version than
+/// the table predicts). Without the fallback, a single un-encodable repair
+/// frame aborts the whole render tick; empirically ~3 in 500 random 1024-byte
+/// repair frames fail at V23. Walking up guarantees every in-range frame
+/// renders, so the high-speed tier never stutters.
+///
 /// `data` must be ≤ [`QR_MAX_BYTES`]; the caller (frame layer) guarantees this
 /// since frames are fixed-size and well under a Version-40 payload.
 pub fn encode(data: &[u8]) -> Result<QrMatrix> {
-    let version = min_version_for(data.len()).ok_or(Error::BufferTooShort {
+    let start = min_version_for(data.len()).ok_or(Error::BufferTooShort {
         need: QR_MAX_BYTES,
         have: data.len(),
     })?;
-    let code = QrCode::with_version(data, version, QR_EC_LEVEL)
-        .map_err(|_| Error::BufferTooShort {
-            need: QR_MAX_BYTES,
-            have: data.len(),
-        })?;
-    let size = code.width();
-    let modules = code
-        .to_colors()
-        .into_iter()
-        .map(|c| c != qrcode::types::Color::Light)
-        .collect();
-    Ok(QrMatrix { modules, size })
+    // `min_version_for` returns `Version::Normal(v)` with v in 1..=40. Walk from
+    // that version up to 40 inclusive, returning the first that encodes.
+    let start_v = match start {
+        Version::Normal(v) => v,
+        // Micro codes aren't produced here (we always request Normal); defend.
+        _ => 1,
+    };
+    for v in start_v..=40 {
+        if let Ok(code) = QrCode::with_version(data, Version::Normal(v), QR_EC_LEVEL) {
+            let size = code.width();
+            let modules = code
+                .to_colors()
+                .into_iter()
+                .map(|c| c != qrcode::types::Color::Light)
+                .collect();
+            return Ok(QrMatrix { modules, size });
+        }
+    }
+    Err(Error::BufferTooShort {
+        need: QR_MAX_BYTES,
+        have: data.len(),
+    })
 }
 
 #[cfg(test)]

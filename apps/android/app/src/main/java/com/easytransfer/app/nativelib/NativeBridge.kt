@@ -22,12 +22,21 @@ object NativeBridge {
     ): Long
 
     /**
-     * Ingest a frame. Returns a freshly-allocated byte[] holding the progress
-     * JSON (NUL-terminated), or null/empty array on error. The array is sized to
-     * the exact JSON length, so there is no fixed cap that could truncate
-     * progress updates on long transfers.
+     * Ingest a frame. Returns a packed status word (see [IngestStatus]) instead
+     * of a per-frame JSON string: the UI refreshes only ~7 Hz, so building and
+     * parsing a JSON on every decoded frame is wasted work. The packed word
+     * carries completion, accepted-flag, mismatch streak, and received-symbol
+     * count — enough for the ingest path to decide completion + re-init. Fetch
+     * the full progress via [receiverProgressJson] at the UI cadence.
      */
-    external fun receiverIngest(handle: Long, frameBytes: ByteArray): ByteArray?
+    external fun receiverIngest(handle: Long, frameBytes: ByteArray): Long
+
+    /**
+     * On-demand progress query (NUL-terminated JSON byte[], or empty on error).
+     * Call at the UI refresh cadence (~7 Hz), not per-frame.
+     */
+    external fun receiverProgressJson(handle: Long): ByteArray
+
     external fun receiverIsComplete(handle: Long): Int
     /**
      * Recover the assembled file as a freshly-allocated `byte[]`, or an empty

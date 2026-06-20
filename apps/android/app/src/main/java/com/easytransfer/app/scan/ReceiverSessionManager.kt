@@ -46,6 +46,37 @@ class ReceiverSessionManager {
         val sessionMismatchStreak: Int
     )
 
+    /**
+     * Lightweight per-frame status decoded from the native `receiverIngest`
+     * packed long. Carries only what the ingest path needs (completion +
+     * re-init heuristics); the full progress is fetched on demand via
+     * [progress] at the UI cadence.
+     */
+    data class IngestStatus(
+        val complete: Boolean,
+        /** True if this frame contributed a new symbol. */
+        val accepted: Boolean,
+        val mismatchStreak: Int,
+        val receivedSymbols: Int
+    ) {
+        companion object {
+            // Mirrors the Rust pack_ingest_status layout (see jni.rs).
+            private const val ERROR_RECEIVED = 0xFFFFFFFFL.toInt()
+
+            /** Decode a packed status word, or null on the error sentinel. */
+            fun unpack(word: Long): IngestStatus? {
+                val bits = word.toULong()
+                // Error sentinel: received_symbols == u32::MAX.
+                if (((bits shr 32) and 0xFFFFFFFFuL).toInt() == ERROR_RECEIVED) return null
+                val complete = (bits and 1uL) != 0uL
+                val accepted = ((bits shr 1) and 1uL) != 0uL
+                val streak = ((bits shr 8) and 0xFFFFuL).toInt()
+                val received = ((bits shr 32) and 0xFFFFFFFFuL).toInt()
+                return IngestStatus(complete, accepted, streak, received)
+            }
+        }
+    }
+
     private var handle: Long = 0L
     private var sessionIdLo: Long = 0L
     private var sessionIdHi: Long = 0L
@@ -98,8 +129,12 @@ class ReceiverSessionManager {
      * accepted symbols triggers a forced re-init from the next descriptor that
      * arrives — covering the edge-case where the first descriptor itself was
      * corrupted but a later one is clean.
+     *
+     * Returns a lightweight [IngestStatus] (no JSON) so the hot ingest path
+     * doesn't allocate/parse a string per frame. Call [progress] on the UI
+     * refresh cadence for the full snapshot.
      */
-    fun ingest(frameBytes: ByteArray): Progress? {
+    fun ingest(frameBytes: ByteArray): IngestStatus? {
         val header = parseHeader(frameBytes) ?: return null
 
         // Cache estimated total symbols from first frame for approximate progress
@@ -131,24 +166,36 @@ class ReceiverSessionManager {
             if (!initialized) return null
         }
 
-        // receiverIngest returns a freshly-allocated byte[] (progress JSON +
-        // trailing NUL). On error (corrupted frame) it returns empty.
-        val jsonBytes = NativeBridge.receiverIngest(handle, frameBytes) ?: return null
-        if (jsonBytes.isEmpty()) return null
-        val nul = jsonBytes.indexOf(0)
-        val len = if (nul >= 0) nul else jsonBytes.size
-        val json = String(jsonBytes, 0, len)
-        val progress = parseProgress(json)
+        // receiverIngest returns a packed status word (see IngestStatus). The
+        // error sentinel (null from unpack) means a rejected frame — treat as
+        // "nothing happened" without disturbing the re-init state machine.
+        val status = IngestStatus.unpack(NativeBridge.receiverIngest(handle, frameBytes))
+            ?: return null
 
         // Track mismatch streak for re-init logic above.
-        if (progress.sessionMismatchStreak >= 3) {
-            mismatchStreak = progress.sessionMismatchStreak
-        } else if (progress.receivedSymbols > 0) {
+        if (status.mismatchStreak >= 3) {
+            mismatchStreak = status.mismatchStreak
+        } else if (status.accepted) {
             everAccepted = true
             mismatchStreak = 0
         }
 
-        return progress
+        return status
+    }
+
+    /**
+     * Full progress snapshot (parsed from the on-demand JSON). Intended to be
+     * called at the UI refresh cadence (~7 Hz), NOT per-frame. Returns null if
+     * the session isn't initialized or the native call fails.
+     */
+    fun progress(): Progress? {
+        if (!initialized || handle == 0L) return null
+        val jsonBytes = NativeBridge.receiverProgressJson(handle) ?: return null
+        if (jsonBytes.isEmpty()) return null
+        val nul = jsonBytes.indexOf(0)
+        val len = if (nul >= 0) nul else jsonBytes.size
+        val json = String(jsonBytes, 0, len)
+        return parseProgress(json)
     }
 
     /** Create (or re-create) the native receiver from a parsed frame header. */

@@ -7,7 +7,7 @@
  * brightness filter optimized for camera scanning.
  */
 import { useEffect, useRef, useCallback, useState } from "react"
-import { SenderSessionWasm, encode_qr, ensureWasm } from "@/wasm/loader"
+import { SenderSessionWasm, ensureWasm } from "@/wasm/loader"
 
 export interface QrStreamStats {
   frames: number
@@ -26,6 +26,8 @@ interface Props {
   brightness: number
   /** Auto-optimize brightness/contrast for scanning. */
   autoOptimize: boolean
+  /** Number of QR codes per screen frame (1 = single, 2/4 = multi-QR mode). */
+  multiQr: number
   onStats?: (s: QrStreamStats) => void
   onError?: (e: Error) => void
 }
@@ -35,6 +37,7 @@ export function QrStream({
   fps,
   brightness,
   autoOptimize,
+  multiQr,
   onStats,
   onError
 }: Props) {
@@ -51,25 +54,37 @@ export function QrStream({
     const ctx = canvas.getContext("2d", { alpha: false })
     if (!ctx) return
 
-    // Pull next frame + encode QR (both in WASM).
-    let frameBytes: Uint8Array
-    let matrix: Uint8Array
-    let side: number
+    // Decide single vs multi-QR mode. multiQr<=1 keeps the proven single-code
+    // path (one next_qr call, fills the whole canvas). multiQr>=2 requests N
+    // distinct symbols in one WASM call and tiles them in a grid.
+    const wantMulti = multiQr >= 2
+
+    // Collect the matrices to render this tick. Each entry: [side, modules].
+    type Matrix = { side: number; modules: Uint8Array }
+    let matrices: Matrix[]
     try {
-      frameBytes = session.next_frame()
-      const sideBuf = new Uint32Array(1)
-      matrix = encode_qr(frameBytes, sideBuf)
-      side = sideBuf[0]
+      if (!wantMulti) {
+        const sideBuf = new Uint32Array(1)
+        const modules = session.next_qr(sideBuf)
+        matrices = [{ side: sideBuf[0], modules }]
+      } else {
+        const buf = session.next_qr_multi(multiQr)
+        matrices = parseMultiQrBuf(buf)
+        if (matrices.length === 0) {
+          // Nothing produced this tick; skip the redraw.
+          return
+        }
+      }
     } catch (e) {
       onError?.(e as Error)
       return
     }
 
-    // Quiet-zone margin (4 modules per QR spec) + module scale to fill canvas.
-    const margin = 4
-    const quiet = side + margin * 2
-    // Fit matrix into canvas; pick a module size that tiles evenly.
-    const cssSize = canvas.clientWidth || 480  // Fallback to 480 if clientWidth is 0
+    // Layout: single → fills canvas; multi → grid (2 → 1×2, 4 → 2×2, else row).
+    const n = matrices.length
+    const cols = n === 2 ? 2 : n === 4 ? 2 : n
+    const rows = Math.ceil(n / cols)
+    const cssSize = canvas.clientWidth || 480 // Fallback to 480 if clientWidth is 0
     const dpr = window.devicePixelRatio || 1
     const px = Math.max(cssSize * dpr, 256)
     // Only resize the backing store when the target size actually changes.
@@ -82,52 +97,24 @@ export function QrStream({
       canvas.width = px
       canvas.height = px
     }
-    const modulePx = Math.floor(px / quiet)
-    const drawSize = modulePx * quiet
-    const offset = Math.floor((px - drawSize) / 2)
 
-    // Pure white background (max contrast).
+    // Pure white background (max contrast) across the whole canvas.
     ctx.fillStyle = "#ffffff"
     ctx.fillRect(0, 0, px, px)
 
-    // Draw dark modules only. Group consecutive dark modules in a row into a
-    // single fillRect (run-length) — far fewer state changes / draw calls than
-    // one rect per module, which matters at 60fps for a 177×177 grid.
-    ctx.fillStyle = "#000000"
-    for (let y = 0; y < side; y++) {
-      const rowBase = y * side
-      const py = offset + (y + margin) * modulePx
-      let runStart = -1
-      for (let x = 0; x < side; x++) {
-        const dark = matrix[rowBase + x] !== 0
-        if (dark) {
-          if (runStart < 0) runStart = x
-        } else if (runStart >= 0) {
-          ctx.fillRect(
-            offset + (runStart + margin) * modulePx,
-            py,
-            (x - runStart) * modulePx,
-            modulePx
-          )
-          runStart = -1
-        }
-      }
-      if (runStart >= 0) {
-        ctx.fillRect(
-          offset + (runStart + margin) * modulePx,
-          py,
-          (side - runStart) * modulePx,
-          modulePx
-        )
-      }
+    // Each code occupies an equal cell with a small gap between cells (white
+    // gutter also serves as quiet zone). The cell is square.
+    const gap = wantMulti ? Math.round(px * 0.02) : 0
+    const cellW = Math.floor((px - gap * (cols + 1)) / cols)
+    const cellH = Math.floor((px - gap * (rows + 1)) / rows)
+    const cell = Math.min(cellW, cellH)
+    for (let i = 0; i < n; i++) {
+      const c = i % cols
+      const r = Math.floor(i / cols)
+      const ox = gap + c * (cell + gap)
+      const oy = gap + r * (cell + gap)
+      drawMatrix(ctx, matrices[i].modules, matrices[i].side, ox, oy, cell)
     }
-
-    // Apply brightness/contrast optimization at the canvas element level.
-    const filterParts: string[] = []
-    const b = autoOptimize ? Math.max(brightness, 1.15) : brightness
-    filterParts.push(`brightness(${b.toFixed(2)})`)
-    if (autoOptimize) filterParts.push("contrast(1.1)")
-    canvas.style.filter = filterParts.join(" ")
 
     // Stats throttle: ~4 Hz.
     const now = performance.now()
@@ -146,7 +133,21 @@ export function QrStream({
         /* ignore */
       }
     }
-  }, [session, autoOptimize, brightness, onStats, onError])
+  }, [session, autoOptimize, brightness, multiQr, onStats, onError])
+
+  // Apply brightness/contrast optimization at the canvas element level. This is
+  // a constant for a given (brightness, autoOptimize) combination, so set it
+  // once on mount / when those props change — NOT every render tick. Per-frame
+  // `canvas.style.filter = ...` triggers style recalculation / compositor-layer
+  // repaint every frame, which is wasted work when the filter never changes.
+  useEffect(() => {
+    const canvas = canvasRef.current
+    if (!canvas) return
+    const b = autoOptimize ? Math.max(brightness, 1.15) : brightness
+    const filterParts = [`brightness(${b.toFixed(2)})`]
+    if (autoOptimize) filterParts.push("contrast(1.1)")
+    canvas.style.filter = filterParts.join(" ")
+  }, [brightness, autoOptimize])
 
   useEffect(() => {
     let cancelled = false
@@ -195,4 +196,86 @@ export function QrStream({
       </button>
     </div>
   )
+}
+
+/**
+ * Draw one QR matrix into the square cell at (ox, oy) with side `cellPx`,
+ * including the 4-module quiet zone and run-length dark-module batching. This
+ * is the shared drawing routine used by both the single- and multi-QR paths.
+ */
+function drawMatrix(
+  ctx: CanvasRenderingContext2D,
+  matrix: Uint8Array,
+  side: number,
+  ox: number,
+  oy: number,
+  cellPx: number
+) {
+  const margin = 4
+  const quiet = side + margin * 2
+  // Module size that tiles evenly into the cell; floor keeps modules aligned.
+  const modulePx = Math.max(1, Math.floor(cellPx / quiet))
+  const drawSize = modulePx * quiet
+  // Center the code within the cell.
+  const offset = Math.floor((cellPx - drawSize) / 2)
+
+  // White quiet-zone background for this cell (the global clear already painted
+  // white, but re-painting the cell guarantees a clean gutter per code).
+  ctx.fillStyle = "#ffffff"
+  ctx.fillRect(ox, oy, cellPx, cellPx)
+
+  // Draw dark modules only, run-length batched per row.
+  ctx.fillStyle = "#000000"
+  for (let y = 0; y < side; y++) {
+    const rowBase = y * side
+    const py = oy + offset + (y + margin) * modulePx
+    let runStart = -1
+    for (let x = 0; x < side; x++) {
+      const dark = matrix[rowBase + x] !== 0
+      if (dark) {
+        if (runStart < 0) runStart = x
+      } else if (runStart >= 0) {
+        ctx.fillRect(
+          ox + offset + (runStart + margin) * modulePx,
+          py,
+          (x - runStart) * modulePx,
+          modulePx
+        )
+        runStart = -1
+      }
+    }
+    if (runStart >= 0) {
+      ctx.fillRect(
+        ox + offset + (runStart + margin) * modulePx,
+        py,
+        (side - runStart) * modulePx,
+        modulePx
+      )
+    }
+  }
+}
+
+/**
+ * Parse the flat little-endian buffer returned by `next_qr_multi`:
+ *   [u32 count][for each: u32 side + side*side bytes modules]
+ * Returns the list of {side, modules}. An empty/short buffer yields [].
+ *
+ * The DataView reads over the same buffer the WASM call returned (a fresh
+ * Uint8Array), so no extra copy is made beyond the slice views into modules.
+ */
+function parseMultiQrBuf(buf: Uint8Array): { side: number; modules: Uint8Array }[] {
+  if (buf.length < 4) return []
+  const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength)
+  const count = dv.getUint32(0, true) // little-endian
+  const out: { side: number; modules: Uint8Array }[] = []
+  let pos = 4
+  for (let i = 0; i < count && pos + 4 <= buf.length; i++) {
+    const side = dv.getUint32(pos, true)
+    pos += 4
+    const n = side * side
+    if (pos + n > buf.length) break // truncated; stop
+    out.push({ side, modules: buf.subarray(pos, pos + n) })
+    pos += n
+  }
+  return out
 }

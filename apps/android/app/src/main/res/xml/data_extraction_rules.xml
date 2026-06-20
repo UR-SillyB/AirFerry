@@ -2,16 +2,18 @@
 <!--
     Data extraction rules (Android 12+ cloud backup + device-to-device migration).
     `allowBackup` is already `false` in the manifest; this file is the explicit
-    belt-and-suspenders so received files and cached recoveries are never backed
-    up or migrated even if backup is later re-enabled.
+    belt-and-suspenders so received files are never backed up or migrated even
+    if backup is later re-enabled.
+
+    The cache/ dir is excluded automatically by the backup framework, so no rule
+    is needed for it (and `domain="cache"` is not a valid value here — valid
+    domains are file/database/sharedpref/external/root/device_*).
 -->
 <data-extraction-rules>
     <cloud-backup>
         <exclude domain="file" path="received/" />
-        <exclude domain="cache" path="." />
     </cloud-backup>
     <device-transfer>
         <exclude domain="file" path="received/" />
-        <exclude domain="cache" path="." />
     </device-transfer>
 </data-extraction-rules>

@@ -45,82 +45,146 @@ pub extern "system" fn Java_com_easytransfer_app_nativelib_NativeBridge_receiver
     }
 }
 
-/// Ingest a frame. Returns a freshly-allocated `byte[]` containing the
-/// NUL-terminated progress JSON (or an empty array on error). Returning a new
-/// array instead of writing into a caller-supplied buffer removes the fixed
-/// 1024-byte cap that previously truncated JSON (and threw
-/// `ArrayIndexOutOfBoundsException` on long transfers), silently stalling the
-/// receiver's progress updates.
+/// Ingest a frame.
+///
+/// Returns a packed `jlong` status word instead of a per-frame JSON byte[].
+/// Building + crossing the JNI boundary with a JSON string on *every* decoded
+/// frame (the UI only refreshes ~7 Hz) is pure waste: it allocates a Rust
+/// `String`, a Java `byte[]`, a Kotlin `String`, and a `JSONObject` parse per
+/// frame at 60 fps. The packed word carries just what the ingest path needs to
+/// decide completion + re-init, and the full progress is fetched on demand via
+/// [`receiverProgressJson`] at the UI's throttle cadence.
+///
+/// Bit layout of the returned `jlong` (all fields unsigned):
+///   - bit  0      : `complete` (1 once the object is fully decoded)
+///   - bit  1      : `accepted` (1 if this frame contributed a new symbol)
+///   - bits 8..23  : `session_mismatch_streak` (0..=0xFFFF)
+///   - bits 32..63 : `received_symbols` (low 32 bits; capped well below 2^32)
+///
+/// Returns 0 on a null handle, a bad frame, or a session error (the caller
+/// treats 0 as "nothing changed"). `received_symbols == u32::MAX` is reserved
+/// as an error sentinel (a real transfer never reaches that).
 #[no_mangle]
 pub extern "system" fn Java_com_easytransfer_app_nativelib_NativeBridge_receiverIngest(
     mut env: JNIEnv,
     _class: JClass,
     handle: jlong,
     frame_bytes: JByteArray,
-) -> jni::sys::jbyteArray {
-    // Helper: allocate a fresh byte[] of `len` bytes and fill it from `buf`.
-    // Returns null on allocation failure. Inlined (not a closure) so it does
-    // not capture a borrow of `env` and conflict with later uses of `env`.
-    fn fill_array(
-        env: &mut JNIEnv,
-        buf: &[u8],
-    ) -> jni::sys::jbyteArray {
-        let len = buf.len() as jsize;
-        let arr = match env.new_byte_array(len) {
-            Ok(a) => a,
-            Err(_) => return std::ptr::null_mut(),
-        };
-        // SAFETY: u8 and i8 have the same layout; the slice is a valid
-        // reinterpretation for the JNI SetByteArrayRegion call.
-        let i8_buf: &[i8] =
-            unsafe { std::slice::from_raw_parts(buf.as_ptr() as *const i8, buf.len()) };
-        if env.set_byte_array_region(&arr, 0, i8_buf).is_ok() {
-            arr.into_raw()
-        } else {
-            std::ptr::null_mut()
-        }
-    }
-
+) -> jlong {
     if handle == 0 {
-        return fill_array(&mut env, &[]);
+        return 0;
     }
     let frame_vec: Vec<u8> = match env.convert_byte_array(&frame_bytes) {
         Ok(v) => v,
-        Err(_) => return fill_array(&mut env, &[]),
+        Err(_) => return INGEST_ERROR,
     };
     let session = unsafe { &mut *(handle as *mut ReceiverSession) };
-    match qr_protocol::Frame::from_bytes(&frame_vec) {
-        Ok(frame) => {
-            let is_descriptor = frame.header.flags & qr_protocol::frame::FLAG_DESCRIPTOR != 0;
-            match session.ingest(frame) {
-                Ok(_) => {}
-                Err(e) => {
-                    // A SessionMismatch on a data frame would silently drop
-                    // every symbol — surface it so the cause is visible.
-                    android_log(&format!("ingest error: {e}"));
-                }
-            }
-            let p = session.progress();
-            // Log the first few frames + any descriptor + when received is
-            // suspiciously stuck at 0 while frames are flowing. Throttled by
-            // frame_index to avoid flooding logcat.
-            if p.frames_seen <= 3 || is_descriptor || (p.frames_seen % 50 == 0 && !session.is_complete()) {
-                android_log(&format!(
-                    "f={} desc={} meta={} recv={} dec={} {}/{} mismatch={}",
-                    p.frames_seen, is_descriptor, p.meta_confirmed,
-                    p.received_symbols, p.decoded_blocks, p.decoded_symbols, p.total_symbols,
-                    p.session_mismatch_streak
-                ));
-            }
-            let json = progress_json(&session.progress());
-            let mut buf = json.into_bytes();
-            buf.push(0); // NUL terminator for C-string reads on the Kotlin side.
-            fill_array(&mut env, &buf)
-        }
+    let frame = match qr_protocol::Frame::from_bytes(&frame_vec) {
+        Ok(f) => f,
         Err(e) => {
             android_log(&format!("frame rejected (len={}): {:?}", frame_vec.len(), e));
-            fill_array(&mut env, &[])
+            return INGEST_ERROR;
         }
+    };
+    let is_descriptor = frame.header.flags & qr_protocol::frame::FLAG_DESCRIPTOR != 0;
+    let prev_received = session.progress().received_symbols;
+    match session.ingest(frame) {
+        Ok(_) => {}
+        Err(e) => {
+            // A SessionMismatch on a data frame would silently drop every
+            // symbol — surface it so the cause is visible.
+            android_log(&format!("ingest error: {e}"));
+        }
+    }
+    let p = session.progress();
+    // Log the first few frames + any descriptor + when received is suspiciously
+    // stuck at 0 while frames are flowing. Throttled by frame_index to avoid
+    // flooding logcat.
+    if p.frames_seen <= 3 || is_descriptor || (p.frames_seen % 50 == 0 && !session.is_complete()) {
+        android_log(&format!(
+            "f={} desc={} meta={} recv={} dec={} {}/{} mismatch={}",
+            p.frames_seen, is_descriptor, p.meta_confirmed,
+            p.received_symbols, p.decoded_blocks, p.decoded_symbols, p.total_symbols,
+            p.session_mismatch_streak
+        ));
+    }
+    let complete = if session.is_complete() { 1 } else { 0 };
+    // A frame "contributed" if received_symbols advanced, OR it was a descriptor
+    // that confirmed meta (so re-init state on the Kotlin side updates even when
+    // no new symbol arrived on that descriptor tick).
+    let accepted = if p.received_symbols > prev_received { 1 } else { 0 };
+    pack_ingest_status(
+        complete == 1,
+        accepted == 1,
+        p.session_mismatch_streak,
+        p.received_symbols,
+    )
+}
+
+/// Error sentinel: received_symbols = u32::MAX (an unreachable real value), all
+/// flags clear. The Kotlin side treats this as "frame rejected / nothing to do".
+pub const INGEST_ERROR: jlong = (0xFFFF_FFFFu64 << 32) as jlong;
+
+/// Pack the per-frame status into the jlong layout documented on
+/// [`receiverIngest`].
+fn pack_ingest_status(
+    complete: bool,
+    accepted: bool,
+    mismatch_streak: u32,
+    received_symbols: u32,
+) -> jlong {
+    let mut bits: u64 = 0;
+    if complete {
+        bits |= 1;
+    }
+    if accepted {
+        bits |= 1 << 1;
+    }
+    // Clamp streak into 16 bits (it's reset well before 2^16 in practice).
+    let streak16 = (mismatch_streak & 0xFFFF) as u64;
+    bits |= streak16 << 8;
+    // Clamp received_symbols into 32 bits (a real transfer stays well below).
+    let recv32 = (received_symbols & 0xFFFF_FFFF) as u64;
+    bits |= recv32 << 32;
+    bits as jlong
+}
+
+/// On-demand progress query (JSON). The UI calls this on its ~7 Hz refresh
+/// cadence instead of parsing a JSON on every ingested frame. Returns a freshly
+/// allocated `byte[]` of the NUL-terminated JSON, or an empty array on error.
+#[no_mangle]
+pub extern "system" fn Java_com_easytransfer_app_nativelib_NativeBridge_receiverProgressJson(
+    mut env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+) -> jni::sys::jbyteArray {
+    if handle == 0 {
+        return null_byte_array(&mut env);
+    }
+    let session = unsafe { &*(handle as *const ReceiverSession) };
+    let json = progress_json(&session.progress());
+    let mut buf = json.into_bytes();
+    buf.push(0); // NUL terminator for C-string reads on the Kotlin side.
+    fill_array(&mut env, &buf)
+}
+
+/// Allocate a fresh byte[] of `len` bytes and fill it from `buf`. Returns null
+/// on allocation failure. Inlined (not a closure) so it does not capture a
+/// borrow of `env` and conflict with later uses of `env`.
+fn fill_array(env: &mut JNIEnv, buf: &[u8]) -> jni::sys::jbyteArray {
+    let len = buf.len() as jsize;
+    let arr = match env.new_byte_array(len) {
+        Ok(a) => a,
+        Err(_) => return std::ptr::null_mut(),
+    };
+    // SAFETY: u8 and i8 have the same layout; the slice is a valid
+    // reinterpretation for the JNI SetByteArrayRegion call.
+    let i8_buf: &[i8] =
+        unsafe { std::slice::from_raw_parts(buf.as_ptr() as *const i8, buf.len()) };
+    if env.set_byte_array_region(&arr, 0, i8_buf).is_ok() {
+        arr.into_raw()
+    } else {
+        std::ptr::null_mut()
     }
 }
 

@@ -74,6 +74,74 @@ impl SenderSessionWasm {
         Ok(frame.to_bytes())
     }
 
+    /// Produce the next frame AND encode it to a QR matrix in one call.
+    ///
+    /// This fuses `next_frame()` + `encode_qr()` so the per-frame path crosses
+    /// the WASM/JS boundary once instead of twice, avoiding the intermediate
+    /// `Uint8Array` copy of the raw frame bytes (the JS layer never needs the
+    /// raw frame — only the rendered matrix). Returns the flat module grid as
+    /// `Vec<u8>` (1 = dark, 0 = light, row-major); `out_side[0]` is set to the
+    /// side length. An empty `Vec` (side 0) signals the session produced no
+    /// frame this tick.
+    pub fn next_qr(&mut self, out_side: &mut [u32]) -> Result<Vec<u8>, JsValue> {
+        if out_side.is_empty() {
+            return Err(JsValue::from_str("out_side buffer empty"));
+        }
+        let frame = self.inner.next_frame().map_err(err_to_js)?;
+        let bytes = frame.to_bytes();
+        let matrix = qr_protocol::qr_render::encode(&bytes).map_err(|e| {
+            JsValue::from_str(&format!("qr encode failed: {e:?}"))
+        })?;
+        out_side[0] = matrix.size as u32;
+        Ok(matrix.modules.iter().map(|&dark| dark as u8).collect())
+    }
+
+    /// Produce `count` next frames, each encoded to a QR matrix, in one WASM
+    /// call — for the multi-QR-per-screen experimental mode. Each frame is a
+    /// distinct symbol of the same session (different sbn/esi), so a receiver
+    /// that decodes all on-screen codes at once gets `count` new symbols per
+    /// tick instead of one, multiplying throughput by ~`count` (bounded by the
+    /// camera resolving N smaller codes).
+    ///
+    /// Returns a flat little-endian buffer the JS layer parses:
+    ///   `[u32 count_actual][for each matrix: u32 side + side*side bytes]`
+    /// where each module byte is 1=dark / 0=light, row-major. `count_actual`
+    /// may be less than `count` if the session could not produce that many
+    /// (it should always be able to, since repair symbols are unbounded, but
+    /// we clamp defensively). An empty buffer / count_actual == 0 signals
+    /// failure.
+    pub fn next_qr_multi(&mut self, count: u32) -> Result<Vec<u8>, JsValue> {
+        // Cap at a sane maximum to bound allocation; the UI only offers 2/4.
+        let n = count.min(8) as usize;
+        let mut out: Vec<u8> = Vec::new();
+        // Reserve the count slot; we'll fill it after we know how many succeeded.
+        out.extend_from_slice(&0u32.to_le_bytes());
+        let mut produced = 0u32;
+        for _ in 0..n {
+            let frame = match self.inner.next_frame() {
+                Ok(f) => f,
+                Err(e) => {
+                    // Stop producing on error; return what we have so far.
+                    android_log_wasm(&format!("next_qr_multi frame err: {e}"));
+                    break;
+                }
+            };
+            let bytes = frame.to_bytes();
+            let matrix = match qr_protocol::qr_render::encode(&bytes) {
+                Ok(m) => m,
+                Err(e) => {
+                    android_log_wasm(&format!("next_qr_multi qr err: {e:?}"));
+                    break;
+                }
+            };
+            out.extend_from_slice(&(matrix.size as u32).to_le_bytes());
+            out.extend(matrix.modules.iter().map(|&dark| dark as u8));
+            produced += 1;
+        }
+        out[..4].copy_from_slice(&produced.to_le_bytes());
+        Ok(out)
+    }
+
     /// Session id (low 64 bits).
     pub fn session_id_lo(&self) -> u64 {
         self.inner.session_id() as u64
@@ -105,6 +173,12 @@ impl SenderSessionWasm {
 
 fn err_to_js(e: crate::Error) -> JsValue {
     JsValue::from_str(&format!("{e}"))
+}
+
+/// Log a warning to the JS console (used by the multi-QR path on rare frame/QR
+/// errors so they're visible without aborting the whole multi-frame tick).
+fn android_log_wasm(msg: &str) {
+    web_sys::console::warn_1(&format!("EasyTransfer: {msg}").into());
 }
 
 /// Encode `frame_bytes` (a serialized Frame) into a Version-40 / L QR matrix.

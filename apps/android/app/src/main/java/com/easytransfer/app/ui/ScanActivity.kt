@@ -365,7 +365,16 @@ class ScanActivity : ComponentActivity() {
     private fun ensurePool(): QrDecodePool {
         var p = decodePool
         if (p == null) {
-            p = QrDecodePool { payload -> handleFrameAsync(payload) }.also { it.start() }
+            // Multi-QR mode is an experimental receiver toggle: when on, the pool
+            // decodes every code on screen per frame (not just the first), so a
+            // sender tiling N codes yields ~N× throughput. Read from the same
+            // "easytransfer" prefs the Settings screen writes.
+            val multiQr = getSharedPreferences("easytransfer", MODE_PRIVATE)
+                .getBoolean("multi_qr_mode", false)
+            p = QrDecodePool(
+                onDecoded = { payload -> handleFrameAsync(payload) },
+                multiMode = multiQr,
+            ).also { it.start() }
             decodePool = p
         }
         return p
@@ -513,20 +522,26 @@ class ScanActivity : ComponentActivity() {
         // with another ingest. This runs under the pool's ingest lock, so the
         // check+ingest+stop sequence is atomic w.r.t. other workers.
         if (ingestStopped.get()) return
-        val progress = session.ingest(payload) ?: return
+        // ingest() returns a lightweight status (no JSON) so the per-frame path
+        // stays cheap; the full progress is fetched only on the throttled UI tick.
+        val status = session.ingest(payload) ?: return
+
+        // UI refresh throttle: ~7 Hz is plenty for a progress bar, and keeps the
+        // main thread free. Always let the final "complete" frame through.
+        val now = System.currentTimeMillis()
+        if (now - lastUiUpdate < 150 && !status.complete) return
+        lastUiUpdate = now
+
+        // On the UI tick (or completion), pull the full progress snapshot. This
+        // is the only place the JSON is parsed — not every frame.
+        val progress = session.progress() ?: return
 
         // Read file metadata from session (JNI) — keep on this background thread.
         val fn = if (session.isInitialized) session.fileName() else ""
         val fs = if (session.isInitialized) session.fileSize() else 0L
 
-        // UI refresh throttle: ~7 Hz is plenty for a progress bar, and keeps the
-        // main thread free. Always let the final "complete" frame through.
-        val now = System.currentTimeMillis()
-        if (now - lastUiUpdate < 150 && !progress.complete) return
-        lastUiUpdate = now
-
         val snapshot = FrameSnapshot(progress, fn, fs)
-        if (progress.complete) {
+        if (status.complete) {
             // Block any further ingest before the completion path (assemble +
             // file I/O + Activity start) runs on the main thread.
             ingestStopped.set(true)

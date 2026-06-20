@@ -2,10 +2,13 @@
 <!--
     Full-backup rules (Android 6.0+). `allowBackup` is already `false` in the
     manifest, so this file is belt-and-suspenders: if a future change re-enables
-    backup, the received/ cache (potentially sensitive files transferred over the
-    air-gapped optical channel) and the cache/ dir must never leave the device.
+    backup, the received/ directory (potentially sensitive files transferred over
+    the air-gapped optical channel) must never leave the device.
+
+    The app's cache/ dir is excluded automatically by the backup framework, so
+    no rule is needed for it (and `domain="cache"` is not a valid value here —
+    valid domains are file/database/sharedpref/external/root).
 -->
 <full-backup-content>
     <exclude domain="file" path="received/" />
-    <exclude domain="cache" path="." />
 </full-backup-content>

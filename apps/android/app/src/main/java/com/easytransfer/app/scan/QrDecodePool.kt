@@ -25,7 +25,14 @@ import java.util.concurrent.locks.ReentrantLock
  * @param onDecoded invoked (serialized) with each decoded QR payload.
  */
 class QrDecodePool(
-    private val onDecoded: (ByteArray) -> Unit
+    private val onDecoded: (ByteArray) -> Unit,
+    /**
+     * Experimental multi-QR mode: when true, each frame is decoded with
+     * `ReadBarcodes` (plural) and *every* valid code's payload is ingested
+     * (not just the first), so a sender tiling N codes per frame yields ~N
+     * symbols/tick. Off (default) → single-code tracked-ROI path.
+     */
+    private val multiMode: Boolean = false,
 ) {
     /** A captured luminance frame; [y] is a pooled buffer (recycled after use). */
     private class YFrame(
@@ -36,15 +43,6 @@ class QrDecodePool(
         /** Number of valid bytes in [y] (may be < y.size for a recycled buffer). */
         @JvmField val len: Int
     )
-
-    /** Per-worker reusable ROI crop buffer (grows on demand, never shared). */
-    private class CropBuf {
-        var buf = ByteArray(0)
-        fun ensure(n: Int): ByteArray {
-            if (buf.size < n) buf = ByteArray(n)
-            return buf
-        }
-    }
 
     private val workerCount =
         (Runtime.getRuntime().availableProcessors() - 2).coerceIn(2, 6)
@@ -61,6 +59,16 @@ class QrDecodePool(
     private val decodedFrames = AtomicLong(0)
     /** Consecutive ROI misses, used to throttle full-frame fallback decodes. */
     private val roiMiss = AtomicLong(0)
+
+    /**
+     * Last-known QR bounding box in full-frame pixel coords {minX, minY, maxX,
+     * maxY}, or null before the first lock / after a miss. Read/written by
+     * multiple workers; a stale read is harmless (worst case: one frame uses a
+     * slightly old position), so a plain volatile reference suffices. The array
+     * itself is treated as immutable after publication.
+     */
+    @Volatile
+    private var lastQrBbox: IntArray? = null
 
     fun start() {
         if (running.getAndSet(true)) return
@@ -106,7 +114,10 @@ class QrDecodePool(
     }
 
     private fun workerLoop() {
-        val crop = CropBuf()
+        // Per-worker scratch for the native bbox write-back (decodeYRegionTracked
+        // fills [0..3]). Avoids allocating per frame and avoids cross-worker
+        // contention on a shared array.
+        val bboxOut = IntArray(4)
         while (running.get()) {
             val frame = try {
                 queue.poll(200, TimeUnit.MILLISECONDS)
@@ -114,18 +125,34 @@ class QrDecodePool(
                 break
             } ?: continue
             try {
-                val payload = decode(frame, crop)
-                if (payload != null) {
-                    decodedFrames.incrementAndGet()
-                    // Serialize native ingest: one thread in onDecoded at a time.
-                    // The lock (not a single-thread executor) also applies natural
-                    // backpressure so a fast batch decode can't grow an unbounded
-                    // pending-ingest queue.
-                    ingestLock.lock()
-                    try {
-                        onDecoded(payload)
-                    } finally {
-                        ingestLock.unlock()
+                if (multiMode) {
+                    // Multi-QR: decode every code on screen, ingest them all under
+                    // one lock hold (the native receiver dedups by sbn/esi, so
+                    // duplicate codes across frames are free).
+                    val payloads = decodeMulti(frame)
+                    if (payloads.isNotEmpty()) {
+                        decodedFrames.incrementAndGet()
+                        ingestLock.lock()
+                        try {
+                            for (p in payloads) onDecoded(p)
+                        } finally {
+                            ingestLock.unlock()
+                        }
+                    }
+                } else {
+                    val payload = decode(frame, bboxOut)
+                    if (payload != null) {
+                        decodedFrames.incrementAndGet()
+                        // Serialize native ingest: one thread in onDecoded at a time.
+                        // The lock (not a single-thread executor) also applies natural
+                        // backpressure so a fast batch decode can't grow an unbounded
+                        // pending-ingest queue.
+                        ingestLock.lock()
+                        try {
+                            onDecoded(payload)
+                        } finally {
+                            ingestLock.unlock()
+                        }
                     }
                 }
             } catch (e: Throwable) {
@@ -138,27 +165,82 @@ class QrDecodePool(
     }
 
     /**
-     * Decode one frame. Tries a center-ROI crop first (the QR is centered and
-     * fills a fraction of the frame, so cropping cuts ZXing work and raises the
-     * sustainable decode rate). If the ROI misses, a full-frame decode is run
-     * only occasionally (1 in [FULL_DECODE_EVERY] consecutive misses) so an
-     * off-center QR is still caught without paying for a full decode on every
-     * empty frame.
+     * Multi-QR decode: full-frame `ReadBarcodes`, returns every valid code's
+     * payload. ROI tracking does not apply in multi mode (codes are spread
+     * across the frame, not centered), so we scan the whole frame each tick.
      */
-    private fun decode(frame: YFrame, crop: CropBuf): ByteArray? {
+    private fun decodeMulti(frame: YFrame): List<ByteArray> {
+        return try {
+            ZxingDecoder.parseMulti(
+                ZxingDecoder.decodeMultiY(frame.y, frame.width, frame.height, frame.rowStride)
+            )
+        } catch (e: UnsatisfiedLinkError) {
+            Log.e(TAG, "ZXing native lib not loaded", e); emptyList()
+        } catch (e: Exception) {
+            emptyList()
+        }
+    }
+
+    /**
+     * Decode one frame with adaptive ROI tracking.
+     *
+     * Three escalating tiers, cheapest first:
+     *  1. **Tracked tight ROI**: if we recently locked the QR ([lastQrBbox]),
+     *     crop a small window (the bbox expanded by [TRACK_MARGIN]) and decode
+     *     it. On a screen QR the code barely moves frame-to-frame, so this
+     *     window is far smaller than the 70% center region — much less ZXing
+     *     work, raising the sustainable decode rate.
+     *  2. **Center ROI**: the fixed 70% center region (the QR is nominally
+     *     centered). Used on a tracked miss, or before the first lock.
+     *  3. **Full frame**: only 1 in [FULL_DECODE_EVERY] consecutive ROI misses,
+     *     to catch an off-center QR without paying for a full decode every frame.
+     *
+     * Both ROI tiers use the zero-copy native crop and report the QR's bbox, so
+     * any successful decode refreshes [lastQrBbox] for the next frame's tier-1.
+     */
+    private fun decode(frame: YFrame, bboxOut: IntArray): ByteArray? {
         val w = frame.width
         val h = frame.height
         val rs = frame.rowStride
+
+        // Tier 1: tracked tight ROI around the last known position.
+        val tracked = lastQrBbox
+        if (tracked != null) {
+            val t = tightRoi(tracked, w, h, rs, frame.len)
+            if (t != null) {
+                val (tx0, ty0, tside) = t
+                val p = try {
+                    ZxingDecoder.decodeYRegionTracked(frame.y, w, h, rs, tx0, ty0, tside, bboxOut)
+                } catch (e: UnsatisfiedLinkError) {
+                    Log.e(TAG, "ZXing native lib not loaded", e); return null
+                } catch (e: Exception) {
+                    null
+                }
+                if (p != null) {
+                    roiMiss.set(0)
+                    lastQrBbox = bboxOut.copyOf()
+                    return p
+                }
+                // Tracked window missed → the QR moved or blurred; drop the lock
+                // and fall through to the center-ROI tier (do NOT keep hunting
+                // in a stale window).
+                lastQrBbox = null
+            }
+        }
+
+        // Tier 2: fixed center ROI.
         val side = (minOf(w, h) * ROI_FRACTION).toInt()
+        val x0 = (w - side) / 2
+        val y0 = (h - side) / 2
+        // Defensive bounds: native also validates, but guarding here keeps a bad
+        // geometry from crossing the JNI boundary.
         val roiUsable = side >= MIN_ROI &&
-            side < w && side < h &&
-            // Defensive bounds: the last ROI row must stay within the buffer.
-            (((h - side) / 2 + side) * rs) <= frame.len
+            side < w && side < h && x0 >= 0 && y0 >= 0 &&
+            // The last ROI row's tail must stay within the buffer.
+            (y0 + side - 1) * rs + (x0 + side) <= frame.len
         if (roiUsable) {
-            val out = crop.ensure(side * side)
-            cropCenter(frame.y, w, h, rs, side, out)
             val p = try {
-                ZxingDecoder.decodeY(out, side, side, side)
+                ZxingDecoder.decodeYRegionTracked(frame.y, w, h, rs, x0, y0, side, bboxOut)
             } catch (e: UnsatisfiedLinkError) {
                 Log.e(TAG, "ZXing native lib not loaded", e); return null
             } catch (e: Exception) {
@@ -166,11 +248,14 @@ class QrDecodePool(
             }
             if (p != null) {
                 roiMiss.set(0)
+                lastQrBbox = bboxOut.copyOf()
                 return p
             }
             // ROI missed; only fall through to a full-frame decode periodically.
             if (roiMiss.incrementAndGet() % FULL_DECODE_EVERY != 0L) return null
         }
+
+        // Tier 3: occasional full-frame decode.
         return try {
             ZxingDecoder.decodeY(frame.y, w, h, rs)
         } catch (e: UnsatisfiedLinkError) {
@@ -180,16 +265,36 @@ class QrDecodePool(
         }
     }
 
-    /** Copy a centered `side×side` square out of a (possibly padded) Y plane. */
-    private fun cropCenter(y: ByteArray, w: Int, h: Int, rowStride: Int, side: Int, out: ByteArray) {
-        val x0 = (w - side) / 2
-        val y0 = (h - side) / 2
-        var di = 0
-        for (row in 0 until side) {
-            val si = (y0 + row) * rowStride + x0
-            System.arraycopy(y, si, out, di, side)
-            di += side
-        }
+    /**
+     * Compute a tight square ROI around [bbox] expanded by [TRACK_MARGIN], or
+     * null if it can't be made valid (e.g. stale/oversized bbox). Returns
+     * `(x0, y0, side)` clamped to the frame and within the buffer.
+     */
+    private fun tightRoi(
+        bbox: IntArray, w: Int, h: Int, rs: Int, len: Int
+    ): Triple<Int, Int, Int>? {
+        val minX = bbox[0]; val minY = bbox[1]; val maxX = bbox[2]; val maxY = bbox[3]
+        if (maxX <= minX || maxY <= minY) return null
+        val qw = (maxX - minX).toFloat()
+        val qh = (maxY - minY).toFloat()
+        // Expand by TRACK_MARGIN on every side so the window tolerates motion.
+        val margin = (maxOf(qw, qh) * TRACK_MARGIN).toInt()
+        val ex0 = (minX - margin).coerceAtLeast(0)
+        val ey0 = (minY - margin).coerceAtLeast(0)
+        val ex1 = (maxX + margin).coerceAtMost(w)
+        val ey1 = (maxY + margin).coerceAtMost(h)
+        val side = minOf(ex1 - ex0, ey1 - ey0)
+        if (side < MIN_ROI) return null
+        // Make it a square centered on the QR's bbox (ZXing's cropped takes a
+        // square region in this codebase).
+        val cx = (ex0 + ex1) / 2
+        val cy = (ey0 + ey1) / 2
+        val half = side / 2
+        val x0 = (cx - half).coerceIn(0, (w - side))
+        val y0 = (cy - half).coerceIn(0, (h - side))
+        // Bounds check mirroring the center-ROI path.
+        if ((y0 + side - 1) * rs + (x0 + side) > len) return null
+        return Triple(x0, y0, side)
     }
 
     private fun obtainBuffer(len: Int): ByteArray {
@@ -244,6 +349,12 @@ class QrDecodePool(
         private const val MIN_ROI = 240
         /** When the ROI keeps missing, do a full-frame decode this often. */
         private const val FULL_DECODE_EVERY = 8L
+        /**
+         * How much the tracked ROI expands beyond the last QR bbox, as a
+         * fraction of the QR size. 0.35 tolerates hand/phone motion between
+         * frames while keeping the window much smaller than the 70% center ROI.
+         */
+        private const val TRACK_MARGIN = 0.35f
         /** Cap the recycled-buffer free-list so it can't grow unbounded. */
         private const val MAX_FREE = 12
     }

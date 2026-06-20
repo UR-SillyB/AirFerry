@@ -36,6 +36,7 @@ class SettingsActivity : ComponentActivity() {
         val context = LocalContext.current
         val highSpeedSupported = remember { HighSpeedCaptureController.isSupported(context) }
         var highSpeedMode by remember { mutableStateOf(prefs.getBoolean("highspeed_mode", false)) }
+        var multiQrMode by remember { mutableStateOf(prefs.getBoolean("multi_qr_mode", false)) }
 
         Column(modifier = Modifier.fillMaxSize().background(BgDark)) {
             Text(
@@ -97,6 +98,37 @@ class SettingsActivity : ComponentActivity() {
                                 highSpeedMode = it
                                 prefs.edit().putBoolean("highspeed_mode", it).apply()
                             }
+                        )
+                    }
+                }
+            }
+
+            Card(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+                shape = RoundedCornerShape(12.dp),
+                colors = CardDefaults.cardColors(containerColor = CardBg)
+            ) {
+                Column(modifier = Modifier.padding(20.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("实验性：多二维码同屏", color = TextPrimary, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                            Text(
+                                "接收端每帧解码屏幕上的全部二维码（而非仅一个），配合发送端「同屏二维码数」可成倍提升吞吐。每个码更小更难扫，需近距离对准。默认关闭。",
+                                color = TextSecondary, fontSize = 12.sp
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Switch(
+                            checked = multiQrMode,
+                            onCheckedChange = {
+                                multiQrMode = it
+                                prefs.edit().putBoolean("multi_qr_mode", it).apply()
+                            },
+                            colors = SwitchDefaults.colors(checkedThumbColor = Accent, checkedTrackColor = Accent)
                         )
                     }
                 }

@@ -1,6 +1,6 @@
 {
   "name": "@easytransfer/browser-extension",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "EasyTransfer sender — Chrome/Edge/Firefox extension that streams QR codes.",
   "type": "module",
   "license": "MIT",
@@ -32,7 +32,7 @@
   "manifest": {
     "name": "易传 - 离线文件传输",
     "description": "通过屏幕二维码视频流，完全离线传输文件到手机。无需网络、蓝牙、USB。",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "permissions": [
       "storage"
     ],

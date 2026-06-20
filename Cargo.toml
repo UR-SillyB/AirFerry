@@ -7,7 +7,7 @@ members = [
 ]
 
 [workspace.package]
-version = "1.0.0"
+version = "1.1.0"
 edition = "2021"
 rust-version = "1.75"
 license = "MIT"
@@ -34,4 +34,23 @@ panic = "abort"
 strip = true
 
 [profile.release.package.transfer-engine]
+opt-level = 3
+
+# The optical hot path is not just transfer-engine: every frame touches
+# raptorq-core (encode/decode), qr-protocol (CRC + QR render via the `qrcode`
+# and `crc32fast` crates), and the upstream `raptorq` solver. Building these at
+# opt-level="z" (the workspace default, chosen for small WASM/APK size) leaves a
+# lot of scalar throughput on the table on the per-frame path — noticeable on
+# low-end Android and in the WASM render loop. Promote the whole hot path to
+# opt-level=3; the size cost is modest and these crates are never the dominant
+# contributor to binary size anyway.
+[profile.release.package.raptorq-core]
+opt-level = 3
+[profile.release.package.qr-protocol]
+opt-level = 3
+[profile.release.package.raptorq]
+opt-level = 3
+[profile.release.package.qrcode]
+opt-level = 3
+[profile.release.package.crc32fast]
 opt-level = 3

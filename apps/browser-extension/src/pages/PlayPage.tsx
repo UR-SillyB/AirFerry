@@ -62,6 +62,7 @@ export function PlayPage({ session, config, sessionId, totalBytes }: Props) {
         fps={config.fps}
         brightness={config.brightness}
         autoOptimize={config.autoOptimize}
+        multiQr={config.multiQr}
         onStats={setStats}
         onError={(e) => setError(e.message)}
       />
