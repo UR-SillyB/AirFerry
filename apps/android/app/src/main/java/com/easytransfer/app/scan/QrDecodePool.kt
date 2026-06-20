@@ -83,6 +83,18 @@ class QrDecodePool(
         if (!running.get()) return
         val len = src.remaining()
         if (len <= 0) return
+        // Sanity-check the declared geometry against the buffer length. The full-
+        // frame decode path (below) passes (w, h, rs) to native, which indexes
+        // `(height-1)*rowStride + width`; a HAL that returns a plane shorter
+        // than that (or a stale width/height after a resolution change) would
+        // hand ZXing a truncated frame that decodes to nothing — silently
+        // wasting CPU. Reject such frames up front instead.
+        if (width <= 0 || height <= 0 || rowStride <= 0 ||
+            len < (height - 1) * rowStride + width
+        ) {
+            droppedFrames.incrementAndGet()
+            return
+        }
         capturedFrames.incrementAndGet()
         val buf = obtainBuffer(len)
         src.get(buf, 0, len)

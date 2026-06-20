@@ -111,7 +111,7 @@ class SettingsActivity : ComponentActivity() {
                     Text("关于", color = TextSecondary, fontSize = 14.sp)
                     Spacer(modifier = Modifier.height(8.dp))
                     Text("易传 EasyTransfer", color = TextPrimary, fontSize = 16.sp, fontWeight = FontWeight.Bold)
-                    Text("版本 0.1.0", color = TextSecondary, fontSize = 13.sp)
+                    Text("版本 ${appVersionName()}", color = TextSecondary, fontSize = 13.sp)
                     Spacer(modifier = Modifier.height(8.dp))
                     Text("完全离线的光学文件传输系统。通过屏幕二维码视频流传输文件，无需网络、蓝牙、USB。", color = TextSecondary, fontSize = 13.sp)
                 }
@@ -125,5 +125,17 @@ class SettingsActivity : ComponentActivity() {
                 shape = RoundedCornerShape(12.dp)
             ) { Text("返回", color = TextPrimary, fontSize = 16.sp) }
         }
+    }
+
+    /**
+     * Read the installed version name from the package manifest (the single
+     * source of truth — build.gradle.kts `versionName`). Avoids hardcoding a
+     * version string that drifts from the actual build (the previous literal
+     * "0.1.0" was wrong ever since the v1.0.0 bump).
+     */
+    private fun appVersionName(): String = try {
+        packageManager.getPackageInfo(packageName, 0).versionName ?: "?"
+    } catch (_: Exception) {
+        "?"
     }
 }

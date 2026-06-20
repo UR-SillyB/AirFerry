@@ -73,12 +73,16 @@ class ReceiverSessionManager {
         val sessionIdLo = u64be(bytes, 12)
         val sbn = u32be(bytes, 20)
         val esi = u32be(bytes, 24)
-        val totalBlocks = u32be(bytes, 28)
-        val totalSymbols = u32be(bytes, 32)
-        val symbolSize = u32be(bytes, 36)
+        // total_blocks / total_symbols are u32 on the wire but we only carry
+        // them through as advisory metadata (the authoritative layout comes
+        // from the descriptor). Hold them as Long so a near-2^32 value does not
+        // arrive as a negative Int and confuse downstream comparisons.
+        val totalBlocks = u32beLong(bytes, 28)
+        val totalSymbols = u32beLong(bytes, 32)
+        val symbolSize = u32beLong(bytes, 36)
         return FrameHeader(
             magic, version, flags, sessionIdLo, sessionIdHi,
-            sbn, esi, totalBlocks, totalSymbols, symbolSize
+            sbn, esi, totalBlocks.toInt(), totalSymbols.toInt(), symbolSize.toInt()
         )
     }
 
@@ -176,14 +180,21 @@ class ReceiverSessionManager {
     fun crc32(): Long =
         if (initialized) NativeBridge.receiverCrc32(handle) else 0L
 
+    /**
+     * True if the descriptor supplied a real CRC32 (so the receiver should
+     * verify it). Use this — NOT `crc32() == 0L` — to decide whether to
+     * verify: CRC32 can legitimately be 0.
+     */
+    fun crc32Known(): Boolean =
+        if (initialized) NativeBridge.receiverCrc32Known(handle) == 1 else false
+
     /** Recover the assembled file bytes, or null if not complete. */
     fun assemble(): ByteArray? {
         if (!initialized) return null
-        val len = NativeBridge.receiverAssembledLength(handle)
-        if (len <= 0) return null
-        val out = ByteArray(len)
-        val n = NativeBridge.receiverAssemble(handle, out)
-        return if (n > 0) out else null
+        val bytes = NativeBridge.receiverAssembleBytes(handle) ?: return null
+        // NativeBridge returns an empty array (not null) for the "not complete"
+        // sentinel, so treat an empty result as "nothing yet".
+        return bytes.takeIf { it.isNotEmpty() }
     }
 
     fun sessionIdHex(): String {
@@ -234,6 +245,10 @@ class ReceiverSessionManager {
             ((b[o].toInt() and 0xFF) shl 8) or (b[o + 1].toInt() and 0xFF)
         private fun u32be(b: ByteArray, o: Int): Int =
             (u16be(b, o) shl 16) or u16be(b, o + 2)
+        /** Read a big-endian u32 as an unsigned Long (0..=0xFFFFFFFF), so a value
+         *  near 2^32 is not reinterpreted as a negative Int. */
+        private fun u32beLong(b: ByteArray, o: Int): Long =
+            u32be(b, o).toLong() and 0xFFFFFFFFL
         private fun u64be(b: ByteArray, o: Int): Long {
             val hi = u32be(b, o).toLong() and 0xFFFFFFFFL
             val lo = u32be(b, o + 4).toLong() and 0xFFFFFFFFL

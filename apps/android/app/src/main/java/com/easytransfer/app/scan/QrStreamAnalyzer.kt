@@ -21,9 +21,15 @@ class QrStreamAnalyzer(
         try {
             // Plane 0 is Y / luminance. Copy it into the pool (which reads the
             // buffer now) before we close the ImageProxy below.
-            val plane = image.planes[0]
+            val planes = image.planes
+            if (planes.isEmpty()) return
+            val plane = planes[0]
             pool.submit(plane.buffer, image.width, image.height, plane.rowStride)
-        } catch (e: Throwable) {
+        } catch (e: Exception) {
+            // Narrowed from Throwable: an OutOfMemoryError from a large frame
+            // allocation should not be swallowed here (it leaves the JVM in a
+            // degraded state and continuing to accept frames worsens it). Only
+            // ordinary per-frame failures are non-fatal.
             Log.w(TAG, "frame submit failed", e)
         } finally {
             // Always close so CameraX can deliver the next frame.

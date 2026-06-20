@@ -29,8 +29,13 @@ object NativeBridge {
      */
     external fun receiverIngest(handle: Long, frameBytes: ByteArray): ByteArray?
     external fun receiverIsComplete(handle: Long): Int
-    external fun receiverAssembledLength(handle: Long): Int
-    external fun receiverAssemble(handle: Long, outBuf: ByteArray): Int
+    /**
+     * Recover the assembled file as a freshly-allocated `byte[]`, or an empty
+     * array / null if not complete. Single atomic call (replaces the old
+     * length+fill pair that truncated > 2 GB files via a `jint` length and had a
+     * length/fill race).
+     */
+    external fun receiverAssembleBytes(handle: Long): ByteArray?
     external fun receiverDestroy(handle: Long)
 
     // ---- File metadata (populated from descriptor frames) ----
@@ -48,4 +53,13 @@ object NativeBridge {
      * signed and would flip high-bit CRC values negative).
      */
     external fun receiverCrc32(handle: Long): Long
+
+    /**
+     * 1 if the descriptor supplied a real CRC32 the receiver should verify,
+     * 0 if the CRC is unknown (v1 descriptor / not yet received). Use this
+     * instead of `receiverCrc32() == 0L` to decide whether to verify: CRC32
+     * can legitimately be 0, and the old `== 0L` sentinel mislabelled such
+     * files as "unverified".
+     */
+    external fun receiverCrc32Known(handle: Long): Int
 }

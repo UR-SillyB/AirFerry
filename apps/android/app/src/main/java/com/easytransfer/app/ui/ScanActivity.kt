@@ -61,6 +61,10 @@ class ScanActivity : ComponentActivity() {
 
     private var session = ReceiverSessionManager()
     private val cameraExecutor = Executors.newSingleThreadExecutor()
+    /** Dedicated single-thread executor for the post-recovery heavy work
+     *  (JNI assemble, CRC, disk writes, bundle unpacking) so it never blocks
+     *  the main thread. The work runs under the decode pool's ingest lock. */
+    private val ioExecutor = Executors.newSingleThreadExecutor()
     private var cameraStarted = false
 
     /** Parallel QR decode pool (capture → queue → N workers → serialized ingest). */
@@ -535,16 +539,29 @@ class ScanActivity : ComponentActivity() {
     /** Main-thread only: apply the precomputed snapshot to Compose state. */
     private fun applySnapshot(s: FrameSnapshot, handleCompletion: Boolean) {
         val progress = s.progress
+        // Progress bar tracks *received (de-duplicated) symbols*, not decoded
+        // symbols. RaptorQ decodes a whole source block at once when it has
+        // collected enough independent symbols, so a "decoded fraction" bar sits
+        // flat near 0% for a long time and then jumps in steps — it reads as
+        // "stuck". The received-symbol count, by contrast, increments by one
+        // for every new symbol the receiver accepts, so the bar climbs ~linearly
+        // and matches what the user sees on screen. Fountain repair symbols can
+        // push receivedSymbols above totalSymbols K, so clamp to 100.
         val pct = when {
-            // Normal mode: metadata confirmed, use decoded progress
+            progress.complete -> 100
             progress.metaConfirmed || progress.totalSymbols > 0 -> {
-                (progress.decodedFraction * 100).toInt().coerceIn(0, 100)
+                if (progress.totalSymbols > 0) {
+                    (progress.receivedSymbols * 100 / progress.totalSymbols).coerceIn(0, 100)
+                } else {
+                    0
+                }
             }
-            // Cache mode: estimate approximate progress based on first frame total_symbols
+            // Cache mode: no confirmed total yet. Estimate from the first frame's
+            // total_symbols (advisory only) and cap at 15% — the descriptor may
+            // later reveal a larger total, so don't over-promise early.
             progress.receivedSymbols > 0 -> {
                 val estimated = session.getEstimatedTotalSymbols()
                 if (estimated > 0) {
-                    // Cap at 15% to avoid over-optimism (descriptor may reveal larger total)
                     (progress.receivedSymbols * 100 / estimated).coerceIn(0, 15)
                 } else {
                     0
@@ -597,37 +614,59 @@ class ScanActivity : ComponentActivity() {
 
         if (handleCompletion && progress.complete && !completedHandled) {
             completedHandled = true
-            val fileBytes = session.assemble()
-            if (fileBytes != null) {
-                // Truncate to original file size (strip symbol padding).
-                val originalSize = session.fileSize()
-                val truncLen = if (originalSize > 0 && originalSize <= fileBytes.size) originalSize.toInt() else fileBytes.size
-                val truncBytes = fileBytes.copyOfRange(0, truncLen)
-                handleRecoveredBytes(truncBytes, s.fileName, originalSize)
+            // Move the heavy recovery work (JNI assemble, CRC over the full
+            // payload, disk writes, bundle unpacking) off the main thread — it
+            // previously ran here synchronously and ANR'd on multi-MB transfers.
+            // ingestStopped (set on the completing worker) already guarantees no
+            // further ingest touches the native session, and we wrap the JNI
+            // access in runExclusive so it cannot race a straggler or destroy().
+            val snapshotFileName = s.fileName
+            ioExecutor.execute {
+                // Run the recovery under the pool's ingest lock (it touches the
+                // native session via assemble/crc32/fileSize), then post the
+                // resulting Intent to the main thread. runExclusive returns Unit,
+                // so capture the Intent in a holder.
+                var intent: Intent? = null
+                val work = {
+                    intent = recoverAndStage(snapshotFileName)
+                }
+                decodePool?.runExclusive(work) ?: work()
+                intent?.let { runOnUiThread { startActivity(it) } }
             }
         }
     }
 
     /**
-     * Route the recovered bytes to either the single-file detail screen or, if
-     * the payload is a multi-file bundle, the bundle screen. The bundle is
-     * unpacked into per-file temp files so each can be saved / shared
-     * individually. Both paths run on the main thread (caller guarantees it).
+     * Assemble the recovered bytes, verify CRC, and stage the file(s) to disk.
+     * Returns the [Intent] to launch the detail/bundle screen, or null if there
+     * was nothing to recover. Runs on a background thread under the decode pool's
+     * ingest lock (so it can't race an in-flight ingest or a destroy()).
      */
-    private fun handleRecoveredBytes(bytes: ByteArray, displayName: String, originalSize: Long) {
+    private fun recoverAndStage(displayName: String): Intent? {
+        val fileBytes = session.assemble() ?: return null
+        val originalSize = session.fileSize()
+        // Truncate RaptorQ zero-padding back to the original size. originalSize
+        // is a Long (up to 2^63); clamp to the bytes we actually recovered and
+        // never let a bogus/large value overflow Int (the old `originalSize.toInt()`
+        // would wrap for >2GB and throw IndexOutOfBounds in copyOfRange).
+        val truncLen = when {
+            originalSize > 0 && originalSize <= fileBytes.size -> originalSize.toInt()
+            else -> fileBytes.size
+        }
+        val truncBytes = fileBytes.copyOfRange(0, truncLen)
+
         val expectedCrc = session.crc32()
-        val receivedCrc = crc32OfBytes(bytes)
+        val crcKnown = session.crc32Known()
+        val receivedCrc = crc32OfBytes(truncBytes)
 
         // Multi-file bundle → unpack and route to the bundle detail screen.
-        if (BundleParser.isBundle(bytes)) {
-            val bundle = BundleParser.parse(bytes)
+        if (BundleParser.isBundle(truncBytes)) {
+            val bundle = BundleParser.parse(truncBytes)
             if (bundle != null && bundle.files.isNotEmpty()) {
                 val paths = ArrayList<String>()
                 val names = ArrayList<String>()
                 val sizes = ArrayList<String>()
                 for (f in bundle.files) {
-                    // Preserve the original name (Chinese + spaces intact) in
-                    // the temp file — no timestamp prefix, no .bin.
                     val safeName = com.easytransfer.app.scan.FileNameUtil.sanitize(f.name)
                     val tmp = java.io.File(cacheDir, "recovered_$safeName")
                     tmp.writeBytes(f.data)
@@ -635,18 +674,17 @@ class ScanActivity : ComponentActivity() {
                     names.add(f.name)
                     sizes.add(f.data.size.toString())
                 }
-                // Copy all files to the received dir for the file list.
                 copyBundleToReceivedDir(paths, names, sizes)
-                val intent = Intent(this, ReceiveBundleActivity::class.java).apply {
+                return Intent(this, ReceiveBundleActivity::class.java).apply {
                     putStringArrayListExtra("FILE_PATHS", paths)
                     putStringArrayListExtra("FILE_NAMES", names)
                     putStringArrayListExtra("FILE_SIZES", sizes)
                     putExtra("CRC32", expectedCrc)
                     putExtra("CRC32_RECEIVED", receivedCrc)
-                    putExtra("CRC32_UNKNOWN", expectedCrc == 0L)
+                    // Use the authoritative known-flag, NOT `expectedCrc == 0L`:
+                    // CRC32 can legitimately be 0.
+                    putExtra("CRC32_UNKNOWN", !crcKnown)
                 }
-                startActivity(intent)
-                return
             }
             // If parsing failed, fall through and treat as a single file so the
             // user still gets something rather than a dead end.
@@ -657,16 +695,15 @@ class ScanActivity : ComponentActivity() {
         val finalName = if (displayName.isNotEmpty()) displayName else "received_file"
         val safeName = com.easytransfer.app.scan.FileNameUtil.sanitize(finalName)
         val tmp = java.io.File(cacheDir, "recovered_$safeName")
-        tmp.writeBytes(bytes)
-        val intent = Intent(this, ReceiveDetailActivity::class.java).apply {
+        tmp.writeBytes(truncBytes)
+        return Intent(this, ReceiveDetailActivity::class.java).apply {
             putExtra("FILE_PATH", tmp.absolutePath)
-            putExtra("FILE_SIZE", if (originalSize > 0) originalSize else bytes.size.toLong())
+            putExtra("FILE_SIZE", if (originalSize > 0) originalSize else truncBytes.size.toLong())
             putExtra("FILE_NAME", finalName)
             putExtra("CRC32", expectedCrc)
             putExtra("CRC32_RECEIVED", receivedCrc)
-            putExtra("CRC32_UNKNOWN", expectedCrc == 0L)
+            putExtra("CRC32_UNKNOWN", !crcKnown)
         }
-        startActivity(intent)
     }
 
     /** Persist every unpacked bundle file to the received dir + write sidecars. */
@@ -736,6 +773,17 @@ class ScanActivity : ComponentActivity() {
         // Stop the high-speed controller (if any) first so it stops feeding frames.
         highSpeedController?.release()
         highSpeedController = null
+        // Drain the IO executor BEFORE tearing down the decode pool: the pending
+        // recovery task holds the pool's ingest lock and touches the native
+        // session, so freeing the handle first would race it. Shutdown + await
+        // lets an in-flight stage finish (bounded; assemble is the slow part and
+        // already running under ingestStopped, which halted further ingest).
+        ioExecutor.shutdown()
+        try {
+            ioExecutor.awaitTermination(30, java.util.concurrent.TimeUnit.SECONDS)
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+        }
         // Stop workers, then destroy the native receiver UNDER the ingest lock so a
         // straggler that outran shutdown()'s join timeout can't still be mid-ingest
         // (&mut) when destroy() frees the handle (use-after-free).

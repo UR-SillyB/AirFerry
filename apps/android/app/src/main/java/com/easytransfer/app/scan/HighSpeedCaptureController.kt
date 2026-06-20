@@ -54,18 +54,24 @@ class HighSpeedCaptureController(
     private val onError: (String) -> Unit
 ) {
     private val cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
-    private var cameraDevice: CameraDevice? = null
-    private var session: CameraCaptureSession? = null
-    private var encoder: MediaCodec? = null
-    private var encoderSurface: Surface? = null
-    private var muxer: MediaMuxer? = null
-    private var muxerTrack = -1
-    private var muxerStarted = false
+    // These fields are touched from up to three threads — the camera `handler`
+    // thread (encoder callbacks), the dedicated finish thread (stopAndDecode),
+    // and whatever thread calls release() (ScanActivity main / fallback). Marking
+    // them @Volatile guarantees the writes one thread makes are visible to the
+    // others (a plain `var` can be torn / cached per-thread, so release() nilling
+    // `encoder` while a callback reads it is a real data race on ARM).
+    @Volatile private var cameraDevice: CameraDevice? = null
+    @Volatile private var session: CameraCaptureSession? = null
+    @Volatile private var encoder: MediaCodec? = null
+    @Volatile private var encoderSurface: Surface? = null
+    @Volatile private var muxer: MediaMuxer? = null
+    @Volatile private var muxerTrack = -1
+    @Volatile private var muxerStarted = false
     private val recording = AtomicBoolean(false)
     private val decoding = AtomicBoolean(false)
 
     private var thread: HandlerThread? = null
-    private var handler: Handler? = null
+    @Volatile private var handler: Handler? = null
     /** Separate thread for ImageReader callbacks during decode (must NOT be the
      *  same thread that runs the synchronous decode loop, or the loop starves the
      *  callback and the decoder's output surface saturates → stall). */
@@ -80,6 +86,13 @@ class HighSpeedCaptureController(
 
     /** Start the camera, build a high-speed session, and begin recording. */
     fun startRecording() {
+        // Re-entry guard: a fast start→stop→start sequence used to overwrite
+        // thread/handler/encoder while the previous finish thread was still
+        // running, racing it on the now-reassigned fields.
+        if (recording.get() || decoding.get()) {
+            onError("上一次录制/解码尚未结束")
+            return
+        }
         val cameraId = highSpeedCameraId()
         if (cameraId == null) {
             onError("此设备不支持高速摄像")
@@ -376,6 +389,24 @@ class HighSpeedCaptureController(
 
     fun release() {
         recording.set(false)
+        // Capture the camera `handler` thread so we can stop it BEFORE releasing
+        // the encoder/muxer it is still calling into. The old order freed the
+        // codec while a pending drainEncoderOutput / onOutputFormatChanged
+        // callback could still be mid-flight on that thread → use-after-free.
+        val camThread = thread
+        // Stop accepting new callbacks on the camera thread.
+        camThread?.quitSafely()
+        // Likewise stop the reader (decode) thread before tearing down its
+        // ImageReader, or a late onImageAvailable fires on a closed reader.
+        val rThread = readerThread
+        rThread?.quitSafely()
+        // Block briefly until both callback threads have actually exited, so the
+        // codec/muxer/surface releases below cannot race an in-flight callback.
+        // Bounded: a callback that overruns the join still hits null-checked
+        // @Volatile fields below (best-effort), rather than a freed pointer.
+        try { camThread?.join(500) } catch (_: InterruptedException) {}
+        try { rThread?.join(500) } catch (_: InterruptedException) {}
+
         try { session?.close() } catch (_: Exception) {}
         session = null
         try { cameraDevice?.close() } catch (_: Exception) {}
@@ -388,10 +419,8 @@ class HighSpeedCaptureController(
         muxer = null
         muxerStarted = false
         muxerTrack = -1
-        thread?.quitSafely()
         thread = null
         handler = null
-        readerThread?.quitSafely()
         readerThread = null
         readerHandler = null
     }
