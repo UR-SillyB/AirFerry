@@ -230,9 +230,16 @@ export function QrStream({
 
 /**
  * Draw one QR matrix into the square cell at (ox, oy) with side `cellPx`,
- * including the 4-module quiet zone and run-length dark-module batching. This
- * is the shared drawing routine used by both the single- and multi-QR paths.
+ * using a single putImageData per code instead of per-module fillRect calls.
+ * On GPU-backed Canvas2D (especially Windows D3D11) thousands of small fillRect
+ * calls per frame create a CPU-GPU sync bottleneck; ImageData writes avoid the
+ * per-call overhead by batching all pixel updates into one transfer.
+ *
+ * [imgDataCache] holds reusable ImageData objects keyed by drawSize so we
+ * never re-allocate the buffer on every frame — just re-fill the existing one.
  */
+const imgDataCache = new Map<number, ImageData>()
+
 function drawMatrix(
   ctx: CanvasRenderingContext2D,
   matrix: Uint8Array,
@@ -249,40 +256,43 @@ function drawMatrix(
   // Center the code within the cell.
   const offset = Math.floor((cellPx - drawSize) / 2)
 
-  // White quiet-zone background for this cell (the global clear already painted
-  // white, but re-painting the cell guarantees a clean gutter per code).
+  // White quiet-zone background for this cell.
   ctx.fillStyle = "#ffffff"
   ctx.fillRect(ox, oy, cellPx, cellPx)
 
-  // Draw dark modules only, run-length batched per row.
-  ctx.fillStyle = "#000000"
+  // Obtain a reusable ImageData for this drawSize.
+  let imgData = imgDataCache.get(drawSize)
+  if (!imgData || imgData.width !== drawSize) {
+    imgData = ctx.createImageData(drawSize, drawSize)
+    imgDataCache.set(drawSize, imgData)
+  }
+  // Uint32 view: one uint32 per pixel (RGBA packed as 0xAABBGGRR on LE).
+  const pixels = new Uint32Array(imgData.data.buffer)
+
+  // Initialize to white (0xFFFFFFFF on little-endian = A=255,B=255,G=255,R=255).
+  pixels.fill(0xFFFFFFFF)
+
+  // Plot dark modules as blocks of pixels.
+  const black = 0xFF000000
   for (let y = 0; y < side; y++) {
     const rowBase = y * side
-    const py = oy + offset + (y + margin) * modulePx
-    let runStart = -1
+    const baseY = (y + margin) * modulePx
     for (let x = 0; x < side; x++) {
-      const dark = matrix[rowBase + x] !== 0
-      if (dark) {
-        if (runStart < 0) runStart = x
-      } else if (runStart >= 0) {
-        ctx.fillRect(
-          ox + offset + (runStart + margin) * modulePx,
-          py,
-          (x - runStart) * modulePx,
-          modulePx
-        )
-        runStart = -1
+      if (matrix[rowBase + x] !== 0) {
+        const baseX = (x + margin) * modulePx
+        for (let dy = 0; dy < modulePx; dy++) {
+          const row = (baseY + dy) * drawSize
+          const end = baseX + modulePx
+          for (let dx = baseX; dx < end; dx++) {
+            pixels[row + dx] = black
+          }
+        }
       }
     }
-    if (runStart >= 0) {
-      ctx.fillRect(
-        ox + offset + (runStart + margin) * modulePx,
-        py,
-        (side - runStart) * modulePx,
-        modulePx
-      )
-    }
   }
+
+  // Single Canvas API call instead of ~500 fillRect per code.
+  ctx.putImageData(imgData, ox + offset, oy + offset)
 }
 
 /**
