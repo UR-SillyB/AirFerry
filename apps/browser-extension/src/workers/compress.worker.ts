@@ -77,12 +77,24 @@ export type WorkerMessage =
   | CompressResult
   | { phase: "error"; message: string }
 
+/** Queue of pending file compression requests, processed after WASM init. */
+let pendingRequest: { files: File[] } | null = null
+/** Whether the WASM module has been initialized. */
+let wasmReady = false
+
 self.onmessage = async (e: MessageEvent<{ files: File[] } | { type: "wasm-init"; zstd: ArrayBuffer }>) => {
   const data = e.data
 
   // Handle WASM pre-load message (sent from main thread before compression).
   if ("type" in data && data.type === "wasm-init") {
     initZstdFromBytes((data as { type: "wasm-init"; zstd: ArrayBuffer }).zstd)
+    wasmReady = true
+    // Process any pending request that arrived before WASM was ready
+    if (pendingRequest) {
+      const req = pendingRequest
+      pendingRequest = null
+      processFiles(req.files)
+    }
     return
   }
 
@@ -91,6 +103,17 @@ self.onmessage = async (e: MessageEvent<{ files: File[] } | { type: "wasm-init";
     post({ phase: "error", message: "no files" })
     return
   }
+
+  // If WASM hasn't been initialized yet, queue this request
+  if (!wasmReady) {
+    pendingRequest = { files }
+    return
+  }
+
+  processFiles(files)
+}
+
+async function processFiles(files: File[]) {
 
   try {
     // --- Stage 1: read files ---
