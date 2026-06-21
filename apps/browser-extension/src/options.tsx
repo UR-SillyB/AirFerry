@@ -292,6 +292,7 @@ export default function App() {
           during the slow xz pass. */}
       <CompressProgress
         phase={state.compressPhase}
+        isBundle={state.files.length > 1}
         displayName={state.files.length > 0 ? (state.files.length > 1 ? `${state.files.length}个文件` : state.files[0].name) : undefined}
         originalSize={state.files.reduce((sum, f) => sum + f.size, 0) || undefined}
       />

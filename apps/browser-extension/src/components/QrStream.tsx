@@ -28,6 +28,8 @@ interface Props {
   autoOptimize: boolean
   /** Number of QR codes per screen frame (1 = single, 2/4 = multi-QR mode). */
   multiQr: number
+  /** Sub-pixel dithering to break moiré patterns. */
+  ditherJitter: boolean
   onStats?: (s: QrStreamStats) => void
   onError?: (e: Error) => void
 }
@@ -38,6 +40,7 @@ export function QrStream({
   brightness,
   autoOptimize,
   multiQr,
+  ditherJitter,
   onStats,
   onError
 }: Props) {
@@ -130,7 +133,12 @@ export function QrStream({
       const r = Math.floor(i / cols)
       const ox = c * (cell + sep)
       const oy = r * (cell + sep)
-      drawMatrix(ctx, matrices[i].modules, matrices[i].side, ox, oy, cell)
+      // Sub-pixel dithering: shift each code by ±1px per frame to break
+      // moiré patterns.  ±1px is kept as a whole integer so Canvas2D stays
+      // on the GPU-accelerated integer path (sub-pixel fillRect is ~5× slower).
+      const djx = ditherJitter ? Math.round((Math.random() - 0.5) * 2) : 0
+      const djy = ditherJitter ? Math.round((Math.random() - 0.5) * 2) : 0
+      drawMatrix(ctx, matrices[i].modules, matrices[i].side, ox + djx, oy + djy, cell)
     }
 
     // Stats throttle: ~4 Hz.

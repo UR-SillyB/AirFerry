@@ -31,12 +31,9 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -56,7 +53,6 @@ import java.util.concurrent.atomic.AtomicBoolean
 private val BgDark = Color(0xFF0F172A)
 private val CardBg = Color(0xCC1E293B)
 private val Accent = Color(0xFF3B82F6)
-private val AccentLight = Color(0xFF60A5FA)
 private val TextPrimary = Color(0xFFF1F5F9)
 private val TextSecondary = Color(0xFF94A3B8)
 private val Success = Color(0xFF22C55E)
@@ -105,45 +101,39 @@ class ScanActivity : ComponentActivity() {
         val fileSize: Long = 0,
         val complete: Boolean = false,
         val jniReady: Boolean = false,
+        /**         Snapshot of per-code activity timestamps for the code-status row. */
+        val codeActivitySnapshot: Map<Int, Long> = emptyMap(),
+        /** How many QR codes the decoder is tracking (0/1/4). */
+        val multiCodeCount: Int = 0,
+        /** Elapsed transfer time in ms (0 = not started yet). */
+        val transferElapsedMs: Long = 0,
+        /** RaptorQ symbol size in bytes (from the sender's config). */
+        val symbolSize: Int = 0,
     )
 
-    // ===== Multi-QR position feedback overlay =====
+    // ===== Per-code scan status (shown in the info card) =====
     //
-    // When a code at a given screen position is *accepted* by the receiver as a
-    // new RaptorQ symbol (dedup passed), a short "rising spark" animation fires
-    // at that position so the user can tell which codes are actually delivering
-    // data and adjust the phone's pose. Codes that are merely *seen* (decoded)
-    // but contributed nothing new render as a faint static outline.
-    //
-    // All bbox math runs on the worker (ingest) thread against the pool's
-    // published analysis geometry; only normalized 0..1 rects cross to the UI.
-
-    /** Normalized rect in PreviewView space, all coords ∈ 0..1. */
-    data class NormRect(val left: Float, val top: Float, val right: Float, val bottom: Float)
+    // For a multi-QR sender we show, in the bottom info card, whether each
+    // on-screen code is actively delivering symbols. A code is mapped to a fixed
+    // grid slot by [gridSlotOf] (single-code → center slot, multi-code → one of
+    // four 2×2 slots). We record the last wall-clock ms each slot ACCEPTED a new
+    // RaptorQ symbol; the UI compares that against now to label the code
+    // "receiving" (within [CODE_ACTIVE_MS]) / "paused" (seen before but stale) /
+    // "unseen" (multi-code slots that never fired). This replaces the old
+    // positional spark overlay, which was hard to land accurately.
 
     /**
-     * One accepted-symbol event for the spark animation: the code's normalized
-     * center + bottom (the spark rises out of the bottom edge) and the wall-clock
-     * ms it was born. Expired sparks (> [SPARK_LIFE_MS] old) are dropped by the
-     * overlay.
+     * Map of grid slot → last-accepted-symbol wall-clock ms. Written on the
+     * ingest worker under [codeActivityLock]; read + snapshot on the UI tick.
      */
-    data class Spark(val cx: Float, val cy: Float, val bornMs: Long)
+    private val codeActivityLock = Any()
+    private val codeActivity = HashMap<Int, Long>()
+    /** Reactive snapshot of [codeActivity] consumed by Compose. */
+    private val codeActivityState = mutableStateOf<Map<Int, Long>>(emptyMap())
 
-    /** Drives the overlay Canvas. Refreshed at the ~7 Hz UI cadence. */
-    data class OverlayState(
-        /** All currently-tracked codes (seen), as normalized rects. */
-        val frames: List<NormRect> = emptyList(),
-        /** Recently-accepted sparks (normalized), not yet expired. */
-        val sparks: List<Spark> = emptyList(),
-    )
-
-    private val overlayState = mutableStateOf(OverlayState())
-
-    /** Worker-written spark buffer (normalized). Drained + published on the UI
-     *  tick. Guarded by [sparkLock] — written under the pool's ingest lock, read
-     *  on the main thread. */
-    private val sparkLock = Any()
-    private val pendingSparks = ArrayList<Spark>()
+    private val recoveryStage = mutableStateOf<String?>(null)
+    /** Wall-clock ms when the transfer first started (totalSymbols > 0). */
+    private var transferStartMs = 0L
 
     private val requestCameraPermission =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
@@ -192,10 +182,9 @@ class ScanActivity : ComponentActivity() {
     private fun ScanScreen() {
         val state by uiState
         val highSpeed by useHighSpeedMode
+        val recovery by recoveryStage
 
         BoxWithConstraints(modifier = Modifier.fillMaxSize().background(BgDark)) {
-            val viewW = constraints.maxWidth.toFloat()
-            val viewH = constraints.maxHeight.toFloat()
 
             // Camera preview (full screen). High-speed mode uses a raw SurfaceView
             // (Camera2 high-speed sessions can't target a CameraX PreviewView);
@@ -229,13 +218,6 @@ class ScanActivity : ComponentActivity() {
                 )
             }
 
-            // Multi-QR position feedback overlay: faint outlines for codes that
-            // are merely seen, and a rising-dot animation at each code the
-            // receiver just accepted as a new symbol. Drawn on top of the preview
-            // but under the info card; the overlay reads its geometry from the
-            // same constraints so its FILL_CENTER mapping matches the PreviewView.
-            QrPositionOverlay(viewW, viewH)
-
             Column(
                 modifier = Modifier.fillMaxSize().padding(16.dp),
                 horizontalAlignment = Alignment.CenterHorizontally
@@ -259,19 +241,44 @@ class ScanActivity : ComponentActivity() {
                         colors = CardDefaults.cardColors(containerColor = CardBg)
                     ) {
                         Column(modifier = Modifier.padding(20.dp)) {
-                            InfoRow("已识别符号", "${state.receivedSymbols} / ${state.totalSymbols}")
-                            InfoRow("已解码块", "${state.decodedBlocks} / ${state.totalBlocks}")
-                            InfoRow("丢帧率", "${state.lossPct}%")
-                            InfoRow("已扫描帧", "${state.framesSeen}")
-                            InfoRow("解码速率", "${state.decodePerSec} 符号/秒")
-                            if (state.framesDropped > 0) {
-                                InfoRow("采集丢弃", "${state.framesDropped}")
-                            }
+                            // 文件标题行（大号字体，仅文件名）
                             if (state.fileName.isNotEmpty()) {
-                                InfoRow("文件名", state.fileName)
+                                Text(
+                                    state.fileName,
+                                    color = TextPrimary,
+                                    fontSize = 17.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    maxLines = 1,
+                                    modifier = Modifier.padding(bottom = 4.dp)
+                                )
                             }
-                            if (state.fileSize > 0) {
-                                InfoRow("文件大小", formatSize(state.fileSize))
+                            // 大小行（原大小~压缩后大小）
+                            val wireTotal = state.totalSymbols.toLong() * state.symbolSize.coerceAtLeast(1)
+                            val showOrig = state.fileSize > 0
+                            val showWire = wireTotal > 0 && state.symbolSize > 0
+                            if (showOrig || showWire) {
+                                val sizeStr = buildString {
+                                    if (showOrig) {
+                                        append(formatSize(state.fileSize))
+                                        if (showWire) append("~压缩后 ")
+                                    }
+                                    if (showWire) append(formatSize(wireTotal))
+                                }
+                                InfoRow("大小", sizeStr)
+                            }
+                            InfoRow("已识别符号", "${state.receivedSymbols} / ${state.totalSymbols}")
+                            InfoRow("解码速率", "${state.decodePerSec} 符号/秒")
+                            // 传输用时 + 实时速度（进度条上方）
+                            if (state.transferElapsedMs > 0) {
+                                val elapsedStr = formatDuration(state.transferElapsedMs)
+                                // 传输速度 = 线上已收符号数据量 / 用时
+                                // （符号数 × 符号大小 = 实际线上传输量，非原始文件大小）
+                                val rxSymbols = state.receivedSymbols.coerceAtLeast(0)
+                                val wireBytes = rxSymbols.toLong() * state.symbolSize.coerceAtLeast(1)
+                                val speedBytesPerSec = if (state.transferElapsedMs > 0)
+                                    (wireBytes * 1000 / state.transferElapsedMs).coerceAtLeast(0) else 0L
+                                val speedStr = if (speedBytesPerSec > 0) formatSize(speedBytesPerSec) + "/s" else ""
+                                InfoRow("用时", if (speedStr.isNotEmpty()) "$elapsedStr @ $speedStr" else elapsedStr)
                             }
                             LinearProgressIndicator(
                                 progress = { state.progressPct / 100f },
@@ -284,10 +291,13 @@ class ScanActivity : ComponentActivity() {
                     Spacer(modifier = Modifier.height(12.dp))
                 }
 
-                // Status text
+                // Status text. A live recovery stage (assemble/CRC/save) takes
+                // precedence over the "✓ 文件恢复完成" snapshot, so the user sees
+                // the post-scan pipeline advancing instead of a frozen 100%.
                 Text(
-                    text = state.statusText,
-                    color = if (state.complete) Success else TextPrimary,
+                    text = recovery ?: state.statusText,
+                    color = if (recovery != null) Accent
+                            else if (state.complete) Success else TextPrimary,
                     fontSize = 16.sp,
                     fontWeight = FontWeight.Bold,
                     textAlign = TextAlign.Center,
@@ -374,113 +384,76 @@ class ScanActivity : ComponentActivity() {
         }
     }
 
-    /**
-     * Multi-QR position feedback overlay.
-     *
-     * Draws faint outlines around every code the decoder currently tracks, and a
-     * "rising spark" (small dot that floats up and fades) at each code position
-     * that the receiver just accepted as a new RaptorQ symbol — so the user can
-     * see which codes are actively delivering data and nudge the phone's pose.
-     *
-     * Coordinate mapping: bboxes arrive normalized in *upright image* space
-     * ([0,1]²). The PreviewView uses FILL_CENTER, which scales the upright image
-     * by `scale = max(viewW/imgW, viewH/imgH)` and centers it, cropping the
-     * overflow. We replicate that exact transform so the outlines line up with
-     * the on-screen codes. The upright image aspect is derived from the pool's
-     * published analysis geometry (sensor w/h + rotation).
-     *
-     * Animation: the Canvas redraws every frame (driven by a frame-clock loop);
-     * each spark's progress = (now - born) / SPARK_LIFE_MS drives its height and
-     * alpha. This decouples smoothness from the ~7 Hz data refresh.
-     */
-    @Composable
-    private fun QrPositionOverlay(viewW: Float, viewH: Float) {
-        val state by overlayState
-        // Upright image dimensions, from the pool's analysis geometry. Used to
-        // replicate the PreviewView's FILL_CENTER scale + crop.
-        val pool = decodePool
-        val (aw, ah) = pool?.snapshotAnalysisSize() ?: (0 to 0)
-        val rot = pool?.snapshotAnalysisRotation() ?: 0
-        val upright = (rot % 180 != 0)
-        val imgW = if (upright) ah.toFloat() else aw.toFloat()
-        val imgH = if (upright) aw.toFloat() else ah.toFloat()
-
-        // Per-frame redraw trigger for the spark animation.
-        var tick by remember { mutableStateOf(0L) }
-        LaunchedEffect(Unit) {
-            while (true) {
-                tick = withFrameNanos { it }
-            }
-        }
-
-        val density = LocalDensity.current
-        Canvas(modifier = Modifier.fillMaxSize()) {
-            if (imgW <= 0f || imgH <= 0f || viewW <= 0f || viewH <= 0f) return@Canvas
-
-            // FILL_CENTER: scale to fill the view, then center (crop overflow).
-            val scale = maxOf(viewW / imgW, viewH / imgH)
-            val drawnW = imgW * scale
-            val drawnH = imgH * scale
-            val offsetX = (viewW - drawnW) * 0.5f
-            val offsetY = (viewH - drawnH) * 0.5f
-
-            // --- Faint outlines for every tracked code ---
-            val outlineColor = AccentLight.copy(alpha = 0.35f)
-            val strokePx = with(density) { 2.dp.toPx() }
-            val cornerPx = with(density) { 8.dp.toPx() }
-            for (f in state.frames) {
-                val l = offsetX + f.left * drawnW
-                val t = offsetY + f.top * drawnH
-                val r = offsetX + f.right * drawnW
-                val b = offsetY + f.bottom * drawnH
-                drawRoundRect(
-                    color = outlineColor,
-                    topLeft = Offset(l, t),
-                    size = androidx.compose.ui.geometry.Size(r - l, b - t),
-                    cornerRadius = androidx.compose.ui.geometry.CornerRadius(cornerPx, cornerPx),
-                    style = Stroke(width = strokePx)
-                )
-            }
-
-            // --- Rising sparks for freshly-accepted symbols ---
-            val now = System.currentTimeMillis()
-            val dotPx = with(density) { 6.dp.toPx() }
-            val risePx = with(density) { 56.dp.toPx() }
-            for (s in state.sparks) {
-                val age = (now - s.bornMs).toFloat()
-                if (age < 0f || age >= SPARK_LIFE_MS) continue
-                val p = age / SPARK_LIFE_MS          // 0..1
-                val alpha = (1f - p) * 0.9f           // fade out
-                // Base point in upright-normalized space, then FILL_CENTER map.
-                val baseX = offsetX + s.cx * drawnW
-                val baseY = offsetY + s.cy * drawnH
-                // Emit a small cluster of 3 dots at staggered ages for a richer feel.
-                for (k in 0..2) {
-                    val kp = (p + k * 0.12f)
-                    if (kp >= 1f) continue
-                    val ke = 1f - (1f - kp) * (1f - kp)
-                    val kalpha = ((1f - kp) * 0.8f).coerceIn(0f, 1f) * alpha
-                    val cx = baseX
-                    val cy = baseY - ke * risePx
-                    drawCircle(
-                        color = Success.copy(alpha = kalpha),
-                        radius = dotPx * (1f - kp * 0.4f),
-                        center = Offset(cx, cy)
-                    )
-                }
-            }
-        }
-    }
+    // QrPositionOverlay (spark overlay) 已移除。
+    // 改为在信息卡片中以文字标出每个码的扫描状态（活跃/暂停/未扫描）。
 
     @Composable
     private fun InfoRow(label: String, value: String) {
         Row(
-            modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
-            horizontalArrangement = Arrangement.SpaceBetween
+            modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp)
         ) {
             Text(label, color = TextSecondary, fontSize = 13.sp)
-            Text(value, color = TextPrimary, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+            Text(
+                value, color = TextPrimary, fontSize = 13.sp,
+                fontWeight = FontWeight.Medium,
+                maxLines = 1,
+                softWrap = false,
+                textAlign = TextAlign.End,
+                modifier = Modifier.weight(1f)
+            )
         }
+    }
+
+    /** How long (ms) since the last decoded symbol before a code is considered "paused".
+     *  5s gives a very stable display even on intermittent multi-code decode rates. */
+    private val CODE_ACTIVE_MS = 5000L
+
+    /**
+     * Build a compact per-code status string for the info card.
+     *
+     * Each grid slot's last-activity timestamp is compared against [CODE_ACTIVE_MS]
+     * to determine: "●" (active, within threshold), "○" (paused, seen but stale),
+     * or "·" (unseen, never received a symbol).
+     *
+     * [multiCount] comes from the decode pool's tracker. ≤ 1 = single-code mode;
+     * ≥ 2 = multi-code mode.  An important safety net: if the pool occasionally
+     * reports count=1 while slot 0–3 have already received symbols, the function
+     * forces multi-code mode — so the display never flips back to "单码" mid-transfer.
+     */
+    private fun codeStatusString(activity: Map<Int, Long>, multiCount: Int): String {
+        if (activity.isEmpty()) return "等待扫描…"
+        val now = System.currentTimeMillis()
+
+        val codeActive = { slot: Int ->
+            val last = activity[slot]
+            when {
+                last == null -> "·"           // unseen
+                now - last < CODE_ACTIVE_MS -> "●"  // active
+                else -> "○"                  // paused
+            }
+        }
+
+        // Safety net: if any real grid slot (0–3) has activity, the decoder IS
+        // tracking multiple codes. Never revert to single-code mode even if the
+        // pool's snapshotMultiCount() temporarily dips to 1.
+        val hasRealSlot = activity.keys.any { it >= 0 }
+        val effectiveCount = if (hasRealSlot) {
+            maxOf(multiCount, activity.keys.count { it >= 0 }).coerceIn(2, 4)
+        } else {
+            multiCount
+        }
+
+        // Single-code mode: only the center slot.
+        if (effectiveCount <= 1) {
+            val dot = codeActive(SLOT_CENTER)
+            return if (dot == "·") "等待扫描…" else "$dot ${if (dot == "●") "活跃" else "暂停"}"
+        }
+
+        // Multi-code mode: always show all 4 slots (①②③④) so the display
+        // length never changes regardless of how many codes the tracker sees.
+        val labels = arrayOf("①", "②", "③", "④")
+        val parts = List(4) { i -> "${labels[i]}${codeActive(i)}" }
+        return parts.joinToString(" ")
     }
 
     @Composable
@@ -691,9 +664,8 @@ class ScanActivity : ComponentActivity() {
      *
      *  [bbox] is the decoded code's {minX,minY,maxX,maxY} in analysis-stream
      *  pixel coords (null on the legacy single-code path). When the receiver
-     *  *accepts* the symbol as new (RaptorQ dedup passed), a normalized spark is
-     *  pushed to [pendingSparks] so the overlay can animate "data flowing in" at
-     *  that position. */
+     *  *accepts* the symbol as new (RaptorQ dedup passed), the code's activity
+     *  timestamp is recorded for the per-code status indicator. */
     private fun handleFrameAsync(payload: ByteArray, bbox: IntArray?) {
         // After completion, drop further frames: the main thread is (or will be)
         // calling assemble() on the receiver, which must not run concurrently
@@ -704,23 +676,17 @@ class ScanActivity : ComponentActivity() {
         // stays cheap; the full progress is fetched only on the throttled UI tick.
         val status = session.ingest(payload) ?: return
 
-        // Accepted → record a spark at this code's normalized position. The pool
-        // publishes the analysis geometry (sensor w/h + rotation) that we need to
-        // normalize the pixel bbox into PreviewView space.
-        if (status.accepted && bbox != null) {
+        // Record this code's last-decoded timestamp (keyed by grid slot) so the
+        // info card can show per-code status (active / paused / unseen).  We
+        // track EVERY decoded frame, not just accepted symbols — once a block
+        // is fully decoded, subsequent symbols are RaptorQ-duplicate-rejected
+        // (not "accepted") but the code is still being actively scanned.
+        if (bbox != null) {
             val pool = decodePool
             if (pool != null) {
-                val (aw, ah) = pool.snapshotAnalysisSize()
-                val rot = pool.snapshotAnalysisRotation()
-                val norm = normRectFromBbox(bbox, aw, ah, rot)
-                if (norm != null) {
-                    val cx = (norm.left + norm.right) * 0.5f
-                    val cy = norm.bottom
-                    synchronized(sparkLock) {
-                        if (pendingSparks.size < SPARK_MAX) {
-                            pendingSparks.add(Spark(cx, cy, System.currentTimeMillis()))
-                        }
-                    }
+                val slot = gridSlotOf(bbox, pool)
+                synchronized(codeActivityLock) {
+                    codeActivity[slot] = System.currentTimeMillis()
                 }
             }
         }
@@ -808,6 +774,15 @@ class ScanActivity : ComponentActivity() {
         }
         val droppedTotal = decodePool?.droppedCount() ?: 0L
 
+        val snapshotMap = synchronized(codeActivityLock) { HashMap(codeActivity) }
+        val mcCount = decodePool?.snapshotMultiCount() ?: 0
+
+        // Start the transfer timer on first symbol receipt.
+        if (progress.totalSymbols > 0 && transferStartMs == 0L) {
+            transferStartMs = System.currentTimeMillis()
+        }
+        val elapsedMs = if (transferStartMs > 0) System.currentTimeMillis() - transferStartMs else 0L
+
         updateUi {
             it.copy(
                 progressPct = pct,
@@ -822,13 +797,16 @@ class ScanActivity : ComponentActivity() {
                 fileName = s.fileName,
                 fileSize = s.fileSize,
                 statusText = statusMsg,
-                complete = progress.complete
+                complete = progress.complete,
+                codeActivitySnapshot = snapshotMap,
+                multiCodeCount = mcCount,
+                transferElapsedMs = elapsedMs,
+                symbolSize = session.symbolSizeBytes()
             )
         }
 
-        // Refresh the multi-QR position overlay: collect the currently-tracked
-        // codes (normalized outlines) and drain the pending accepted sparks.
-        refreshOverlay()
+        // Update codeActivityState for any Compose bindings that read it directly.
+        codeActivityState.value = snapshotMap
 
         if (handleCompletion && progress.complete && !completedHandled) {
             completedHandled = true
@@ -861,7 +839,8 @@ class ScanActivity : ComponentActivity() {
      * ingest lock (so it can't race an in-flight ingest or a destroy()).
      */
     private fun recoverAndStage(displayName: String): Intent? {
-        val fileBytes = session.assemble() ?: return null
+        updateRecoveryStage("正在组装数据…")
+        val fileBytes = session.assemble() ?: run { clearRecoveryStage(); return null }
         val originalSize = session.fileSize()
         // Truncate RaptorQ zero-padding back to the original size. originalSize
         // is a Long (up to 2^63); clamp to the bytes we actually recovered and
@@ -873,6 +852,7 @@ class ScanActivity : ComponentActivity() {
         }
         val truncBytes = fileBytes.copyOfRange(0, truncLen)
 
+        updateRecoveryStage("正在校验完整性…")
         val expectedCrc = session.crc32()
         val crcKnown = session.crc32Known()
         val receivedCrc = crc32OfBytes(truncBytes)
@@ -881,10 +861,12 @@ class ScanActivity : ComponentActivity() {
         if (BundleParser.isBundle(truncBytes)) {
             val bundle = BundleParser.parse(truncBytes)
             if (bundle != null && bundle.files.isNotEmpty()) {
+                val totalFiles = bundle.files.size
                 val paths = ArrayList<String>()
                 val names = ArrayList<String>()
                 val sizes = ArrayList<String>()
-                for (f in bundle.files) {
+                for ((idx, f) in bundle.files.withIndex()) {
+                    updateRecoveryStage("正在保存文件 (${idx + 1}/$totalFiles)…")
                     val safeName = com.easytransfer.app.scan.FileNameUtil.sanitize(f.name)
                     val tmp = java.io.File(cacheDir, "recovered_$safeName")
                     tmp.writeBytes(f.data)
@@ -892,7 +874,9 @@ class ScanActivity : ComponentActivity() {
                     names.add(f.name)
                     sizes.add(f.data.size.toString())
                 }
+                updateRecoveryStage("正在归档…")
                 copyBundleToReceivedDir(paths, names, sizes)
+                clearRecoveryStage()
                 return Intent(this, ReceiveBundleActivity::class.java).apply {
                     putStringArrayListExtra("FILE_PATHS", paths)
                     putStringArrayListExtra("FILE_NAMES", names)
@@ -910,10 +894,12 @@ class ScanActivity : ComponentActivity() {
 
         // Single-file path. Preserve the original name + extension in the temp
         // file (was recovered_<ts>.bin, which dropped the extension).
+        updateRecoveryStage("正在保存文件…")
         val finalName = if (displayName.isNotEmpty()) displayName else "received_file"
         val safeName = com.easytransfer.app.scan.FileNameUtil.sanitize(finalName)
         val tmp = java.io.File(cacheDir, "recovered_$safeName")
         tmp.writeBytes(truncBytes)
+        clearRecoveryStage()
         return Intent(this, ReceiveDetailActivity::class.java).apply {
             putExtra("FILE_PATH", tmp.absolutePath)
             putExtra("FILE_SIZE", if (originalSize > 0) originalSize else truncBytes.size.toLong())
@@ -924,21 +910,25 @@ class ScanActivity : ComponentActivity() {
         }
     }
 
-    /** Persist every unpacked bundle file to the received dir + write sidecars. */
+    /** Persist every unpacked bundle file under a single subdirectory "发送_<ts>". */
     private fun copyBundleToReceivedDir(paths: List<String>, names: List<String>, sizes: List<String>) {
         try {
-            val dir = java.io.File(getExternalFilesDir(null), "received")
-            if (!dir.exists()) dir.mkdirs()
+            val parent = java.io.File(getExternalFilesDir(null), "received")
+            if (!parent.exists()) parent.mkdirs()
+            // Create a timestamped subdirectory so all files from one bundle
+            // stay grouped instead of scattered individually in received/.
+            val ts = java.text.SimpleDateFormat("MMdd_HHmmss", java.util.Locale.getDefault())
+                .format(java.util.Date())
+            val bundleDir = java.io.File(parent, "发送_$ts")
+            bundleDir.mkdirs()
             for (i in paths.indices) {
                 val src = java.io.File(paths[i])
                 if (!src.exists()) continue
-                // No timestamp prefix: dedupe with (1)(2) so the on-disk name
-                // matches the original the user sent.
                 val name = names.getOrElse(i) { src.name }
-                val target = com.easytransfer.app.scan.FileNameUtil.uniqueTarget(dir, name)
+                val target = com.easytransfer.app.scan.FileNameUtil.uniqueTarget(bundleDir, name)
                 src.copyTo(target, overwrite = true)
                 val size = sizes.getOrElse(i) { "0" }
-                java.io.File(dir, "${target.name}.meta").writeText("$name\n$size\nunknown\ntrue")
+                java.io.File(bundleDir, "${target.name}.meta").writeText("$name\n$size\nunknown\ntrue")
             }
         } catch (_: Exception) {}
     }
@@ -957,9 +947,11 @@ class ScanActivity : ComponentActivity() {
         lastRateTimeMs = 0
         lastDecodedCount = 0
         decodePerSec = 0
-        // Clear any stale overlay (outlines + sparks) from the previous session.
-        synchronized(sparkLock) { pendingSparks.clear() }
-        overlayState.value = OverlayState()
+        // Clear per-code activity state.
+        synchronized(codeActivityLock) { codeActivity.clear() }
+        codeActivityState.value = emptyMap()
+        transferStartMs = 0L
+        recoveryStage.value = null
         updateUi {
             UiState(jniReady = true, statusText = "就绪 — 对准二维码…")
         }
@@ -969,88 +961,57 @@ class ScanActivity : ComponentActivity() {
         uiState.value = block(uiState.value)
     }
 
-    /**
-     * Map an analysis-stream pixel bbox {minX,minY,maxX,maxY} into a normalized
-     * rect ∈ [0,1]² in *rotated image* space (i.e. as the image appears upright
-     * on screen, before the PreviewView's FILL_CENTER crop). The overlay then
-     * applies the same FILL_CENTER scale+crop as the PreviewView to land the rect
-     * on screen.
-     *
-     * [sensorW]/[sensorH] are the analysis-stream dimensions (e.g. 1920×1080, in
-     * its native landscape orientation). [rotation] is the sensor rotation degrees
-     * (90 on a portrait phone). The 4 corners of the bbox are rotated individually
-     * and re-bounded, which stays correct even for off-axis boxes.
-     *
-     * Returns null if the geometry is unknown (before the first frame) or degenerate.
-     */
-    private fun normRectFromBbox(
-        bbox: IntArray, sensorW: Int, sensorH: Int, rotation: Int
-    ): NormRect? {
-        if (sensorW <= 0 || sensorH <= 0) return null
-        val x0 = bbox[0].toFloat(); val y0 = bbox[1].toFloat()
-        val x1 = bbox[2].toFloat(); val y1 = bbox[3].toFloat()
-        // Rotate each corner from sensor space into normalized upright-image
-        // space (as seen on screen). rotateNorm handles the per-rotation axis
-        // swap + normalization by the sensor dimensions.
-        val (nx0, ny0) = rotateNorm(x0, y0, sensorW, sensorH, rotation)
-        val (nx1, ny1) = rotateNorm(x1, y1, sensorW, sensorH, rotation)
-        val left = minOf(nx0, nx1); val right = maxOf(nx0, nx1)
-        val top = minOf(ny0, ny1); val bottom = maxOf(ny0, ny1)
-        return NormRect(left, top, right, bottom)
+    /** Set the live recovery-stage status text (posted to the main thread).
+     *  Called from [ioExecutor] during [recoverAndStage] so the user sees the
+     *  post-scan pipeline advancing instead of a frozen "完成". */
+    private fun updateRecoveryStage(text: String) {
+        runOnUiThread { recoveryStage.value = text }
     }
 
-    /** Rotate one sensor-space point (sx,sy) into normalized upright-image space. */
-    private fun rotateNorm(
-        sx: Float, sy: Float, sw: Int, sh: Int, rotation: Int
-    ): Pair<Float, Float> = when (rotation) {
-        90 -> Pair(1f - sy / sh, sx / sw)         // (sx,sy)→(1-y/sh, x/sw)
-        180 -> Pair(1f - sx / sw, 1f - sy / sh)
-        270 -> Pair(sy / sh, 1f - sx / sw)
-        else -> Pair(sx / sw, sy / sh)            // 0°: identity
+    /** Clear the recovery-stage status (e.g. right before launching the result
+     *  Activity, or on error / reset). */
+    private fun clearRecoveryStage() {
+        runOnUiThread { recoveryStage.value = null }
     }
 
     /**
-     * Rebuild [overlayState] from the pool's currently-tracked codes (faint
-     * outlines) + any not-yet-expired sparks (rising-dot animation). Called on
-     * the main thread at the ~7 Hz UI cadence. Sparks older than [SPARK_LIFE_MS]
-     * are dropped; the Canvas itself re-evaluates each spark's progress every
-     * frame, so animation smoothness is decoupled from this refresh rate.
+     * Snap a decoded code's bbox to a grid slot for per-code status tracking.
+     *
+     * Returns:
+     *  - [SLOT_CENTER] (-1) for a single on-screen code.
+     *  - 0..3 for a multi-code grid (2×2): the code's bbox center decides which
+     *    quadrant of the analysis frame it sits in.
+     *
+     * Quadrant → slot index (in normalized upright-image space):
+     *   left/right = bbox center X vs frame mid; top/bottom = center Y vs mid.
+     *   0=top-left, 1=top-right, 2=bottom-left, 3=bottom-right.
      */
-    private fun refreshOverlay() {
-        val pool = decodePool ?: return
-        val packed = pool.snapshotMultiBboxes()
+    private fun gridSlotOf(bbox: IntArray, pool: QrDecodePool): Int {
         val count = pool.snapshotMultiCount()
+        // Single code (or tracker not yet locked) → center slot.
+        if (count <= 1) return SLOT_CENTER
         val (aw, ah) = pool.snapshotAnalysisSize()
-        val rot = pool.snapshotAnalysisRotation()
-
-        val frames = if (packed != null && count > 0 && aw > 0 && ah > 0) {
-            ArrayList<NormRect>(count).apply {
-                for (i in 0 until count) {
-                    val b = intArrayOf(
-                        packed[i * 4], packed[i * 4 + 1],
-                        packed[i * 4 + 2], packed[i * 4 + 3]
-                    )
-                    normRectFromBbox(b, aw, ah, rot)?.let { add(it) }
-                }
-            }
-        } else emptyList()
-
-        // Drain pending sparks (worker-written) and merge with the still-live
-        // sparks from the previous overlay, pruning expired ones.
-        val now = System.currentTimeMillis()
-        val livePrev = overlayState.value.sparks.filter { now - it.bornMs < SPARK_LIFE_MS }
-        val drained = synchronized(sparkLock) {
-            val copy = ArrayList(pendingSparks)
-            pendingSparks.clear()
-            copy
+        if (aw <= 0 || ah <= 0) return SLOT_CENTER
+        // Use the bbox CENTER (robust to perspective corner overshoot) relative
+        // to the analysis-frame midpoint to pick a quadrant. We compare against
+        // raw analysis coords (not the rotated mapping) because a 90° rotation
+        // only swaps axes — the left/right + top/bottom partition of the frame
+        // is preserved, which is all we need to pick a grid slot.
+        val cxRaw = (bbox[0].toFloat() + bbox[2].toFloat()) * 0.5f
+        val cyRaw = (bbox[1].toFloat() + bbox[3].toFloat()) * 0.5f
+        val right = cxRaw > aw * 0.5f
+        val bottom = cyRaw > ah * 0.5f
+        return when {
+            !right && !bottom -> 0   // top-left
+            right && !bottom -> 1    // top-right
+            !right && bottom -> 2    // bottom-left
+            else -> 3                // bottom-right
         }
-        val sparks = (livePrev + drained)
-            // Cap to the most recent SPARK_MAX to bound work on a fast sender.
-            .let { all -> if (all.size > SPARK_MAX) all.takeLast(SPARK_MAX) else all }
-
-        overlayState.value = OverlayState(frames, sparks)
     }
 
+    // slotScreenPos 已移除（火花动画已删除）。
+
+    // refreshOverlay / dedupeSparksBySlot 已移除（火花动画已删除）。
     override fun onResume() {
         super.onResume()
         // If returning from ReceiveDetailActivity after completion, reset for next scan.
@@ -1066,8 +1027,10 @@ class ScanActivity : ComponentActivity() {
             lastRateTimeMs = 0
             lastDecodedCount = 0
             decodePerSec = 0
-            synchronized(sparkLock) { pendingSparks.clear() }
-            overlayState.value = OverlayState()
+            synchronized(codeActivityLock) { codeActivity.clear() }
+            codeActivityState.value = emptyMap()
+            transferStartMs = 0L
+            recoveryStage.value = null
             updateUi { UiState(jniReady = true, statusText = "就绪 — 对准二维码…") }
         }
     }
@@ -1104,15 +1067,22 @@ class ScanActivity : ComponentActivity() {
 
     companion object {
         private const val TAG = "ScanActivity"
-        /** Spark animation duration: a spark rises and fades over this many ms. */
-        private const val SPARK_LIFE_MS = 700L
-        /** Max sparks kept (older ones pruned) to bound memory on a fast sender. */
-        private const val SPARK_MAX = 64
+        /** Slot index for a single on-screen code (used by gridSlotOf). */
+        private const val SLOT_CENTER = -1
 
         fun formatSize(bytes: Long): String {
             if (bytes < 1024) return "$bytes B"
             if (bytes < 1024 * 1024) return "%.1f KB".format(bytes / 1024.0)
             return "%.1f MB".format(bytes / 1024.0 / 1024.0)
+        }
+
+        /** Format milliseconds as a human-readable duration (e.g. "23 秒", "1 分 05 秒"). */
+        fun formatDuration(ms: Long): String {
+            val totalSec = ms / 1000
+            if (totalSec < 60) return "${totalSec} 秒"
+            val m = totalSec / 60
+            val s = totalSec % 60
+            return "${m} 分 ${s.toString().padStart(2, '0')} 秒"
         }
 
         fun crc32OfBytes(data: ByteArray): Long {

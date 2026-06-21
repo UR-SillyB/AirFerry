@@ -81,6 +81,8 @@ class ReceiverSessionManager {
     private var sessionIdLo: Long = 0L
     private var sessionIdHi: Long = 0L
     private var symbolSize: Int = 0
+    /** Expose the decoded symbol size (bytes) for UI throughput calculation. */
+    fun symbolSizeBytes(): Int = symbolSize
     private var initialized: Boolean = false
     private var estimatedTotalSymbols: Int = 0
     /// Consecutive mismatch count seen by Kotlin (driven from Rust streak).

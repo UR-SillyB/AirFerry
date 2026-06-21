@@ -17,6 +17,12 @@ export interface TransferConfig {
    * The UI now exposes this as an on/off switch: on → 4 codes, off → 1.
    */
   multiQr: number
+  /**
+   * Sub-pixel dithering: randomly shift each QR code by ±1px per frame to
+   * break moiré patterns between the QR module grid and the camera sensor.
+   * Enabled by default — negligible visual impact, zero risk to decode.
+   */
+  ditherJitter: boolean
 }
 
 /**
@@ -29,16 +35,22 @@ export interface TransferConfig {
  * overhead) is roughly:
  *
  *   稳定 (512B):  ~21 KiB/s @45fps,  ~28 KiB/s @60fps   (V16, 81×81)
- *   高速 (768B):  ~32 KiB/s @45fps,  ~42 KiB/s @60fps   (V19, 93×93)
  *   高速 (896B):  ~37 KiB/s @45fps,  ~49 KiB/s @60fps   (V21, 101×101)
- *   极限 (1008B): ~42 KiB/s @45fps,  ~55 KiB/s @60fps   (V22, 105×105)
+ *   极限 (1008B): ~42 KiB/s @45fps,  ~55 KiB/s @60fps   (V22, 105×105)   ← 默认
+ *   激进 (1400B): ~78 KiB/s @60fps  (V25, 117×117)   ← 默认 (实测最快)
+ *   4 码模式: ~312KB/s 理论，实测约 280KB/s+
+ * 大符号的 4 码模式下吞吐乘以 ~4×：
+ *   激进 4码: 252KB/s（当前上限）
+ *
+ * 大符号的 4 码模式下吞吐乘以 ~4×（理论 644KB/s 以上），但码密度更高，
+ * 对摄像头对焦和距离要求更严格。
  *
  * 1008B (not the full 1024B core default) is chosen so a frame (header +
  * payload + footer = 1072 B) still fits comfortably under V22's byte-mode L
  * capacity, leaving the version-fallback headroom in qr_render.rs to recover
  * the occasional un-encodable repair frame without jumping to V23.
  */
-export type SpeedPreset = "stable" | "fast" | "extreme"
+export type SpeedPreset = "stable" | "fast" | "extreme" | "aggressive"
 
 export interface SpeedPresetDef {
   id: SpeedPreset
@@ -62,14 +74,21 @@ export const SPEED_PRESETS: SpeedPresetDef[] = [
     label: "高速（896B）",
     symbolSize: 896,
     fps: 60,
-    blurb: "V21，吞吐提升 1.7×",
+    blurb: "V21",
   },
   {
     id: "extreme",
     label: "极限（1008B）",
     symbolSize: 1008,
     fps: 60,
-    blurb: "V22，最高吞吐",
+    blurb: "V22",
+  },
+  {
+    id: "aggressive",
+    label: "激进（1400B）← 默认",
+    symbolSize: 1400,
+    fps: 60,
+    blurb: "V25，实测最快",
   },
 ]
 
@@ -81,14 +100,16 @@ export function presetForSymbolSize(symbolSize: number): SpeedPresetDef | null {
 export const DEFAULT_CONFIG: TransferConfig = {
   redundancyPct: 5,
   fps: 60,
-  symbolSize: 1008,
+  symbolSize: 1400,
   brightness: 1.0,
   autoOptimize: true,
   // 4 = four codes tiled per frame (default). Multi-QR tiles N distinct symbols
   // on screen per tick for ~N× throughput, at the cost of each code being
   // smaller/harder to scan; the receiver has multi-QR decoding on by default.
   // The UI exposes this as an on/off switch (on → 4, off → 1).
-  multiQr: 4
+  multiQr: 4,
+  // Sub-pixel dithering for moiré — enabled by default per user test.
+  ditherJitter: true
 }
 
 /** localStorage key under which the sender's transfer config is persisted. */

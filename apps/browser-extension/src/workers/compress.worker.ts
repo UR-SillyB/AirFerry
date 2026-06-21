@@ -69,7 +69,7 @@ export interface CompressResult {
   displayName: string
 }
 
-export type CompressPhase = "reading" | "bundling" | "zstd" | "xz"
+export type CompressPhase = "reading" | "bundling" | "zstd" | "xz" | "finalizing"
 
 /** All messages the worker posts back to the main thread. */
 export type WorkerMessage =
@@ -146,6 +146,11 @@ async function processFiles(files: File[]) {
     )
 
     // --- Stage 3: CRC32 + fingerprint + session id (on the pre-compress bytes) ---
+    // 这一段（CRC32 over the whole payload + head/tail fingerprint + session-id
+    // 派生）没有任何阶段回调，是 done 前的"盲区"。大文件 CRC + 指纹可达
+    // 数百毫秒，补一个 finalizing 阶段让 UI 步骤清单能显示它，而非从"压缩"
+    // 直接跳到"完成"。
+    post({ phase: "finalizing" })
     const crc = crc32(raw)
     const head = raw.slice(0, 1024)
     const tail = raw.slice(Math.max(0, raw.length - 1024))

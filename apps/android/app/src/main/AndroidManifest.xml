@@ -33,6 +33,11 @@
             android:parentActivityName=".ui.ScanActivity" />
 
         <activity
+            android:name=".ui.ReceiveBundleActivity"
+            android:exported="false"
+            android:parentActivityName=".ui.ScanActivity" />
+
+        <activity
             android:name=".ui.FileListActivity"
             android:exported="false"
             android:parentActivityName=".ui.ScanActivity" />

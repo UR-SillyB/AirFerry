@@ -305,6 +305,9 @@ export async function preparePayload(
   ]
 
   // --- zstd pass (fast, always run) ---
+  // Report the phase BEFORE running the (synchronous) compressor, so the UI
+  // shows "正在压缩 zstd" while it runs — not only after it finishes.
+  onProgress?.("zstd")
   try {
     const wasm = await getWasm()
     const c = compressWithWasm(wasm, input)
@@ -321,11 +324,13 @@ export async function preparePayload(
   // zstd barely shrank the file (≥ 95% of original) → it's already compressed.
   // Skip the expensive xz pass; pick the smaller of raw / zstd only.
   if (zstdSize / originalSize >= ZSTD_ALREADY_COMPRESSED_RATIO) {
-    onProgress?.("zstd")
     return pickSmallest(candidates, originalSize)
   }
 
   // --- xz pass (slow, only when the file is genuinely compressible) ---
+  // Report BEFORE running xz (it can take seconds on text-heavy files), so the
+  // UI step list marks zstd done and xz active while it runs.
+  onProgress?.("xz")
   try {
     const c = await compressXz(input)
     if (c.length < originalSize) {
@@ -334,7 +339,6 @@ export async function preparePayload(
   } catch (e) {
     console.warn("XZ compression failed:", e)
   }
-  onProgress?.("xz")
 
   // Pick the smallest of raw / zstd / xz.
   return pickSmallest(candidates, originalSize)

@@ -19,6 +19,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Description
+import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.*
@@ -42,15 +43,18 @@ private val DeleteRed = Color(0xFFEF4444)
 private val Success = Color(0xFF22C55E)
 private val SelectHighlight = Color(0xFF1D4ED8)
 
+/** One item in the file list: either a regular file or a bundle directory. */
+private sealed class ListItem {
+    /** A regular received file (with optional .meta sidecar). */
+    data class FileItem(val file: java.io.File) : ListItem()
+    /** A bundle subdirectory (e.g. "发送_0622_001234"). */
+    data class DirItem(val dir: java.io.File) : ListItem()
+}
+
 class FileListActivity : ComponentActivity() {
 
-    /** Pending files to save via the CreateDocument launcher. Drained one URI
-     *  per callback until the queue is empty. SAF's CreateDocument picks one
-     *  destination at a time, so multi-save walks the queue sequentially. */
-    private val saveQueue = ArrayDeque<File>()
-    /** The source file whose CreateDocument prompt is currently in flight.
-     *  Correlated back to the returned URI in the callback. */
-    private var pendingSaveSource: File? = null
+    private val saveQueue = ArrayDeque<java.io.File>()
+    private var pendingSaveSource: java.io.File? = null
 
     private val createDocument = registerForActivityResult(
         ActivityResultContracts.CreateDocument("application/octet-stream")
@@ -66,7 +70,6 @@ class FileListActivity : ComponentActivity() {
                 Toast.makeText(this, "保存失败: ${e.message}", Toast.LENGTH_LONG).show()
             }
         }
-        // Launch the next pending save (if any). When the queue drains, confirm.
         if (saveQueue.isEmpty()) {
             Toast.makeText(this, "已保存", Toast.LENGTH_SHORT).show()
         } else {
@@ -82,58 +85,115 @@ class FileListActivity : ComponentActivity() {
     @OptIn(ExperimentalFoundationApi::class)
     @Composable
     private fun FileListScreen() {
-        val dir = remember { File(getExternalFilesDir(null), "received") }
-        var fileList by remember {
-            mutableStateOf(loadFiles(dir))
-        }
-        // Selection mode: null = browsing (click opens); non-empty set = a
-        // selection session (click toggles). Using a single nullable Set lets
-        // the UI distinguish "not selecting" from "selecting 0 items".
-        var selection by remember { mutableStateOf<Set<File>?>(null) }
-        // Pending bulk-delete confirmation (set when the user taps Delete in
-        // the action bar; the dialog renders from this state).
-        var pendingDelete by remember { mutableStateOf<List<File>?>(null) }
+        val rootDir = remember { java.io.File(getExternalFilesDir(null), "received") }
+        // Directory stack: start at root; push when entering a bundle dir.
+        var dirStack by remember { mutableStateOf(listOf(rootDir)) }
+        val currentDir = dirStack.last()
+        // Items in the current directory (files + subdirectories).
+        var items by remember { mutableStateOf(loadItems(currentDir)) }
+        // null = browsing, non-empty = selection session.
+        var selection by remember { mutableStateOf<Set<String>?>(null) }
+        var pendingDelete by remember { mutableStateOf<List<ListItem>?>(null) }
+        // Pending clear-all confirmation.
+        var pendingClearAll by remember { mutableStateOf(false) }
         val inSelectionMode = selection != null
-        fun toggle(f: File) {
-            selection = selection?.let { if (f in it) it - f else it + f }
+
+        fun toggle(item: ListItem) {
+            val key = when (item) {
+                is ListItem.FileItem -> item.file.name
+                is ListItem.DirItem -> item.dir.name
+            }
+            selection = selection?.let { if (key in it) it - key else it + key }
         }
-        fun clearSelection() { selection = null }
         fun exitSelection() { selection = null }
-        fun refresh() { fileList = loadFiles(dir) }
+        fun refresh() { items = loadItems(currentDir) }
+
+        // Navigate into a bundle directory.
+        fun enterDir(dir: java.io.File) {
+            dirStack = dirStack + dir
+            items = loadItems(dir)
+            exitSelection()
+        }
+        // Go back to the parent directory.
+        fun leaveDir() {
+            if (dirStack.size > 1) {
+                dirStack = dirStack.dropLast(1)
+                items = loadItems(dirStack.last())
+                exitSelection()
+            }
+        }
+
+        // Recursively delete everything under root.
+        fun clearAllFiles() {
+            rootDir.listFiles()?.forEach { it.deleteRecursively() }
+            refresh()
+            exitSelection()
+            Toast.makeText(this@FileListActivity, "已清空", Toast.LENGTH_SHORT).show()
+        }
 
         Column(modifier = Modifier.fillMaxSize().background(BgDark)) {
-            // Top bar: title + count, or (in selection mode) a "N selected" bar
-            // with a clear/close action.
+            // Top bar
             Row(
                 modifier = Modifier.fillMaxWidth().padding(20.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text(
-                    if (inSelectionMode) "已选 ${selection!!.size} 个"
-                    else "已接收文件",
-                    color = TextPrimary, fontSize = 22.sp, fontWeight = FontWeight.Bold,
-                    modifier = Modifier.weight(1f)
-                )
-                if (inSelectionMode) {
+                if (dirStack.size > 1) {
+                    // In a subdirectory: show back arrow + dir name
+                    TextButton(onClick = { leaveDir() }) {
+                        Text("← 返回", color = Accent, fontSize = 14.sp)
+                    }
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        currentDir.name, color = TextPrimary,
+                        fontSize = 18.sp, fontWeight = FontWeight.Bold,
+                        modifier = Modifier.weight(1f),
+                        maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+                    )
+                } else if (inSelectionMode) {
+                    Text(
+                        "已选 ${selection!!.size} 个",
+                        color = TextPrimary, fontSize = 22.sp, fontWeight = FontWeight.Bold,
+                        modifier = Modifier.weight(1f)
+                    )
                     TextButton(onClick = { exitSelection() }) {
                         Icon(Icons.Default.Close, contentDescription = "退出选择", tint = TextPrimary)
                         Spacer(Modifier.width(4.dp))
                         Text("取消", color = TextPrimary)
                     }
                 } else {
-                    Text("${fileList.size} 个", color = TextSecondary, fontSize = 14.sp)
+                    Text(
+                        "已接收文件",
+                        color = TextPrimary, fontSize = 22.sp, fontWeight = FontWeight.Bold,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Text("${items.size} 项", color = TextSecondary, fontSize = 14.sp)
+                    Spacer(Modifier.width(12.dp))
+                    // 清空按钮：仅在根目录且 items 非空时显示
+                    if (items.isNotEmpty()) {
+                        TextButton(onClick = { pendingClearAll = true }) {
+                            Icon(Icons.Default.Delete, contentDescription = "清空", tint = DeleteRed, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(2.dp))
+                            Text("清空", color = DeleteRed, fontSize = 13.sp)
+                        }
+                    }
                 }
             }
             HorizontalDivider(color = Color(0xFF334155))
 
-            if (fileList.isEmpty()) {
+            if (items.isEmpty()) {
                 Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         Icon(Icons.Default.Description, contentDescription = null, tint = TextSecondary, modifier = Modifier.size(64.dp))
                         Spacer(modifier = Modifier.height(16.dp))
-                        Text("暂无已接收的文件", color = TextSecondary, fontSize = 16.sp, textAlign = TextAlign.Center)
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Text("扫描二维码接收文件后，文件会显示在这里。", color = TextSecondary, fontSize = 13.sp, textAlign = TextAlign.Center, modifier = Modifier.padding(horizontal = 40.dp))
+                        Text(
+                            if (dirStack.size > 1) "此目录为空"
+                            else "暂无已接收的文件",
+                            color = TextSecondary, fontSize = 16.sp, textAlign = TextAlign.Center
+                        )
+                        if (dirStack.size == 1) {
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text("扫描二维码接收文件后，文件会显示在这里。", color = TextSecondary, fontSize = 13.sp, textAlign = TextAlign.Center, modifier = Modifier.padding(horizontal = 40.dp))
+                        }
                     }
                 }
             } else {
@@ -142,35 +202,66 @@ class FileListActivity : ComponentActivity() {
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                     contentPadding = PaddingValues(vertical = 16.dp)
                 ) {
-                    items(fileList, key = { it.name }) { file ->
-                        val selected = inSelectionMode && file in (selection ?: emptySet())
-                        FileCard(
-                            file = file,
-                            selected = selected,
-                            inSelectionMode = inSelectionMode,
-                            onClick = {
-                                if (inSelectionMode) toggle(file)
-                                else openFileForResave(file)
-                            },
-                            onLongClick = {
-                                // Long-press enters selection mode seeded with this file.
-                                if (!inSelectionMode) selection = setOf(file)
-                                else toggle(file)
-                            },
-                            onSingleDelete = { deletedFile ->
-                                deleteFile(deletedFile)
-                                refresh()
-                            }
-                        )
+                    items(items, key = {
+                        when (it) {
+                            is ListItem.FileItem -> "f:${it.file.name}"
+                            is ListItem.DirItem -> "d:${it.dir.name}"
+                        }
+                    }) { item ->
+                        val key = when (item) {
+                            is ListItem.FileItem -> item.file.name
+                            is ListItem.DirItem -> item.dir.name
+                        }
+                        val selected = inSelectionMode && key in (selection ?: emptySet())
+
+                        when (item) {
+                            is ListItem.FileItem -> FileCard(
+                                file = item.file,
+                                selected = selected,
+                                inSelectionMode = inSelectionMode,
+                                onClick = {
+                                    if (inSelectionMode) toggle(item)
+                                    else openFileForResave(item.file)
+                                },
+                                onLongClick = {
+                                    if (!inSelectionMode) selection = setOf(key)
+                                    else toggle(item)
+                                },
+                                onSingleDelete = { f ->
+                                    deleteFile(f)
+                                    refresh()
+                                }
+                            )
+                            is ListItem.DirItem -> DirCard(
+                                dir = item.dir,
+                                selected = selected,
+                                inSelectionMode = inSelectionMode,
+                                onClick = {
+                                    if (inSelectionMode) toggle(item)
+                                    else enterDir(item.dir)
+                                },
+                                onLongClick = {
+                                    if (!inSelectionMode) selection = setOf(key)
+                                    else toggle(item)
+                                }
+                            )
+                        }
                     }
                 }
             }
 
-            // Selection-mode action bar (replaces the bottom "返回" button while
-            // selecting). Share / Save / Delete act on the whole selection.
+            // Bottom action bar (selection mode or back button)
             if (inSelectionMode) {
-                val selectedFiles = selection?.mapNotNull { f -> fileList.find { it.name == f.name } } ?: emptyList()
-                val hasSelection = selectedFiles.isNotEmpty()
+                val selectedItems = selection?.mapNotNull { key ->
+                    items.find {
+                        val k = when (it) {
+                            is ListItem.FileItem -> it.file.name
+                            is ListItem.DirItem -> it.dir.name
+                        }
+                        k == key
+                    }
+                } ?: emptyList()
+                val hasSelection = selectedItems.isNotEmpty()
                 Surface(color = CardBg, shadowElevation = 8.dp) {
                     Row(
                         modifier = Modifier.fillMaxWidth().padding(16.dp),
@@ -181,48 +272,51 @@ class FileListActivity : ComponentActivity() {
                             label = "分享",
                             color = Success,
                             enabled = hasSelection
-                        ) { shareFiles(selectedFiles) }
+                        ) { shareItems(selectedItems) }
                         ActionButton(
                             icon = Icons.Default.Save,
                             label = "保存",
                             color = Accent,
                             enabled = hasSelection
-                        ) { saveFiles(selectedFiles) }
+                        ) { saveItems(selectedItems.filterIsInstance<ListItem.FileItem>().map { it.file }) }
                         ActionButton(
                             icon = Icons.Default.Delete,
                             label = "删除",
                             color = DeleteRed,
                             enabled = hasSelection
                         ) {
-                            // Defer the actual delete behind a confirmation dialog
-                            // (batch delete is irreversible, same as single delete).
-                            pendingDelete = selectedFiles
+                            pendingDelete = selectedItems
                         }
                     }
                 }
-            } else {
+            } else if (dirStack.size == 1) {
                 OutlinedButton(
                     onClick = { finish() },
                     modifier = Modifier.fillMaxWidth().padding(16.dp).height(50.dp),
                     shape = RoundedCornerShape(12.dp)
                 ) { Text("返回", color = TextPrimary, fontSize = 16.sp) }
+            } else {
+                // Inside a bundle subdirectory, no bottom bar needed.
             }
         }
 
-        // Bulk-delete confirmation. Renders on top of the list when the user
-        // taps Delete in the selection action bar.
-        pendingDelete?.let { files ->
+        // Bulk-delete confirmation
+        pendingDelete?.let { list ->
+            val files = list.filterIsInstance<ListItem.FileItem>().map { it.file }
+            val dirs = list.filterIsInstance<ListItem.DirItem>().map { it.dir }
+            val total = files.size + dirs.size
             AlertDialog(
                 onDismissRequest = { pendingDelete = null },
                 title = { Text("删除文件") },
-                text = { Text("确定删除选中的 ${files.size} 个文件？此操作不可撤销。") },
+                text = { Text("确定删除选中的 $total 项？此操作不可撤销。") },
                 confirmButton = {
                     TextButton(onClick = {
                         files.forEach { deleteFile(it) }
+                        dirs.forEach { it.deleteRecursively() }
                         refresh()
-                        clearSelection()
+                        exitSelection()
                         pendingDelete = null
-                        Toast.makeText(this, "已删除 ${files.size} 个文件", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(this, "已删除 $total 项", Toast.LENGTH_SHORT).show()
                     }) {
                         Text("删除", color = DeleteRed)
                     }
@@ -234,39 +328,63 @@ class FileListActivity : ComponentActivity() {
                 }
             )
         }
-    }
 
-    @OptIn(ExperimentalFoundationApi::class)
-    @Composable
-    private fun ActionButton(
-        icon: androidx.compose.ui.graphics.vector.ImageVector,
-        label: String,
-        color: Color,
-        enabled: Boolean,
-        onClick: () -> Unit
-    ) {
-        val tint = if (enabled) color else TextSecondary
-        Column(
-            horizontalAlignment = Alignment.CenterHorizontally,
-            modifier = Modifier.combinedClickable(enabled = enabled, onClick = { onClick() })
-        ) {
-            Icon(icon, contentDescription = label, tint = tint, modifier = Modifier.size(26.dp))
-            Spacer(Modifier.height(4.dp))
-            Text(label, color = tint, fontSize = 13.sp)
+        // Clear-all confirmation
+        if (pendingClearAll) {
+            AlertDialog(
+                onDismissRequest = { pendingClearAll = false },
+                title = { Text("清空所有文件") },
+                text = { Text("确定删除所有已接收的文件？此操作不可撤销。") },
+                confirmButton = {
+                    TextButton(onClick = {
+                        pendingClearAll = false
+                        clearAllFiles()
+                    }) {
+                        Text("清空", color = DeleteRed)
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { pendingClearAll = false }) {
+                        Text("取消")
+                    }
+                }
+            )
         }
     }
+
+    // ===== ListItem helpers =====
+
+    /** List both files and subdirectories in [dir]. Files first, then dirs. */
+    private fun loadItems(dir: java.io.File): List<ListItem> {
+        if (!dir.exists()) return emptyList()
+        val files = dir.listFiles { f -> !f.name.endsWith(".meta") && f.isFile }
+            ?.sortedByDescending { it.lastModified() }
+            ?.map { ListItem.FileItem(it) } ?: emptyList()
+        val subdirs = dir.listFiles { f -> f.isDirectory }
+            ?.sortedByDescending { it.lastModified() }
+            ?.map { ListItem.DirItem(it) } ?: emptyList()
+        return files + subdirs
+    }
+
+    private fun deleteFile(file: java.io.File) {
+        val metaFile = java.io.File(file.parentFile, "${file.name}.meta")
+        file.delete()
+        metaFile.delete()
+    }
+
+    // ===== Cards =====
 
     @OptIn(ExperimentalFoundationApi::class)
     @Composable
     private fun FileCard(
-        file: File,
+        file: java.io.File,
         selected: Boolean,
         inSelectionMode: Boolean,
         onClick: () -> Unit,
         onLongClick: () -> Unit,
-        onSingleDelete: (File) -> Unit
+        onSingleDelete: (java.io.File) -> Unit
     ) {
-        val metaFile = remember(file) { File(file.parentFile, "${file.name}.meta") }
+        val metaFile = remember(file) { java.io.File(file.parentFile, "${file.name}.meta") }
         val meta: Triple<String, Long, Long> = remember(file) {
             if (metaFile.exists()) {
                 val lines = metaFile.readLines()
@@ -282,7 +400,6 @@ class FileListActivity : ComponentActivity() {
         val origSize = meta.second
 
         var showDeleteDialog by remember { mutableStateOf(false) }
-        // Highlight the whole card when selected.
         val cardColor by animateColorAsState(if (selected) SelectHighlight else CardBg, label = "cardBg")
 
         Card(
@@ -294,8 +411,6 @@ class FileListActivity : ComponentActivity() {
         ) {
             Row(modifier = Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
                 if (inSelectionMode) {
-                    // Selection checkbox / indicator replaces the file icon while
-                    // selecting, so the affordance is obvious.
                     Checkbox(
                         checked = selected,
                         onCheckedChange = { onClick() },
@@ -312,8 +427,6 @@ class FileListActivity : ComponentActivity() {
                     val dateStr = java.text.SimpleDateFormat("MM-dd HH:mm", java.util.Locale.getDefault()).format(java.util.Date(file.lastModified()))
                     Text("${ScanActivity.formatSize(origSize)} · $dateStr", color = TextSecondary, fontSize = 12.sp)
                 }
-                // Per-item delete is hidden in selection mode (bulk delete is in
-                // the action bar); keep it as the quick path in browse mode.
                 if (!inSelectionMode) {
                     IconButton(onClick = { showDeleteDialog = true }) {
                         Icon(
@@ -349,23 +462,94 @@ class FileListActivity : ComponentActivity() {
         }
     }
 
+    @OptIn(ExperimentalFoundationApi::class)
+    @Composable
+    private fun DirCard(
+        dir: java.io.File,
+        selected: Boolean,
+        inSelectionMode: Boolean,
+        onClick: () -> Unit,
+        onLongClick: () -> Unit
+    ) {
+        val fileCount = remember(dir) {
+            dir.listFiles { f -> !f.name.endsWith(".meta") }?.size ?: 0
+        }
+        val totalSize = remember(dir) {
+            dir.listFiles { f -> !f.name.endsWith(".meta") }
+                ?.sumOf { it.length() } ?: 0L
+        }
+        val dateStr = remember(dir) {
+            java.text.SimpleDateFormat("MM-dd HH:mm", java.util.Locale.getDefault())
+                .format(java.util.Date(dir.lastModified()))
+        }
+        val cardColor by animateColorAsState(if (selected) SelectHighlight else CardBg, label = "dirCard")
+
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .combinedClickable(onClick = onClick, onLongClick = onLongClick),
+            shape = RoundedCornerShape(12.dp),
+            colors = CardDefaults.cardColors(containerColor = cardColor)
+        ) {
+            Row(modifier = Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+                if (inSelectionMode) {
+                    Checkbox(
+                        checked = selected,
+                        onCheckedChange = { onClick() },
+                        colors = CheckboxDefaults.colors(checkedColor = Accent, uncheckedColor = TextSecondary),
+                        modifier = Modifier.size(24.dp)
+                    )
+                    Spacer(Modifier.width(12.dp))
+                } else {
+                    Icon(Icons.Default.Folder, contentDescription = null, tint = Accent, modifier = Modifier.size(32.dp))
+                    Spacer(Modifier.width(12.dp))
+                }
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(dir.name, color = TextPrimary, fontSize = 15.sp, fontWeight = FontWeight.Medium, maxLines = 1)
+                    Text("${fileCount} 个文件 · ${ScanActivity.formatSize(totalSize)} · $dateStr", color = TextSecondary, fontSize = 12.sp)
+                }
+            }
+        }
+    }
+
+    @OptIn(ExperimentalFoundationApi::class)
+    @Composable
+    private fun ActionButton(
+        icon: androidx.compose.ui.graphics.vector.ImageVector,
+        label: String,
+        color: Color,
+        enabled: Boolean,
+        onClick: () -> Unit
+    ) {
+        val tint = if (enabled) color else TextSecondary
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            modifier = Modifier.combinedClickable(enabled = enabled, onClick = { onClick() })
+        ) {
+            Icon(icon, contentDescription = label, tint = tint, modifier = Modifier.size(26.dp))
+            Spacer(Modifier.height(4.dp))
+            Text(label, color = tint, fontSize = 13.sp)
+        }
+    }
+
     // ===== Batch operations =====
 
-    /**
-     * Share multiple files in one ACTION_SEND_MULTIPLE. Each file is copied to
-     * `cacheDir/share` under its original (sanitized) name so share targets see
-     * the real filename, then exposed via FileProvider.
-     */
-    private fun shareFiles(files: List<File>) {
+    private fun shareItems(items: List<ListItem>) {
+        val files = items.flatMap {
+            when (it) {
+                is ListItem.FileItem -> listOf(it.file)
+                is ListItem.DirItem -> it.dir.listFiles { f -> !f.name.endsWith(".meta") }?.toList() ?: emptyList()
+            }
+        }
         if (files.isEmpty()) return
         try {
-            val shareDir = File(cacheDir, "share")
+            val shareDir = java.io.File(cacheDir, "share")
             if (!shareDir.exists()) shareDir.mkdirs()
             val authority = "${packageName}.fileprovider"
             val uris = ArrayList<Uri>()
             for (src in files) {
                 if (!src.exists()) continue
-                val metaFile = File(src.parentFile, "${src.name}.meta")
+                val metaFile = java.io.File(src.parentFile, "${src.name}.meta")
                 val displayName = if (metaFile.exists()) {
                     metaFile.readLines().getOrElse(0) { src.name }
                 } else src.name
@@ -393,12 +577,7 @@ class FileListActivity : ComponentActivity() {
         }
     }
 
-    /**
-     * Save multiple files. Each file is queued and the user is prompted for one
-     * destination filename at a time via CreateDocument (SAF has no native
-     * multi-target picker for arbitrary content). The launcher drains the queue.
-     */
-    private fun saveFiles(files: List<File>) {
+    private fun saveItems(files: List<java.io.File>) {
         if (files.isEmpty()) return
         saveQueue.clear()
         pendingSaveSource = null
@@ -412,13 +591,11 @@ class FileListActivity : ComponentActivity() {
         launchNextSave()
     }
 
-    /** Pop the next file off the save queue and prompt for its destination. */
     private fun launchNextSave() {
         if (saveQueue.isEmpty()) return
         val src = saveQueue.removeFirst()
         pendingSaveSource = src
-        // Derive the suggested filename from the .meta sidecar (original name).
-        val metaFile = File(src.parentFile, "${src.name}.meta")
+        val metaFile = java.io.File(src.parentFile, "${src.name}.meta")
         val displayName = if (metaFile.exists()) {
             metaFile.readLines().getOrElse(0) { src.name }
         } else src.name
@@ -431,22 +608,17 @@ class FileListActivity : ComponentActivity() {
         }
     }
 
-    private fun openFileForResave(file: File) {
-        val metaFile = File(file.parentFile, "${file.name}.meta")
+    private fun openFileForResave(file: java.io.File) {
+        val metaFile = java.io.File(file.parentFile, "${file.name}.meta")
         var fileName = file.name
         var fileSize = file.length()
         var crc32 = 0L
-        // Default to "unknown" — a fresh scan always sets this explicitly, and
-        // old .meta files (pre-line-4) lack the flag, so assume unknown rather
-        // than falsely showing a 0==0 "verified" result.
         var crcUnknown = true
         if (metaFile.exists()) {
             val lines = metaFile.readLines()
             fileName = lines.getOrElse(0) { file.name }
             fileSize = lines.getOrElse(1) { file.length().toString() }.toLongOrNull() ?: file.length()
             crc32 = lines.getOrElse(2) { "0" }.toLongOrNull(16) ?: 0L
-            // Line 4 (added later): explicit "crcUnknown" boolean. Absent on
-            // old sidecars → keep the default true.
             crcUnknown = lines.getOrElse(3) { "true" }.trim() != "false"
         }
         val intent = Intent(this, ReceiveDetailActivity::class.java).apply {
@@ -456,20 +628,8 @@ class FileListActivity : ComponentActivity() {
             putExtra("CRC32", crc32)
             putExtra("CRC32_RECEIVED", crc32)
             putExtra("CRC32_UNKNOWN", crcUnknown)
-            // Re-save path: don't copy into received/ again (avoids duplicates).
             putExtra("RESAVE", true)
         }
         startActivity(intent)
     }
-
-    private fun deleteFile(file: File) {
-        val metaFile = File(file.parentFile, "${file.name}.meta")
-        file.delete()
-        metaFile.delete()
-    }
-
-    private fun loadFiles(dir: File): List<File> =
-        if (dir.exists()) dir.listFiles { f -> !f.name.endsWith(".meta") }
-            ?.sortedByDescending { it.lastModified() }?.toList() ?: emptyList()
-        else emptyList()
 }

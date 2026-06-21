@@ -154,7 +154,8 @@ export function ParamsPage({
           value={config.fps}
           onChange={(e) => onChange({ fps: Number(e.target.value) })}
         >
-          <option value={30}>30 FPS（稳定）</option>
+          <option value={20}>20 FPS（大码稳定）</option>
+          <option value={30}>30 FPS</option>
           <option value={45}>45 FPS（推荐）</option>
           <option value={60}>60 FPS（高速）</option>
         </select>
@@ -194,6 +195,17 @@ export function ParamsPage({
           <option value={1}>关闭（每帧 1 个，最稳）</option>
           <option value={4}>开启（每帧 4 个，~4× 吞吐）</option>
         </select>
+      </div>
+
+      <div className="field">
+        <label>
+          <input
+            type="checkbox"
+            checked={config.ditherJitter}
+            onChange={(e) => onChange({ ditherJitter: e.target.checked })}
+          />{" "}
+          亚像素抖动（防摩尔纹）
+        </label>
       </div>
 
       <button

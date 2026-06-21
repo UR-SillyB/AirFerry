@@ -59,6 +59,7 @@ export function PlayPage({ session, config, sessionId, totalBytes }: Props) {
         brightness={config.brightness}
         autoOptimize={config.autoOptimize}
         multiQr={config.multiQr}
+        ditherJitter={config.ditherJitter}
         onStats={setStats}
         onError={(e) => setError(e.message)}
       />

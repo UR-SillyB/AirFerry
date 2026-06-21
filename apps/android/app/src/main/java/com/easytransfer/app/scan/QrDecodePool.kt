@@ -46,7 +46,7 @@ class QrDecodePool(
     )
 
     private val workerCount =
-        (Runtime.getRuntime().availableProcessors() - 2).coerceIn(2, 6)
+        (Runtime.getRuntime().availableProcessors() - 3).coerceIn(2, 6)
     private val queue = ArrayBlockingQueue<YFrame>(workerCount + 2)
     private val freeList = ArrayDeque<ByteArray>()
     private val freeLock = Any()
@@ -169,6 +169,23 @@ class QrDecodePool(
         // fills [0..3]). Avoids allocating per frame and avoids cross-worker
         // contention on a shared array.
         val bboxOut = IntArray(4)
+        // Per-worker batch of decoded symbols awaiting ingest. Decoded payloads
+        // are accumulated here and flushed under a SINGLE acquire of [ingestLock]
+        // once [INGEST_BATCH] symbols pile up. This cuts the lock acquire count
+        // (and the per-symbol fence traffic of a fair ReentrantLock) by ~the batch
+        // factor — the single hottest contention point on the whole pipeline is
+        // the serialized ingest lock that guards the non-thread-safe native
+        // receiver, so reducing how often each worker contends it directly raises
+        // steady-state symbol throughput.
+        //
+        // Correctness of batching: the [onDecoded] callback is self-defending —
+        // it checks [ingestStopped] at its top and sets it the instant a symbol
+        // completes recovery. So once a symbol in a flush marks completion, every
+        // later symbol in the SAME flush (and all future frames) hits that check
+        // and returns immediately. We therefore don't need batch-aware stop logic
+        // in the pool: flushing a batch is exactly equivalent to the old
+        // per-symbol loop, just with one lock-unlock pair instead of N.
+        val pending = ArrayList<PendingSym>(INGEST_BATCH)
         while (running.get()) {
             val frame = try {
                 queue.poll(200, TimeUnit.MILLISECONDS)
@@ -188,11 +205,8 @@ class QrDecodePool(
                     val results = decodeMultiTracked(frame)
                     if (results.isNotEmpty()) {
                         decodedFrames.addAndGet(results.size.toLong())
-                        ingestLock.lock()
-                        try {
-                            for (r in results) onDecoded(r.payload, r.bbox)
-                        } finally {
-                            ingestLock.unlock()
+                        for (r in results) {
+                            pending.add(PendingSym(r.payload, r.bbox))
                         }
                     }
                 } else {
@@ -200,26 +214,48 @@ class QrDecodePool(
                     if (payload != null) {
                         // Single-code path: one decoded symbol per frame.
                         decodedFrames.incrementAndGet()
-                        // Serialize native ingest: one thread in onDecoded at a time.
-                        // The lock (not a single-thread executor) also applies natural
-                        // backpressure so a fast batch decode can't grow an unbounded
-                        // pending-ingest queue.
-                        ingestLock.lock()
-                        try {
-                            onDecoded(payload, bboxOut.copyOf())
-                        } finally {
-                            ingestLock.unlock()
-                        }
+                        // bboxOut is reused next iteration, so snapshot it.
+                        pending.add(PendingSym(payload, bboxOut.copyOf()))
                     }
                 }
+                // Flush the batch under one lock acquire when it fills, or when the
+                // queue has run dry (drain eagerly so latency stays low when the
+                // camera is feeding us slower than we can decode).
+                if (pending.size >= INGEST_BATCH ||
+                    (pending.isNotEmpty() && queue.isEmpty())
+                ) {
+                    ingestLock.lock()
+                    try {
+                        for (s in pending) onDecoded(s.payload, s.bbox)
+                    } finally {
+                        ingestLock.unlock()
+                    }
+                    pending.clear()
+                }
             } catch (e: Throwable) {
-                // Never let a worker die on one bad frame.
+                // Never let a worker die on one bad frame. Drop an un-flushed batch
+                // too so a poisoned symbol can't stall the next iteration.
                 Log.w(TAG, "decode/ingest error", e)
+                pending.clear()
             } finally {
                 recycleBuffer(frame.y)
             }
         }
+        // Worker shutting down: flush anything still pending so we never lose the
+        // tail of a transfer to a pool teardown.
+        if (pending.isNotEmpty()) {
+            ingestLock.lock()
+            try {
+                for (s in pending) onDecoded(s.payload, s.bbox)
+            } finally {
+                ingestLock.unlock()
+            }
+            pending.clear()
+        }
     }
+
+    /** One decoded symbol buffered in a worker, awaiting a batched flush. */
+    private class PendingSym(@JvmField val payload: ByteArray, @JvmField val bbox: IntArray?)
 
     /**
      * Multi-QR decode with per-code ROI tracking.
@@ -555,6 +591,15 @@ class QrDecodePool(
          * path stays locked; this only fires when motion/blur breaks the lock.
          */
         private const val MULTI_FULL_DECODE_EVERY = 3L
+        /**
+         * Max decoded symbols a worker accumulates before flushing them to the
+         * ingest lock in one acquire. Larger → fewer lock acquires (less contention
+         * on the serialized native-receiver path) but more end-to-end latency and a
+         * longer flush under the lock. 4 is a sweet spot: ~4× fewer lock acquires
+         * at single-digit-ms added latency. Fountain-code symbols are independent
+         * so delaying a few is information-lossless.
+         */
+        private const val INGEST_BATCH = 4
         /** Cap the recycled-buffer free-list so it can't grow unbounded. */
         private const val MAX_FREE = 12
     }
