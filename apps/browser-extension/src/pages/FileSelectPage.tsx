@@ -114,46 +114,16 @@ export function FileSelectPage({ files, onSelected }: Props) {
   /** Try to use File System Access API if available, otherwise fallback to file input */
   const handleBrowseClick = useCallback(async () => {
     // Check if File System Access API is available
-    if ('showOpenFilePicker' in window && 'showDirectoryPicker' in window) {
+    if ('showOpenFilePicker' in window) {
       try {
-        // Show a menu to let user choose between file or folder
-        const choice = confirm("确定选择文件，取消选择文件夹")
-
-        if (choice) {
-          // Select files
-          const handles = await (window as any).showOpenFilePicker({ multiple: true })
-          const selectedFiles: File[] = []
-          for (const handle of handles) {
-            const file = await handle.getFile()
-            selectedFiles.push(file)
-          }
-          if (selectedFiles.length > 0) onSelected(selectedFiles)
-        } else {
-          // Select folder
-          const dirHandle = await (window as any).showDirectoryPicker()
-          const selectedFiles: File[] = []
-
-          // Recursively read all files from the directory
-          async function readDir(dirHandle: any, path = "") {
-            for await (const entry of dirHandle.values()) {
-              const entryPath = path ? `${path}/${entry.name}` : entry.name
-              if (entry.kind === 'file') {
-                const file = await entry.getFile()
-                // Preserve relative path
-                Object.defineProperty(file, 'webkitRelativePath', {
-                  value: entryPath,
-                  writable: false,
-                })
-                selectedFiles.push(file)
-              } else if (entry.kind === 'directory') {
-                await readDir(entry, entryPath)
-              }
-            }
-          }
-
-          await readDir(dirHandle)
-          if (selectedFiles.length > 0) onSelected(selectedFiles)
+        // Select files using File System Access API
+        const handles = await (window as any).showOpenFilePicker({ multiple: true })
+        const selectedFiles: File[] = []
+        for (const handle of handles) {
+          const file = await handle.getFile()
+          selectedFiles.push(file)
         }
+        if (selectedFiles.length > 0) onSelected(selectedFiles)
       } catch (err) {
         // User cancelled or error occurred, fallback to input
         if ((err as Error).name !== 'AbortError') {
