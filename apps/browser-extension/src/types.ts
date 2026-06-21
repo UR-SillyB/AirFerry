@@ -108,8 +108,9 @@ export const DEFAULT_CONFIG: TransferConfig = {
   // smaller/harder to scan; the receiver has multi-QR decoding on by default.
   // The UI exposes this as an on/off switch (on → 4, off → 1).
   multiQr: 4,
-  // Sub-pixel dithering for moiré — enabled by default per user test.
-  ditherJitter: true
+  // Sub-pixel dithering for moiré — off by default (can cause flicker on
+  // remote desktop / certain camera setups).
+  ditherJitter: false
 }
 
 /** localStorage key under which the sender's transfer config is persisted. */
