@@ -141,10 +141,10 @@ function createEmscriptenImports(): { imports: WebAssembly.Imports; ctx: Emscrip
 }
 
 /** Instantiate zstd WASM from raw bytes. Shared by loadWasm and initZstdFromBytes. */
-function instantiateZstd(buffer: ArrayBuffer): ZstdWasmModule {
+async function instantiateZstd(buffer: ArrayBuffer): Promise<ZstdWasmModule> {
   const { imports, ctx } = createEmscriptenImports()
 
-  const { instance } = new WebAssembly.Instance(new WebAssembly.Module(buffer), imports)
+  const { instance } = await WebAssembly.instantiate(buffer, imports)
   // Wire the module's own memory into our import stubs.
   ctx.memory = instance.exports.c as WebAssembly.Memory
 
@@ -176,14 +176,17 @@ function loadWasm(): Promise<ZstdWasmModule> {
   // If we have pre-loaded bytes (sent from main thread), use them directly,
   // bypassing chrome.runtime.getURL which may not work reliably in a worker.
   if (preloadedWasmBytes) {
-    try {
-      return Promise.resolve(instantiateZstd(preloadedWasmBytes))
-    } catch (e) {
+    return instantiateZstd(preloadedWasmBytes).catch((e) => {
       console.error("Zstd WASM instantiation from pre-loaded bytes failed:", e)
       // fall through to the fetch path
-    }
+      return fetchAndInstantiate()
+    })
   }
 
+  return fetchAndInstantiate()
+}
+
+function fetchAndInstantiate(): Promise<ZstdWasmModule> {
   // Fallback: fetch via chrome.runtime.getURL (works on main thread)
   const wasmUrl =
     typeof chrome !== "undefined" && chrome.runtime?.getURL

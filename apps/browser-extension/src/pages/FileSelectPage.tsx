@@ -48,7 +48,6 @@ async function walkEntry(entry: FileSystemEntry): Promise<File[]> {
 
 export function FileSelectPage({ files, onSelected }: Props) {
   const inputRef = useRef<HTMLInputElement | null>(null)
-  const folderInputRef = useRef<HTMLInputElement | null>(null)
   const [dragging, setDragging] = useState(false)
 
   const handleFiles = useCallback(
@@ -121,23 +120,9 @@ export function FileSelectPage({ files, onSelected }: Props) {
         onDrop={handleDrop}
         onClick={() => inputRef.current?.click()}
       >
-        {/* File picker (multi-file) */}
         <input
           ref={inputRef}
           type="file"
-          multiple
-          style={{ display: "none" }}
-          onChange={(e) => {
-            handleFiles(e.target.files)
-            e.target.value = ""
-          }}
-        />
-        {/* Hidden folder picker (webkitdirectory), triggered via the folder button. */}
-        <input
-          ref={folderInputRef}
-          type="file"
-          /* @ts-ignore - webkitdirectory is webkit-specific but widely supported */
-          webkitdirectory=""
           multiple
           style={{ display: "none" }}
           onChange={(e) => {
@@ -161,28 +146,6 @@ export function FileSelectPage({ files, onSelected }: Props) {
             "拖拽文件或文件夹到此处，或点击选择"
           )}
         </p>
-        <div className="dropzone-actions" style={{ marginTop: 8, display: "flex", gap: 8, justifyContent: "center" }}>
-          <button
-            className="btn secondary"
-            style={{ fontSize: 12, padding: "4px 12px" }}
-            onClick={(e) => {
-              e.stopPropagation()
-              inputRef.current?.click()
-            }}
-          >
-            选择文件
-          </button>
-          <button
-            className="btn secondary"
-            style={{ fontSize: 12, padding: "4px 12px" }}
-            onClick={(e) => {
-              e.stopPropagation()
-              folderInputRef.current?.click()
-            }}
-          >
-            选择文件夹
-          </button>
-        </div>
       </div>
 
       {files.length > 0 && (
