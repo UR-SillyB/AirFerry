@@ -33,5 +33,9 @@ jni = "0.21"
 [features]
 default = []
 serde = ["dep:serde", "dep:serde_json", "raptorq-core/serde", "qr-protocol/serde"]
-wasm = ["dep:wasm-bindgen"]
+# `wasm` implies `serde`: the wasm bindings (stats_json via serde_json::json!,
+# and the serde-derived ObjectMeta) require it. Express the dependency here so a
+# bare `--features wasm` build works, instead of failing on the compile_error!
+# guard that used to sit next to the call site.
+wasm = ["dep:wasm-bindgen", "serde"]
 jni = []

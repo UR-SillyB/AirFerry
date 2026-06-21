@@ -197,8 +197,6 @@ pub fn encode_qr(frame_bytes: &[u8], out_side: &mut [u32]) -> Result<Vec<u8>, Js
     Ok(matrix.modules.iter().map(|&dark| dark as u8).collect())
 }
 
-// serde_json is only available with the `serde` feature; stats_json uses it.
-// Re-assure the feature graph: stats_json compiles because serde feature is
-// implied by the wasm build in practice. We guard explicitly:
-#[cfg(not(feature = "serde"))]
-compile_error!("transfer-engine 'wasm' feature requires 'serde' (add --features serde,wasm)");
+// serde_json is required by stats_json (serde_json::json!) and by the
+// serde-derived ObjectMeta re-exported here. The `wasm` feature implies
+// `serde` (see Cargo.toml), so no compile_error! guard is needed.

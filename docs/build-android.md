@@ -32,43 +32,60 @@ cat > local.properties <<EOF
 sdk.dir=/path/to/android-sdk
 EOF
 
-# 构建 Debug APK
+# 构建 Debug APK（debug keystore 签名，调试用）
 ./gradlew :app:assembleDebug
 
-# 构建 Release APK
-# Release 块已用 debug keystore 签名（signingConfig = debug），产出可直接安装的 APK
+# 构建 Release APK（见下方签名配置）
 ./gradlew :app:assembleRelease
 ```
 
-产物：`app/build/outputs/apk/debug/app-debug.apk`
-（Release：`app/build/outputs/apk/dist/app-release.apk`）
+产物：
+- Debug：`app/build/outputs/apk/debug/app-debug.apk`
+- Release：`app/build/outputs/apk/release/app-release.apk`
 
 ### 关于 Release 签名
 
-Release 构建目前使用 **debug keystore** 签名（`app/build.gradle.kts` 中
-`signingConfig = signingConfigs.getByName("debug")`）。这样产出的 APK 可直接通过
-`adb install` 安装，无需额外的签名步骤，适合当前的自托管分发（不上架 Play Store）。
-
-debug keystore 位于 `~/.android/debug.keystore`，由 Android SDK 首次使用时自动生成。
-若要发布到应用商店，应替换为专用的 release 签名配置：
+Release 构建的签名配置由 `apps/scanner/keystore.properties`（git-ignored）驱动：
 
 ```kotlin
-// app/build.gradle.kts — 发布到商店时改用正式签名
+// app/build.gradle.kts
+val keystoreProperties = Properties().apply {
+    val f = rootProject.file("keystore.properties")  // apps/scanner/keystore.properties
+    if (f.exists()) { f.inputStream().use { load(it) } }
+}
 signingConfigs {
     create("release") {
-        storeFile = file("release.keystore")
-        storePassword = System.getenv("KEYSTORE_PASSWORD")
-        keyAlias = System.getenv("KEY_ALIAS")
-        keyPassword = System.getenv("KEY_PASSWORD")
+        if (!keystoreProperties.isEmpty) {
+            storeFile     = rootProject.file(keystoreProperties.getProperty("storeFile"))
+            storePassword = keystoreProperties.getProperty("storePassword")
+            keyAlias      = keystoreProperties.getProperty("keyAlias")
+            keyPassword   = keystoreProperties.getProperty("keyPassword")
+        }
     }
 }
 buildTypes {
     release {
-        signingConfig = signingConfigs.getByName("release")
-        // ...
+        // 有 keystore.properties → 用 release keystore；否则回退 debug（保证 CI 无密钥也能产出 APK）
+        signingConfig = if (!keystoreProperties.isEmpty)
+            signingConfigs.getByName("release")
+        else signingConfigs.getByName("debug")
     }
 }
 ```
+
+`keystore.properties`（每个构建环境各一份，git-ignored）指向 `dist/` 下的 release keystore：
+
+```properties
+# apps/scanner/keystore.properties
+storeFile=../../dist/airferry-release.keystore
+storePassword=airferry
+keyAlias=airferry
+keyPassword=airferry
+```
+
+> keystore 路径相对于 Gradle `rootProject`（即 `apps/scanner/`），解析到 `<repo>/dist/airferry-release.keystore`。`dist/` 与 `*.keystore` 均在 `.gitignore` 中，密钥随 release 产物一起放在 `dist/`、不入 git。
+>
+> 仓库自带的默认口令（`airferry`）仅供自托管分发；正式上架 Play Store 等商店时，请生成强口令的专用 keystore 并替换此文件。无此文件时构建自动回退 debug 签名，不会硬失败。
 
 ## 安装到设备
 
@@ -150,10 +167,13 @@ apps/scanner/
         │   │   ├── QrStreamAnalyzer.kt   # CameraX 分析器（生产者）
         │   │   ├── QrDecodePool.kt       # 并行解码池 + 串行 JNI 摄入
         │   │   ├── HighSpeedCaptureController.kt  # 实验性高速录制→批量解码
-        │   │   └── ReceiverSessionManager.kt
+        │   │   ├── ReceiverSessionManager.kt
+        │   │   ├── BundleParser.kt       # ETBUNDL1 多文件容器解析
+        │   │   └── FileNameUtil.kt       # 接收文件命名（去重 / 目录）
         │   └── ui/
         │       ├── ScanActivity.kt       # 扫描页
         │       ├── ReceiveDetailActivity.kt
+        │       ├── ReceiveBundleActivity.kt  # 多文件接收结果页
         │       ├── FileListActivity.kt
         │       └── SettingsActivity.kt   # 设置（含实验性高速开关）
         ├── jniLibs/arm64-v8a/    # Rust .so（cargo-ndk 产物）

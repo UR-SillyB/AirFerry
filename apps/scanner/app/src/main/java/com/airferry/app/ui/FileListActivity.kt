@@ -612,24 +612,44 @@ class FileListActivity : ComponentActivity() {
         val metaFile = java.io.File(file.parentFile, "${file.name}.meta")
         var fileName = file.name
         var fileSize = file.length()
-        var crc32 = 0L
+        var expectedCrc = 0L
         var crcUnknown = true
         if (metaFile.exists()) {
             val lines = metaFile.readLines()
             fileName = lines.getOrElse(0) { file.name }
             fileSize = lines.getOrElse(1) { file.length().toString() }.toLongOrNull() ?: file.length()
-            crc32 = lines.getOrElse(2) { "0" }.toLongOrNull(16) ?: 0L
+            expectedCrc = lines.getOrElse(2) { "0" }.toLongOrNull(16) ?: 0L
             crcUnknown = lines.getOrElse(3) { "true" }.trim() != "false"
         }
-        val intent = Intent(this, ReceiveDetailActivity::class.java).apply {
-            putExtra("FILE_PATH", file.absolutePath)
-            putExtra("FILE_NAME", fileName)
-            putExtra("FILE_SIZE", fileSize)
-            putExtra("CRC32", crc32)
-            putExtra("CRC32_RECEIVED", crc32)
-            putExtra("CRC32_UNKNOWN", crcUnknown)
-            putExtra("RESAVE", true)
-        }
-        startActivity(intent)
+        // Off-load the disk read + CRC to a background thread so a multi-MB file
+        // doesn't freeze the UI on click. We compute the ACTUAL CRC of the bytes
+        // on disk (not the expected value) so a corrupted/partially-overwritten
+        // file surfaces as a real mismatch in ReceiveDetailActivity, instead of
+        // the old behaviour of setting received == expected (which always read
+        // "校验通过" even for a damaged file).
+        val finalFileName = fileName
+        val finalFileSize = fileSize
+        val finalExpectedCrc = expectedCrc
+        val finalCrcUnknown = crcUnknown
+        Toast.makeText(this, "正在校验…", Toast.LENGTH_SHORT).show()
+        Thread {
+            val receivedCrc = try {
+                file.readBytes().let { ScanActivity.crc32OfBytes(it) }
+            } catch (_: Exception) {
+                // If the file can't be read it's effectively unavailable; fall
+                // back to a sentinel that won't match any real expected CRC.
+                -1L
+            }
+            val intent = Intent(this, ReceiveDetailActivity::class.java).apply {
+                putExtra("FILE_PATH", file.absolutePath)
+                putExtra("FILE_NAME", finalFileName)
+                putExtra("FILE_SIZE", finalFileSize)
+                putExtra("CRC32", finalExpectedCrc)
+                putExtra("CRC32_RECEIVED", receivedCrc)
+                putExtra("CRC32_UNKNOWN", finalCrcUnknown)
+                putExtra("RESAVE", true)
+            }
+            runOnUiThread { startActivity(intent) }
+        }.start()
     }
 }

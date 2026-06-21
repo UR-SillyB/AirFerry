@@ -4,6 +4,11 @@
 //! then feed the real wire stream (descriptor + data frames) through
 //! Frame::to_bytes -> Frame::from_bytes -> ingest.
 
+// This test deliberately exercises the deprecated heuristic to reproduce a
+// historical bug path. The deprecation is intentional for everyone else; here
+// we silence it so the diagnostic stays buildable.
+#![allow(deprecated)]
+
 use qr_protocol::{Frame, SessionId};
 use raptorq_core::Config;
 use transfer_engine::descriptor::FileMeta;

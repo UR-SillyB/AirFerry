@@ -9,11 +9,14 @@ pkg/
 
 # Node / pnpm
 node_modules/
-dist/
 build/
 .pnpm-store/
 *.log
 .DS_Store
+
+# Build output / release artifacts (published as GitHub Release assets,
+# never checked into git). See docs/build-browser.md.
+dist/
 
 # Plasmo extension build output + generated typings/cache (both repo-root and
 # per-package). These are regenerable build artifacts, never source.
@@ -26,6 +29,7 @@ apps/scanner/.gradle/
 apps/scanner/build/
 apps/scanner/app/build/
 apps/scanner/local.properties
+apps/scanner/keystore.properties
 apps/scanner/app/src/main/jniLibs/
 apps/scanner/app/.cxx/
 apps/scanner/captures/
@@ -44,8 +48,8 @@ apps/scanner/captures/
 Thumbs.db
 .DS_Store
 
-# Build artifacts (published as GitHub release assets, not in git)
-dist/
+# Published release artifacts (built via ./scripts/build-all.sh release;
+# distributed through GitHub Releases, never checked into git).
 release/
 
 # CRX signing private key (do not commit)

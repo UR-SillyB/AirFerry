@@ -65,14 +65,14 @@ manifest.icons = icons;
 if (isMV2) {
   if (manifest.browser_action) {
     manifest.browser_action.default_icon = icons;
-    manifest.browser_action.default_title = "AirFerry - 离线文件传输";
+    manifest.browser_action.default_title = "AirFerry - 无网文件传输";
   }
   if (manifest.action) delete manifest.action;
 } else {
   // MV3: ensure action.default_icon is set
   if (manifest.action) {
     manifest.action.default_icon = icons;
-    manifest.action.default_title = "AirFerry - 离线文件传输";
+    manifest.action.default_title = "AirFerry - 无网文件传输";
   }
 }
 
@@ -105,7 +105,7 @@ for (const f of htmlFiles) {
   if (html.includes("<title>undefined</title>")) {
     html = html.replace(
       /<title>undefined<\/title>/g,
-      "<title>AirFerry · 文件传输</title>"
+      "<title>AirFerry · 无网文件传输</title>"
     );
     fs.writeFileSync(fp, html);
     console.log(`  ✓ Patched <title> in ${f}`);

@@ -5,7 +5,7 @@
  * three-algorithm compression → CRC32 → content fingerprint → session-id
  * derivation) OFF the main thread, so the UI stays responsive while the sender
  * processes the chosen file(s). Without this, the zstd/lzma WASM compressors
- * block the main thread for seconds (level-22 zstd / level-9 xz on a few MB),
+ * block the main thread for seconds (level-1 zstd / level-9 xz on a few MB),
  * freezing all rendering — including any "compressing…" spinner — so the page
  * looks frozen. In a dedicated worker the main thread is free to paint a
  * progress overlay throughout.

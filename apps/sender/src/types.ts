@@ -20,7 +20,8 @@ export interface TransferConfig {
   /**
    * Sub-pixel dithering: randomly shift each QR code by ±1px per frame to
    * break moiré patterns between the QR module grid and the camera sensor.
-   * Enabled by default — negligible visual impact, zero risk to decode.
+   * Off by default — can cause flicker on remote-desktop / certain camera
+   * setups. Negligible ratio impact when on, zero risk to decode.
    */
   ditherJitter: boolean
 }

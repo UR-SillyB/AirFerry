@@ -6,7 +6,7 @@
 
 ```rust
 // 配置
-pub struct Config { pub symbol_size: u32 }  // 默认 1024（浏览器端传入 512）
+pub struct Config { pub symbol_size: u32 }  // 默认 1024；浏览器端按速度预设传入（默认 1400）
 pub const DEFAULT_SYMBOL_SIZE: u32 = 1024;
 
 // 编码器
@@ -136,6 +136,8 @@ class SenderSessionWasm {
 function encode_qr(frameBytes: Uint8Array, outSide: Uint32Array): Uint8Array
 // 返回扁平模块网格（1=深色, 0=浅色），outSide[0] = 边长
 ```
+
+> **构造参数来源**：`compressedPayload` / `sessionId` / `crc32` / `compression` 并非主线程直接计算，而是由 `src/workers/compress.worker.ts` 在 Web Worker 里离线产出（避免同步 WASM 压缩卡住 UI）：读文件 →（≥2 文件）`bundle.ts` 打包成 ETBUNDL1 → `compress.ts` 三算法选优 → `crc32.ts` 算 CRC → `session.ts` 派生会话 ID（FNV-1a 128；打包时身份基于整个 bundle）。单文件不打包，保持向后兼容。多文件打包格式见 [protocol.md](protocol.md#多文件打包-bundle)。
 
 ## JNI 绑定（Android）
 

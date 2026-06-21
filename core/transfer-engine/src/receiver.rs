@@ -407,13 +407,18 @@ impl ReceiverSession {
 
 /// Derive a single-block `ObjectMeta` from totals.
 ///
-/// **Deprecated / retained only for JNI ABI compatibility and tests.** This
-/// heuristic cannot reproduce the real RaptorQ per-block partitioning
-/// (`partition()` in RFC 6330 §4.4.1.2) from aggregate totals alone, so a
-/// decoder built from it decodes multi-block objects incorrectly. The live
-/// receiver path now buffers data frames until a descriptor frame supplies the
-/// authoritative OTI (see [`ReceiverSession::new_pending`]). Callers should
-/// treat the returned metadata as a *placeholder* and never feed it symbols.
+/// **Deprecated / retained only for diagnostic tests.** This heuristic cannot
+/// reproduce the real RaptorQ per-block partitioning (`partition()` in RFC 6330
+/// §4.4.1.2) from aggregate totals alone, so a decoder built from it decodes
+/// multi-block objects incorrectly. The live receiver path now buffers data
+/// frames until a descriptor frame supplies the authoritative OTI (see
+/// [`ReceiverSession::new_pending`]); the JNI layer no longer calls this
+/// (`receiverCreate` uses cache-only bootstrap). Callers should treat the
+/// returned metadata as a *placeholder* and never feed it symbols.
+#[deprecated(
+    since = "1.0.0",
+    note = "heuristic OTI that mis-decodes multi-block objects; use new_pending + a descriptor frame instead"
+)]
 pub fn derive_meta_from_totals(total_blocks: u32, total_symbols: u32, symbol_size: u32) -> ObjectMeta {
     use raptorq::ObjectTransmissionInformation;
     // Heuristic: place all symbols in the number of blocks reported, splitting

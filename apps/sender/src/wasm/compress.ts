@@ -9,11 +9,14 @@
  *
  * ## Three-way algorithm selection (pick the smallest)
  *
- * All algorithms run at their maximum level and the smallest result wins:
+ * All candidates run and the smallest result wins:
  *
  *   - **raw**  — the original bytes, uncompressed.
- *   - **zstd** — level 22 (the maximum zstd level).
- *   - **xz**   — level 9 (the maximum LZMA2 preset).
+ *   - **zstd** — level 1 (fast; tuned so compression start is quick — see
+ *                `ZSTD_LEVEL`). The ratio loss vs max level is negligible for
+ *                the large-but-already-binary payloads (media, archives) this
+ *                channel typically carries.
+ *   - **xz**   — level 9 (the maximum LZMA2 preset; slowest, best ratio).
  *
  * Whichever produces the fewest bytes is shipped. Already-compressed files
  * (jpeg, mp4, zip, …) thus naturally fall back to raw, while text-heavy files
@@ -21,9 +24,10 @@
  *
  * **Time-saving early exit:** xz (LZMA2 at level 9) is much slower than zstd.
  * To avoid spending it on data that won't benefit, zstd is run first; if its
- * result is ≥ 95% of the original size the file is treated as already
- * compressed and xz is skipped. The final comparison then picks the smallest
- * among whichever candidates actually ran (2 or 3). The chosen algorithm tag
+ * result is ≥ 70% of the original size the file is treated as already
+ * compressed (or not compressible enough to justify xz) and xz is skipped. The
+ * final comparison then picks the smallest among whichever candidates actually
+ * ran (2 or 3). The chosen algorithm tag
  * is carried in the session descriptor (protocol v3), telling the receiver
  * which decompressor to run after RaptorQ recovery.
  *
@@ -200,7 +204,7 @@ async function getWasm(): Promise<ZstdWasmModule> {
 }
 
 /**
- * Compress `data` with zstd at max level using the WASM module.
+ * Compress `data` with zstd at [ZSTD_LEVEL] (1, the fast level) using the WASM module.
  */
 function compressWithWasm(wasm: ZstdWasmModule, data: Uint8Array): Uint8Array {
   const srcSize = data.byteLength
@@ -255,10 +259,10 @@ async function compressXz(data: Uint8Array): Promise<Uint8Array> {
 /**
  * Pick the smallest payload among raw / zstd / xz.
  *
- * Strategy (see module docs): all algorithms run at their maximum level;
- * whichever produced the fewest bytes is shipped. To save time, xz (the
- * slowest) is skipped when zstd's result is ≥ 95% of the original — a strong
- * signal the file is already compressed and xz won't help. The final pick is
+ * Strategy (see module docs): all candidates run; whichever produced the
+ * fewest bytes is shipped. To save time, xz (the slowest) is skipped when
+ * zstd's result is ≥ 70% of the original — a strong signal the file is already
+ * compressed (or not compressible enough to justify xz). The final pick is
  * then the minimum over whichever candidates actually ran (2 or 3).
  *
  * Always returns a transmissible payload, falling back to the raw bytes on any
@@ -311,8 +315,9 @@ export async function preparePayload(
   const zstdSize = candidates.length > 1 ? candidates[1].payload.length : originalSize
 
   // --- time-saving early exit ---
-  // zstd barely shrank the file (≥ 95% of original) → it's already compressed.
-  // Skip the expensive xz pass; pick the smaller of raw / zstd only.
+  // zstd barely shrank the file (≥ 70% of original) → it's already compressed
+  // (or not compressible enough to justify xz). Skip the expensive xz pass;
+  // pick the smaller of raw / zstd only.
   if (zstdSize / originalSize >= ZSTD_ALREADY_COMPRESSED_RATIO) {
     return pickSmallest(candidates, originalSize)
   }

@@ -103,8 +103,10 @@ cargo ndk -t arm64-v8a -o apps/scanner/app/src/main/jniLibs \
 
 # 5. 构建 Android APK
 cd apps/scanner
-./gradlew :app:assembleDebug
+./gradlew :app:assembleDebug    # Release 签名需 keystore.properties，见 build-android.md
 ```
+
+> 更省事的方式：直接在仓库根目录跑 `./scripts/build-all.sh release`，一步完成 WASM + 浏览器扩展 + APK 构建并打包（含 crx/xpi 签名）到 `dist/`。
 
 ## 环境变量汇总
 
@@ -138,3 +140,7 @@ export PATH="$NDK_HOME/toolchains/llvm/prebuilt/$(uname -m)-linux-android/bin:$P
 ### ZXing-C++ 首次构建缓慢
 
 CMake 首次会从 GitHub 克隆 zxing-cpp 并编译（约 1–2 分钟）。后续构建使用缓存。
+
+### Release APK 签名：找不到 keystore / 签名配置
+
+`assembleRelease` 的签名由 `apps/scanner/keystore.properties`（git-ignored）驱动。无此文件时自动回退 debug 签名（可装，但不是 release 证书）。要发正式签名包，按 [build-android.md](build-android.md#关于-release-签名) 创建 `keystore.properties` 并指向 release keystore。
