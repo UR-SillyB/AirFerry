@@ -138,7 +138,7 @@ export function QrStream({
         /* ignore */
       }
     }
-  }, [session, autoOptimize, brightness, multiQr, onStats, onError])
+  }, [session, multiQr, onStats, onError])
 
   // Apply brightness/contrast optimization at the canvas element level. This is
   // a constant for a given (brightness, autoOptimize) combination, so set it
