@@ -189,11 +189,12 @@ export function ParamsPage({
       <div className="field">
         <label>同屏二维码数（多码加速）</label>
         <select
-          value={config.multiQr > 1 ? 4 : 1}
-          onChange={(e) => onChange({ multiQr: Number(e.target.value) > 1 ? 4 : 1 })}
+          value={config.multiQr}
+          onChange={(e) => onChange({ multiQr: Number(e.target.value) })}
         >
           <option value={1}>关闭（每帧 1 个，最稳）</option>
-          <option value={4}>开启（每帧 4 个，~4× 吞吐）</option>
+          <option value={4}>4 码（2×2，~4× 吞吐）</option>
+          <option value={9}>9 码（3×3，~9× 吞吐）🔥</option>
         </select>
       </div>
 

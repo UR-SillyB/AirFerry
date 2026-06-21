@@ -97,7 +97,7 @@ export function QrStream({
 
     // Layout: single → fills canvas; multi → grid (2 → 1×2, 4 → 2×2, else row).
     const n = matrices.length
-    const cols = n === 2 ? 2 : n === 4 ? 2 : n
+    const cols = n === 2 ? 2 : n === 4 ? 2 : n === 9 ? 3 : n
     const rows = Math.ceil(n / cols)
     const cssSize = canvas.clientWidth || 480 // Fallback to 480 if clientWidth is 0
     const dpr = window.devicePixelRatio || 1
@@ -255,10 +255,6 @@ function drawMatrix(
   const drawSize = modulePx * quiet
   // Center the code within the cell.
   const offset = Math.floor((cellPx - drawSize) / 2)
-
-  // White quiet-zone background for this cell.
-  ctx.fillStyle = "#ffffff"
-  ctx.fillRect(ox, oy, cellPx, cellPx)
 
   // Obtain a reusable ImageData for this drawSize.
   let imgData = imgDataCache.get(drawSize)
