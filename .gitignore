@@ -17,18 +17,18 @@ build/
 
 # Plasmo extension build output + generated typings/cache (both repo-root and
 # per-package). These are regenerable build artifacts, never source.
-apps/browser-extension/build/
-apps/browser-extension/.plasmo/
+apps/sender/build/
+apps/sender/.plasmo/
 .plasmo/
 
 # Android / Gradle
-apps/android/.gradle/
-apps/android/build/
-apps/android/app/build/
-apps/android/local.properties
-apps/android/app/src/main/jniLibs/
-apps/android/app/.cxx/
-apps/android/captures/
+apps/scanner/.gradle/
+apps/scanner/build/
+apps/scanner/app/build/
+apps/scanner/local.properties
+apps/scanner/app/src/main/jniLibs/
+apps/scanner/app/.cxx/
+apps/scanner/captures/
 *.apk
 *.aab
 *.keystore
@@ -44,7 +44,8 @@ apps/android/captures/
 Thumbs.db
 .DS_Store
 
-# Release packaging (artifacts published as GitHub release assets, not in git)
+# Build artifacts (published as GitHub release assets, not in git)
+dist/
 release/
 
 # CRX signing private key (do not commit)

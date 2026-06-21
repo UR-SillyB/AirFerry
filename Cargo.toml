@@ -1,9 +1,9 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/raptorq-core",
-    "crates/qr-protocol",
-    "crates/transfer-engine",
+    "core/raptorq-core",
+    "core/qr-protocol",
+    "core/transfer-engine",
 ]
 
 [workspace.package]
@@ -11,14 +11,14 @@ version = "1.1.0"
 edition = "2021"
 rust-version = "1.75"
 license = "MIT"
-repository = "https://github.com/UR-SillyB/EasyTransfer"
-description = "Fully offline optical file transfer: browser-extension sender <-> Android receiver via QR video stream."
+repository = "https://github.com/UR-SillyB/AirFerry"
+description = "Fully offline optical file transfer: browser sender <-> Android scanner via QR video stream."
 
 [workspace.dependencies]
 # Internal crates
-raptorq-core = { path = "crates/raptorq-core" }
-qr-protocol = { path = "crates/qr-protocol" }
-transfer-engine = { path = "crates/transfer-engine" }
+raptorq-core = { path = "core/raptorq-core" }
+qr-protocol = { path = "core/qr-protocol" }
+transfer-engine = { path = "core/transfer-engine" }
 
 # Common shared deps (pinned for reproducible builds)
 crc32fast = "1.4"

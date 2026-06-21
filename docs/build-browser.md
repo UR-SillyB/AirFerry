@@ -9,18 +9,18 @@
 ## 构建 WASM 核心
 
 ```bash
-cd apps/browser-extension
+cd apps/sender
 npm run wasm
 ```
 
-此命令编译 `crates/transfer-engine` 为 WebAssembly 并输出到 `wasm-pkg/`。
+此命令编译 `core/transfer-engine` 为 WebAssembly 并输出到 `wasm-pkg/`。
 
 ## 构建扩展
 
 ### 全部目标（推荐）
 
 ```bash
-cd apps/browser-extension
+cd apps/sender
 npm run build
 ```
 
@@ -49,7 +49,7 @@ npm run build:firefox-mv2   # Firefox MV2
 - MV2：移除无效的 `action` 字段，保留 `browser_action`，并补全 `default_title`
 - MV3：补全 `action.default_title`
 - MV2：CSP 改为 `wasm-eval`（MV3 的 `wasm-unsafe-eval` 在 MV2 中不支持）
-- Firefox：添加 `browser_specific_settings.gecko.id`（`easytransfer@easytransfer.app`）
+- Firefox：添加 `browser_specific_settings.gecko.id`（`airferry@airferry.app`）
 - 修补 HTML `<title>` 标签为「易传 · 文件传输」
 
 ### 打包发布产物
@@ -60,14 +60,14 @@ npm run build:firefox-mv2   # Firefox MV2
 # Chrome / Edge：用 Chrome + 私钥生成签名 CRX（Cr24 格式）
 "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
   --pack-extension=build/chrome-mv3-prod \
-  --pack-extension-key=release/easytransfer-extension.pem
+  --pack-extension-key=dist/airferry-extension.pem
 # 产出 build/chrome-mv3-prod.crx
 
 # Firefox：直接 zip 打包为 XPI
-cd build/firefox-mv3-prod && zip -r -X ../easytransfer-firefox-mv3-v1.0.0.xpi .
+cd build/firefox-mv3-prod && zip -r -X ../airferry-firefox-mv3-v1.0.0.xpi .
 ```
 
-> 私钥 `release/easytransfer-extension.pem` 为 PKCS#8 格式，决定扩展 ID。同一私钥打包 MV2/MV3 会得到相同的扩展 ID（`nboajkjpabbekenmadidokmefholfmfk`），便于升级替换。
+> 私钥 `dist/airferry-extension.pem` 为 PKCS#8 格式，决定扩展 ID。同一私钥打包 MV2/MV3 会得到相同的扩展 ID（`nboajkjpabbekenmadidokmefholfmfk`），便于升级替换。
 
 ## 开发模式
 
@@ -101,7 +101,7 @@ Plasmo 启动 HMR 开发服务器，自动重载扩展。
 ## 项目结构
 
 ```
-apps/browser-extension/
+apps/sender/
 ├── package.json
 ├── tsconfig.json
 ├── scripts/

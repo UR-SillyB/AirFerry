@@ -2,7 +2,7 @@
 
 ## RFC 6330 概述
 
-EasyTransfer 采用 [RFC 6330](https://datatracker.ietf.org/doc/html/rfc6330) 定义的 **RaptorQ 前向纠错（FEC）方案**（FEC Encoding ID = 6）。RaptorQ 是一种喷泉码（fountain code），可将任意大小的对象编码为无限多的修复符号，接收端只需收集略多于 K 的符号即可解码。
+AirFerry 采用 [RFC 6330](https://datatracker.ietf.org/doc/html/rfc6330) 定义的 **RaptorQ 前向纠错（FEC）方案**（FEC Encoding ID = 6）。RaptorQ 是一种喷泉码（fountain code），可将任意大小的对象编码为无限多的修复符号，接收端只需收集略多于 K 的符号即可解码。
 
 ## 关键参数
 

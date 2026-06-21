@@ -2,7 +2,7 @@
 
 ## 概述
 
-EasyTransfer 的开发需要以下工具链：Rust（核心库）、Node.js（浏览器扩展）、JDK + Android SDK/NDK（Android App）。
+AirFerry 的开发需要以下工具链：Rust（核心库）、Node.js（浏览器扩展）、JDK + Android SDK/NDK（Android App）。
 
 ## 1. Rust 工具链
 
@@ -82,14 +82,14 @@ export JAVA_HOME=$(/usr/libexec/java_home -v 17)
 
 ```bash
 # 克隆项目
-git clone <repo-url> EasyTransfer
-cd EasyTransfer
+git clone <repo-url> AirFerry
+cd AirFerry
 
 # 1. 测试核心库（全部单元 + 集成测试，跨 raptorq-core / qr-protocol / transfer-engine）
 cargo test
 
 # 2. 构建 WASM 核心
-cd apps/browser-extension
+cd apps/sender
 npm install
 npm run wasm
 
@@ -98,11 +98,11 @@ npm run build
 
 # 4. 构建 Rust Android 库
 cd ../..
-cargo ndk -t arm64-v8a -o apps/android/app/src/main/jniLibs \
+cargo ndk -t arm64-v8a -o apps/scanner/app/src/main/jniLibs \
   build -p transfer-engine --features jni --release
 
 # 5. 构建 Android APK
-cd apps/android
+cd apps/scanner
 ./gradlew :app:assembleDebug
 ```
 

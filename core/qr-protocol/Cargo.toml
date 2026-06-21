@@ -1,0 +1,26 @@
+[package]
+name = "qr-protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "QR frame format, chunking, compression and session logic for AirFerry."
+
+[dependencies]
+raptorq-core.workspace = true
+crc32fast.workspace = true
+thiserror.workspace = true
+serde = { workspace = true, optional = true }
+# zstd is only available on native/android targets; on wasm32 the C library
+# does not compile, so compression is performed on the JS side instead.
+qrcode = { version = "0.14", default-features = false }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+zstd = "0.13"
+# XZ/LZMA2 — extreme compression (native/Android only). The C library does not
+# compile on wasm32, and the browser compresses in JS anyway, so it stays gated.
+xz2 = "0.1"
+
+[features]
+default = []
+serde = ["dep:serde", "raptorq-core/serde"]

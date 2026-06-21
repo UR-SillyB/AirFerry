@@ -1,0 +1,606 @@
+package com.airferry.app.scan
+
+import android.util.Log
+import java.nio.ByteBuffer
+import java.util.concurrent.ArrayBlockingQueue
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.locks.ReentrantLock
+
+/**
+ * Decouples camera capture from QR decoding.
+ *
+ * The CameraX analyzer (the *producer*) copies each frame's Y (luminance) plane
+ * into a pooled buffer, enqueues it, and immediately closes the `ImageProxy`. A
+ * pool of N worker threads drains the queue and runs ZXing on each frame (on a
+ * center ROI first, see [decode]). Every decoded payload is handed to
+ * [onDecoded] under a single [ingestLock], so the **non-thread-safe** native
+ * receiver (the `transfer_engine` JNI handle) is only ever touched by one thread
+ * at a time — ZXing decode runs fully parallel, native ingest stays serialized.
+ *
+ * Out-of-order delivery is fine: RaptorQ symbols are keyed by `(sbn, esi)`, so
+ * dropping or reordering frames never corrupts recovery — it only costs time.
+ *
+ * @param onDecoded invoked (serialized) with each decoded QR payload.
+ */
+class QrDecodePool(
+    private val onDecoded: (ByteArray, IntArray?) -> Unit,
+    /**
+     * Multi-QR mode: when true (the default + only mode ScanActivity uses),
+     * each frame is decoded with `ReadBarcodes` (plural) and *every* valid
+     * code's payload is ingested (not just the first), so a sender tiling N
+     * codes per frame yields ~N symbols/tick. The single-code tracked-ROI path
+     * (`decode`) is retained for completeness but no longer selected by the UI.
+     */
+    private val multiMode: Boolean = true,
+) {
+    /** A captured luminance frame; [y] is a pooled buffer (recycled after use). */
+    private class YFrame(
+        @JvmField val y: ByteArray,
+        @JvmField val width: Int,
+        @JvmField val height: Int,
+        @JvmField val rowStride: Int,
+        /** Number of valid bytes in [y] (may be < y.size for a recycled buffer). */
+        @JvmField val len: Int
+    )
+
+    private val workerCount =
+        (Runtime.getRuntime().availableProcessors() - 3).coerceIn(2, 6)
+    private val queue = ArrayBlockingQueue<YFrame>(workerCount + 2)
+    private val freeList = ArrayDeque<ByteArray>()
+    private val freeLock = Any()
+    private val ingestLock = ReentrantLock(true) // fair: keep ingest roughly in arrival order
+    private val running = AtomicBoolean(false)
+    private val workers = ArrayList<Thread>()
+
+    // Metrics (read by the UI for live diagnostics).
+    private val capturedFrames = AtomicLong(0)
+    private val droppedFrames = AtomicLong(0)
+    /** Count of decoded *symbols* (QR codes), not frames. A multi-QR frame that
+     *  yields N codes increments this by N, so the UI's "解码速率" reads as
+     *  symbols/sec and scales correctly with the on-screen code count. */
+    private val decodedFrames = AtomicLong(0)
+    /** Consecutive ROI misses, used to throttle full-frame fallback decodes. */
+    private val roiMiss = AtomicLong(0)
+
+    /**
+     * Last-known QR bounding box in full-frame pixel coords {minX, minY, maxX,
+     * maxY}, or null before the first lock / after a miss. Read/written by
+     * multiple workers; a stale read is harmless (worst case: one frame uses a
+     * slightly old position), so a plain volatile reference suffices. The array
+     * itself is treated as immutable after publication.
+     */
+    @Volatile
+    private var lastQrBbox: IntArray? = null
+
+    /**
+     * Multi-QR tracking: the last known bboxes of each on-screen code (a packed
+     * IntArray of 4×N ints: {minX,minY,maxX,maxY} per code). null before the
+     * first full-frame lock. Published as a single immutable reference so a
+     * worker reading a stale copy merely re-scans one extra frame harmlessly.
+     */
+    @Volatile
+    private var multiTrackedBboxes: IntArray? = null
+    /**
+     * Fixed number of on-screen codes, captured from the first full-frame lock.
+     * Once locked, the tracker ALWAYS maintains this many slots: a code that
+     * fails to decode in one frame keeps its last-known bbox (the native side
+     * expands the window by TRACK_MARGIN next frame, tolerating motion), instead
+     * of being dropped from the tracking list and permanently lost until a full
+     * re-lock. This fixes the partial-decode shrinking bug.
+     */
+    @Volatile
+    private var multiLockedCount: Int = 0
+    /** Consecutive tracked-region misses in multi mode → trigger re-lock. */
+    private val multiMiss = AtomicLong(0)
+
+    /**
+     * Analysis-stream sensor rotation in degrees (0/90/180/270), published by
+     * [QrStreamAnalyzer] every frame. The UI overlay needs it to map analysis-
+     * stream pixel bboxes (e.g. 1920×1080 landscape sensor) into the portrait
+     * PreviewView space. Stable for a camera bind, so last-write-wins is fine.
+     */
+    @Volatile
+    private var analysisRotation: Int = 0
+    /** Analysis-stream width/height in pixels (the sensor's actual delivered
+     *  geometry, e.g. 1920×1080). Published with each submit(). */
+    @Volatile
+    private var analysisWidth: Int = 0
+    @Volatile
+    private var analysisHeight: Int = 0
+
+    /** Called by [QrStreamAnalyzer] to publish the per-frame sensor rotation. */
+    fun setAnalysisRotation(deg: Int) { analysisRotation = deg }
+    /** Current analysis-stream rotation (degrees). */
+    fun snapshotAnalysisRotation(): Int = analysisRotation
+    /** Current analysis-stream {width, height}. */
+    fun snapshotAnalysisSize(): Pair<Int, Int> = analysisWidth to analysisHeight
+
+    fun start() {
+        if (running.getAndSet(true)) return
+        for (i in 0 until workerCount) {
+            val t = Thread({ workerLoop() }, "qr-decode-$i").apply { isDaemon = true }
+            workers.add(t)
+            t.start()
+        }
+        Log.i(TAG, "decode pool started: $workerCount workers")
+    }
+
+    /**
+     * Producer entry. Copies the Y plane out of [src] into a pooled buffer and
+     * enqueues it; the caller still owns [src] and must close its `ImageProxy`
+     * after this returns. Drop-newest when the queue is full (any distinct
+     * fountain symbol is equally useful, so dropping the freshest under load is
+     * harmless and never stalls the camera).
+     */
+    fun submit(src: ByteBuffer, width: Int, height: Int, rowStride: Int) {
+        if (!running.get()) return
+        val len = src.remaining()
+        if (len <= 0) return
+        // Sanity-check the declared geometry against the buffer length. The full-
+        // frame decode path (below) passes (w, h, rs) to native, which indexes
+        // `(height-1)*rowStride + width`; a HAL that returns a plane shorter
+        // than that (or a stale width/height after a resolution change) would
+        // hand ZXing a truncated frame that decodes to nothing — silently
+        // wasting CPU. Reject such frames up front instead.
+        if (width <= 0 || height <= 0 || rowStride <= 0 ||
+            len < (height - 1) * rowStride + width
+        ) {
+            droppedFrames.incrementAndGet()
+            return
+        }
+        // Publish the analysis geometry so the UI overlay can map pixel bboxes
+        // into PreviewView space. Stable for a camera bind (last-write-wins).
+        analysisWidth = width
+        analysisHeight = height
+        capturedFrames.incrementAndGet()
+        val buf = obtainBuffer(len)
+        src.get(buf, 0, len)
+        val frame = YFrame(buf, width, height, rowStride, len)
+        if (!queue.offer(frame)) {
+            droppedFrames.incrementAndGet()
+            recycleBuffer(buf)
+        }
+    }
+
+    private fun workerLoop() {
+        // Per-worker scratch for the native bbox write-back (decodeYRegionTracked
+        // fills [0..3]). Avoids allocating per frame and avoids cross-worker
+        // contention on a shared array.
+        val bboxOut = IntArray(4)
+        // Per-worker batch of decoded symbols awaiting ingest. Decoded payloads
+        // are accumulated here and flushed under a SINGLE acquire of [ingestLock]
+        // once [INGEST_BATCH] symbols pile up. This cuts the lock acquire count
+        // (and the per-symbol fence traffic of a fair ReentrantLock) by ~the batch
+        // factor — the single hottest contention point on the whole pipeline is
+        // the serialized ingest lock that guards the non-thread-safe native
+        // receiver, so reducing how often each worker contends it directly raises
+        // steady-state symbol throughput.
+        //
+        // Correctness of batching: the [onDecoded] callback is self-defending —
+        // it checks [ingestStopped] at its top and sets it the instant a symbol
+        // completes recovery. So once a symbol in a flush marks completion, every
+        // later symbol in the SAME flush (and all future frames) hits that check
+        // and returns immediately. We therefore don't need batch-aware stop logic
+        // in the pool: flushing a batch is exactly equivalent to the old
+        // per-symbol loop, just with one lock-unlock pair instead of N.
+        val pending = ArrayList<PendingSym>(INGEST_BATCH)
+        while (running.get()) {
+            val frame = try {
+                queue.poll(200, TimeUnit.MILLISECONDS)
+            } catch (e: InterruptedException) {
+                break
+            } ?: continue
+            try {
+                if (multiMode) {
+                    // Multi-QR tracked pipeline:
+                    //  1. Hot path: if we have per-code bboxes from the last lock,
+                    //     decode each in a tight expanded window (ReadBarcode singular
+                    //     per window) — avoids the full-frame finder scan entirely.
+                    //  2. Cold path: a periodic full-frame ReadBarcodes re-locks all
+                    //     code positions (every MULTI_FULL_DECODE_EVERY misses, or on
+                    //     the very first frame). This is the only place that pays for
+                    //     a whole-frame scan.
+                    val results = decodeMultiTracked(frame)
+                    if (results.isNotEmpty()) {
+                        decodedFrames.addAndGet(results.size.toLong())
+                        for (r in results) {
+                            pending.add(PendingSym(r.payload, r.bbox))
+                        }
+                    }
+                } else {
+                    val payload = decode(frame, bboxOut)
+                    if (payload != null) {
+                        // Single-code path: one decoded symbol per frame.
+                        decodedFrames.incrementAndGet()
+                        // bboxOut is reused next iteration, so snapshot it.
+                        pending.add(PendingSym(payload, bboxOut.copyOf()))
+                    }
+                }
+                // Flush the batch under one lock acquire when it fills, or when the
+                // queue has run dry (drain eagerly so latency stays low when the
+                // camera is feeding us slower than we can decode).
+                if (pending.size >= INGEST_BATCH ||
+                    (pending.isNotEmpty() && queue.isEmpty())
+                ) {
+                    ingestLock.lock()
+                    try {
+                        for (s in pending) onDecoded(s.payload, s.bbox)
+                    } finally {
+                        ingestLock.unlock()
+                    }
+                    pending.clear()
+                }
+            } catch (e: Throwable) {
+                // Never let a worker die on one bad frame. Drop an un-flushed batch
+                // too so a poisoned symbol can't stall the next iteration.
+                Log.w(TAG, "decode/ingest error", e)
+                pending.clear()
+            } finally {
+                recycleBuffer(frame.y)
+            }
+        }
+        // Worker shutting down: flush anything still pending so we never lose the
+        // tail of a transfer to a pool teardown.
+        if (pending.isNotEmpty()) {
+            ingestLock.lock()
+            try {
+                for (s in pending) onDecoded(s.payload, s.bbox)
+            } finally {
+                ingestLock.unlock()
+            }
+            pending.clear()
+        }
+    }
+
+    /** One decoded symbol buffered in a worker, awaiting a batched flush. */
+    private class PendingSym(@JvmField val payload: ByteArray, @JvmField val bbox: IntArray?)
+
+    /**
+     * Multi-QR decode with per-code ROI tracking.
+     *
+     * Hot path: each code's last-known bbox (from the previous lock) is passed
+     * to `decodeMultiYTracked`, which crops a zero-copy expanded window around
+     * each and runs ReadBarcode (singular) inside it. This skips the full-frame
+     * finder scan — the dominant cost of multi decode — reducing per-frame work
+     * from O(frame pixels) to O(Σ code module pixels).
+     *
+     * Cold path: every [MULTI_FULL_DECODE_EVERY] consecutive tracked misses, or
+     * on the first frame (no bboxes yet), run a full-frame `ReadBarcodes` to
+     * (re-)lock all on-screen code positions. A successful full-frame read seeds
+     * [multiTrackedBboxes] so subsequent frames use the fast region path.
+     *
+     * Returns the decoded codes (payloads). RaptorQ dedups by sbn/esi, so it's
+     * fine if a code occasionally fails to decode in its window.
+     */
+    private fun decodeMultiTracked(frame: YFrame): List<ZxingDecoder.MultiResult> {
+        val tracked = multiTrackedBboxes
+        val lockedCount = multiLockedCount
+        // Hot path: region decode per code when we have a lock AND we're not due
+        // for a full-frame re-lock. We track `lockedCount` slots (fixed since the
+        // first lock), NOT results.size — a partial decode (some codes missed)
+        // must still hint all original positions next frame.
+        val dueFullLock = tracked == null || lockedCount == 0 ||
+            multiMiss.get() % MULTI_FULL_DECODE_EVERY == 0L
+        if (!dueFullLock && tracked != null && lockedCount > 0) {
+            val buf = try {
+                ZxingDecoder.decodeMultiYTracked(
+                    frame.y, frame.width, frame.height, frame.rowStride,
+                    tracked, lockedCount, TRACK_MARGIN,
+                )
+            } catch (e: UnsatisfiedLinkError) {
+                Log.e(TAG, "ZXing native lib not loaded", e); null
+            } catch (e: Exception) {
+                null
+            }
+            val results = ZxingDecoder.parseMulti(buf)
+            if (results.isNotEmpty()) {
+                // Refresh the slots: update matched positions, KEEP stale bboxes
+                // for codes that missed this frame (so they're hinted again next
+                // frame instead of being permanently dropped).
+                updateTrackedSlots(results)
+                multiMiss.set(0)
+                return results
+            }
+            // All-region miss → fall through to full-frame re-lock this frame.
+            multiMiss.incrementAndGet()
+        }
+        // Cold path: full-frame scan, seeds/re-seeds the tracker.
+        val buf = try {
+            ZxingDecoder.decodeMultiY(
+                frame.y, frame.width, frame.height, frame.rowStride
+            )
+        } catch (e: UnsatisfiedLinkError) {
+            Log.e(TAG, "ZXing native lib not loaded", e); return emptyList()
+        } catch (e: Exception) {
+            return emptyList()
+        }
+        val results = ZxingDecoder.parseMulti(buf)
+        if (results.isNotEmpty()) {
+            // Seed the fixed slot count from a full-frame lock. Subsequent frames
+            // maintain exactly this many slots regardless of partial decodes.
+            seedTrackedSlots(results)
+            multiMiss.set(0)
+        } else {
+            multiMiss.incrementAndGet()
+        }
+        return results
+    }
+
+    /**
+     * Seed the tracker from a full-frame decode: capture [multiLockedCount] and
+     * the initial bboxes. This count stays fixed for the life of the lock; a
+     * later partial decode updates positions via [updateTrackedSlots] but never
+     * shrinks the slot count.
+     */
+    private fun seedTrackedSlots(results: List<ZxingDecoder.MultiResult>) {
+        if (results.isEmpty()) return
+        val packed = IntArray(results.size * 4)
+        for (i in results.indices) {
+            val b = results[i].bbox
+            packed[i * 4] = b[0]
+            packed[i * 4 + 1] = b[1]
+            packed[i * 4 + 2] = b[2]
+            packed[i * 4 + 3] = b[3]
+        }
+        multiTrackedBboxes = packed
+        multiLockedCount = results.size
+    }
+
+    /**
+     * Update the tracked slots from a region decode. Each freshly decoded bbox
+     * is matched to its nearest current slot (by center distance — the codes are
+     * on a fixed screen grid, so the nearest slot is the same physical code) and
+     * that slot's position is refreshed. Slots with no match (codes that missed
+     * this frame) KEEP their last bbox, so they're hinted again next frame with
+     * only the native TRACK_MARGIN expansion compensating for motion. This is the
+     * fix for the partial-decode shrinking bug: a transient miss no longer drops
+     * a code from the tracking list.
+     */
+    private fun updateTrackedSlots(results: List<ZxingDecoder.MultiResult>) {
+        val old = multiTrackedBboxes ?: return seedTrackedSlots(results)
+        val n = multiLockedCount
+        if (n == 0) return seedTrackedSlots(results)
+        val updated = old.copyOf()  // preserve stale slots for unmatched codes
+        // Track which slots have been claimed to avoid double-updating one slot.
+        val claimed = BooleanArray(n)
+        for (r in results) {
+            val b = r.bbox
+            val cx = (b[0] + b[2]) / 2
+            val cy = (b[1] + b[3]) / 2
+            var bestSlot = -1
+            var bestDist = Long.MAX_VALUE
+            for (i in 0 until n) {
+                if (claimed[i]) continue
+                val ocx = (old[i * 4] + old[i * 4 + 2]) / 2
+                val ocy = (old[i * 4 + 1] + old[i * 4 + 3]) / 2
+                val dx = cx.toLong() - ocx
+                val dy = cy.toLong() - ocy
+                val d = dx * dx + dy * dy
+                if (d < bestDist) { bestDist = d; bestSlot = i }
+            }
+            if (bestSlot >= 0) {
+                claimed[bestSlot] = true
+                updated[bestSlot * 4] = b[0]
+                updated[bestSlot * 4 + 1] = b[1]
+                updated[bestSlot * 4 + 2] = b[2]
+                updated[bestSlot * 4 + 3] = b[3]
+            }
+        }
+        multiTrackedBboxes = updated
+    }
+
+    /**
+     * Decode one frame with adaptive ROI tracking.
+     *
+     * Three escalating tiers, cheapest first:
+     *  1. **Tracked tight ROI**: if we recently locked the QR ([lastQrBbox]),
+     *     crop a small window (the bbox expanded by [TRACK_MARGIN]) and decode
+     *     it. On a screen QR the code barely moves frame-to-frame, so this
+     *     window is far smaller than the fixed center region — much less ZXing
+     *     work, raising the sustainable decode rate.
+     *  2. **Center ROI**: the fixed large center region (the QR is nominally
+     *     centered). Used on a tracked miss, or before the first lock.
+     *  3. **Full frame**: only 1 in [FULL_DECODE_EVERY] consecutive ROI misses,
+     *     to catch an off-center/oversized browser QR without paying for a full
+     *     decode every frame. A full-frame hit also seeds [lastQrBbox].
+     *
+     * Both ROI tiers use the zero-copy native crop and report the QR's bbox, so
+     * any successful decode refreshes [lastQrBbox] for the next frame's tier-1.
+     */
+    private fun decode(frame: YFrame, bboxOut: IntArray): ByteArray? {
+        val w = frame.width
+        val h = frame.height
+        val rs = frame.rowStride
+
+        // Tier 1: tracked tight ROI around the last known position.
+        val tracked = lastQrBbox
+        if (tracked != null) {
+            val t = tightRoi(tracked, w, h, rs, frame.len)
+            if (t != null) {
+                val (tx0, ty0, tside) = t
+                val p = try {
+                    ZxingDecoder.decodeYRegionTracked(frame.y, w, h, rs, tx0, ty0, tside, bboxOut)
+                } catch (e: UnsatisfiedLinkError) {
+                    Log.e(TAG, "ZXing native lib not loaded", e); return null
+                } catch (e: Exception) {
+                    null
+                }
+                if (p != null) {
+                    roiMiss.set(0)
+                    lastQrBbox = bboxOut.copyOf()
+                    return p
+                }
+                // Tracked window missed → the QR moved or blurred; drop the lock
+                // and fall through to the center-ROI tier (do NOT keep hunting
+                // in a stale window).
+                lastQrBbox = null
+            }
+        }
+
+        // Tier 2: fixed center ROI.
+        val side = (minOf(w, h) * ROI_FRACTION).toInt()
+        val x0 = (w - side) / 2
+        val y0 = (h - side) / 2
+        // Defensive bounds: native also validates, but guarding here keeps a bad
+        // geometry from crossing the JNI boundary.
+        val roiUsable = side >= MIN_ROI &&
+            side < w && side < h && x0 >= 0 && y0 >= 0 &&
+            // The last ROI row's tail must stay within the buffer.
+            (y0 + side - 1) * rs + (x0 + side) <= frame.len
+        if (roiUsable) {
+            val p = try {
+                ZxingDecoder.decodeYRegionTracked(frame.y, w, h, rs, x0, y0, side, bboxOut)
+            } catch (e: UnsatisfiedLinkError) {
+                Log.e(TAG, "ZXing native lib not loaded", e); return null
+            } catch (e: Exception) {
+                null
+            }
+            if (p != null) {
+                roiMiss.set(0)
+                lastQrBbox = bboxOut.copyOf()
+                return p
+            }
+            // ROI missed; only fall through to a full-frame decode periodically.
+            if (roiMiss.incrementAndGet() % FULL_DECODE_EVERY != 0L) return null
+        }
+
+        // Tier 3: occasional full-frame decode. If this succeeds, keep the
+        // reported bbox so the next frames use the fast tracked ROI instead of
+        // repeatedly falling back to expensive full-frame scans.
+        val p = try {
+            ZxingDecoder.decodeYTracked(frame.y, w, h, rs, bboxOut)
+        } catch (e: UnsatisfiedLinkError) {
+            Log.e(TAG, "ZXing native lib not loaded", e); null
+        } catch (e: Exception) {
+            null
+        }
+        if (p != null) {
+            roiMiss.set(0)
+            lastQrBbox = bboxOut.copyOf()
+        }
+        return p
+    }
+
+    /**
+     * Compute a tight square ROI around [bbox] expanded by [TRACK_MARGIN], or
+     * null if it can't be made valid (e.g. stale/oversized bbox). Returns
+     * `(x0, y0, side)` clamped to the frame and within the buffer.
+     */
+    private fun tightRoi(
+        bbox: IntArray, w: Int, h: Int, rs: Int, len: Int
+    ): Triple<Int, Int, Int>? {
+        val minX = bbox[0]; val minY = bbox[1]; val maxX = bbox[2]; val maxY = bbox[3]
+        if (maxX <= minX || maxY <= minY) return null
+        val qw = (maxX - minX).toFloat()
+        val qh = (maxY - minY).toFloat()
+        // Expand by TRACK_MARGIN on every side so the window tolerates motion.
+        val margin = (maxOf(qw, qh) * TRACK_MARGIN).toInt()
+        val ex0 = (minX - margin).coerceAtLeast(0)
+        val ey0 = (minY - margin).coerceAtLeast(0)
+        val ex1 = (maxX + margin).coerceAtMost(w)
+        val ey1 = (maxY + margin).coerceAtMost(h)
+        val side = minOf(ex1 - ex0, ey1 - ey0)
+        if (side < MIN_ROI) return null
+        // Make it a square centered on the QR's bbox (ZXing's cropped takes a
+        // square region in this codebase).
+        val cx = (ex0 + ex1) / 2
+        val cy = (ey0 + ey1) / 2
+        val half = side / 2
+        val x0 = (cx - half).coerceIn(0, (w - side))
+        val y0 = (cy - half).coerceIn(0, (h - side))
+        // Bounds check mirroring the center-ROI path.
+        if ((y0 + side - 1) * rs + (x0 + side) > len) return null
+        return Triple(x0, y0, side)
+    }
+
+    private fun obtainBuffer(len: Int): ByteArray {
+        synchronized(freeLock) {
+            while (freeList.isNotEmpty()) {
+                val b = freeList.removeLast()
+                if (b.size >= len) return b
+                // Smaller (stale) buffer from a resolution change — drop it.
+            }
+        }
+        return ByteArray(len)
+    }
+
+    private fun recycleBuffer(buf: ByteArray) {
+        synchronized(freeLock) {
+            if (freeList.size < MAX_FREE) freeList.addLast(buf)
+        }
+    }
+
+    fun shutdown() {
+        if (!running.getAndSet(false)) return
+        workers.forEach { it.interrupt() }
+        workers.forEach { try { it.join(300) } catch (_: InterruptedException) {} }
+        workers.clear()
+        queue.clear()
+        synchronized(freeLock) { freeList.clear() }
+    }
+
+    fun capturedCount(): Long = capturedFrames.get()
+    /** Total decoded *symbols* (QR codes), not frames. See [decodedFrames]. */
+    fun decodedCount(): Long = decodedFrames.get()
+    fun droppedCount(): Long = droppedFrames.get()
+
+    /**
+     * Snapshot the current per-code bboxes (packed 4×N ints {minX,minY,maxX,maxY}
+     * in analysis-stream pixel coords) plus the live count. Returns null before
+     * the first full-frame lock. The returned array is the live tracker (treated
+     * as immutable by callers — copy if you need to retain it across frames).
+     * Intended to be read at the UI refresh cadence (~7 Hz), NOT per-frame.
+     */
+    fun snapshotMultiBboxes(): IntArray? = multiTrackedBboxes
+    fun snapshotMultiCount(): Int = multiLockedCount
+
+    /**
+     * Run [action] while holding the ingest lock, so it cannot overlap any
+     * in-flight `onDecoded` call. The caller uses this to safely destroy/swap the
+     * native receiver (ingest is `&mut`, assemble is `&` — they must not race).
+     */
+    fun runExclusive(action: () -> Unit) {
+        ingestLock.lock()
+        try {
+            action()
+        } finally {
+            ingestLock.unlock()
+        }
+    }
+
+    companion object {
+        private const val TAG = "QrDecodePool"
+        /** Center-crop side as a fraction of the shorter frame dimension. */
+        private const val ROI_FRACTION = 0.9f
+        /** Don't ROI-crop below this side length (too few px/module to decode). */
+        private const val MIN_ROI = 240
+        /** When the ROI keeps missing, do a full-frame decode this often. */
+        private const val FULL_DECODE_EVERY = 3L
+        /**
+         * How much the tracked ROI expands beyond the last QR bbox, as a
+         * fraction of the QR size. 0.35 tolerates hand/phone motion between
+         * frames while keeping the window much smaller than the center ROI.
+         */
+        private const val TRACK_MARGIN = 0.35f
+        /**
+         * In multi-QR mode, re-run a full-frame scan (re-lock all code
+         * positions) this many consecutive tracked misses after the last
+         * success. Codes on a screen barely move frame-to-frame, so the tracked
+         * path stays locked; this only fires when motion/blur breaks the lock.
+         */
+        private const val MULTI_FULL_DECODE_EVERY = 3L
+        /**
+         * Max decoded symbols a worker accumulates before flushing them to the
+         * ingest lock in one acquire. Larger → fewer lock acquires (less contention
+         * on the serialized native-receiver path) but more end-to-end latency and a
+         * longer flush under the lock. 4 is a sweet spot: ~4× fewer lock acquires
+         * at single-digit-ms added latency. Fountain-code symbols are independent
+         * so delaying a few is information-lossless.
+         */
+        private const val INGEST_BATCH = 4
+        /** Cap the recycled-buffer free-list so it can't grow unbounded. */
+        private const val MAX_FREE = 12
+    }
+}

@@ -16,16 +16,16 @@ export NDK_HOME=$ANDROID_HOME/ndk/27.0.12077973
 export PATH="$NDK_HOME/toolchains/llvm/prebuilt/$(uname -m)-linux-android/bin:$PATH"
 
 cargo ndk -t arm64-v8a \
-  -o apps/android/app/src/main/jniLibs \
+  -o apps/scanner/app/src/main/jniLibs \
   build -p transfer-engine --features jni --release
 ```
 
-产物：`apps/android/app/src/main/jniLibs/arm64-v8a/libtransfer_engine.so`
+产物：`apps/scanner/app/src/main/jniLibs/arm64-v8a/libtransfer_engine.so`
 
 ## 构建 APK
 
 ```bash
-cd apps/android
+cd apps/scanner
 
 # 设置 SDK 路径（首次）
 cat > local.properties <<EOF
@@ -41,7 +41,7 @@ EOF
 ```
 
 产物：`app/build/outputs/apk/debug/app-debug.apk`
-（Release：`app/build/outputs/apk/release/app-release.apk`）
+（Release：`app/build/outputs/apk/dist/app-release.apk`）
 
 ### 关于 Release 签名
 
@@ -73,7 +73,7 @@ buildTypes {
 ## 安装到设备
 
 ```bash
-adb install app/build/outputs/apk/release/app-release.apk
+adb install app/build/outputs/apk/dist/app-release.apk
 ```
 
 ## 原生库说明
@@ -83,7 +83,7 @@ APK 包含三个原生库：
 | 库 | 来源 | 用途 |
 |----|------|------|
 | `libtransfer_engine.so` | Rust → cargo-ndk | RaptorQ 编解码（JNI） |
-| `libeasytransfer_zxing.so` | ZXing-C++ → CMake | QR 码解码（JNI） |
+| `libairferry_zxing.so` | ZXing-C++ → CMake | QR 码解码（JNI） |
 | `libimage_processing_util_jni.so` | CameraX | 图像处理工具 |
 
 ## ZXing-C++ 构建
@@ -122,13 +122,13 @@ add_link_options("-Wl,-z,max-page-size=16384")
 ```bash
 READELF=$NDK_HOME/toolchains/llvm/prebuilt/<host>/bin/llvm-readelf
 # LOAD 段 Align 列应为 0x4000（16 KiB）；若是 0x1000 则在 16 KiB 设备上会加载失败
-$READELF -l lib/arm64-v8a/libeasytransfer_zxing.so | grep LOAD
+$READELF -l lib/arm64-v8a/libairferry_zxing.so | grep LOAD
 ```
 
 ## 项目结构
 
 ```
-apps/android/
+apps/scanner/
 ├── build.gradle.kts
 ├── settings.gradle.kts
 ├── gradle.properties
@@ -142,7 +142,7 @@ apps/android/
         ├── cpp/
         │   ├── CMakeLists.txt    # ZXing-C++ 构建
         │   └── scan_jni.cpp      # ZXing JNI 桥接
-        ├── java/com/easytransfer/app/
+        ├── java/com/airferry/app/
         │   ├── nativelib/
         │   │   └── NativeBridge.kt       # Rust JNI 绑定
         │   ├── scan/
@@ -166,6 +166,6 @@ apps/android/
 
 ```bash
 cargo ndk -t arm64-v8a -t armeabi-v7a \
-  -o apps/android/app/src/main/jniLibs \
+  -o apps/scanner/app/src/main/jniLibs \
   build -p transfer-engine --features jni --release
 ```

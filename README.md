@@ -1,4 +1,4 @@
-# 易传 EasyTransfer
+# 易传 AirFerry
 
 > 完全离线的光学文件传输系统 · Fully Offline Optical File Transfer
 
@@ -39,15 +39,15 @@
 
 ## 下载安装
 
-最新版本发布在 [GitHub Release v1.0.0](https://github.com/UR-SillyB/EasyTransfer/releases/tag/v1.0.0)。
+最新版本发布在 [GitHub Release v1.0.0](https://github.com/UR-SillyB/AirFerry/releases/tag/v1.0.0)。
 
 | 文件 | 说明 |
 |------|------|
-| `easytransfer-android-v1.0.0.apk` | Android 接收端（Android 10+，arm64-v8a） |
-| `easytransfer-chrome-mv3-v1.0.0.crx` | Chrome / Edge MV3 扩展（已签名 Cr24） |
-| `easytransfer-chrome-mv2-v1.0.0.crx` | Chrome / Edge MV2 扩展（旧版兼容，已签名 Cr24） |
-| `easytransfer-firefox-mv3-v1.0.0.xpi` | Firefox MV3 扩展（Firefox 109+） |
-| `easytransfer-firefox-mv2-v1.0.0.xpi` | Firefox MV2 扩展（Firefox 91+） |
+| `airferry-android-v1.0.0.apk` | Android 接收端（Android 10+，arm64-v8a） |
+| `airferry-chrome-mv3-v1.0.0.crx` | Chrome / Edge MV3 扩展（已签名 Cr24） |
+| `airferry-chrome-mv2-v1.0.0.crx` | Chrome / Edge MV2 扩展（旧版兼容，已签名 Cr24） |
+| `airferry-firefox-mv3-v1.0.0.xpi` | Firefox MV3 扩展（Firefox 109+） |
+| `airferry-firefox-mv2-v1.0.0.xpi` | Firefox MV2 扩展（Firefox 91+） |
 
 ### Android 接收端
 
@@ -70,7 +70,7 @@
 ## 仓库结构
 
 ```
-EasyTransfer/
+AirFerry/
 ├── crates/
 │   ├── raptorq-core/      # RFC 6330 RaptorQ 编解码封装
 │   ├── qr-protocol/       # 帧格式 / 分块 / 压缩 / CRC / QR 矩阵

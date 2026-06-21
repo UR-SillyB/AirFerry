@@ -1,0 +1,17 @@
+[package]
+name = "raptorq-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "RFC 6330 RaptorQ codec wrapper for AirFerry (pure logic, WASM & Android compatible)."
+
+[dependencies]
+raptorq = "2.0"
+thiserror.workspace = true
+serde = { workspace = true, optional = true }
+
+[features]
+default = []
+# Enable serde derive on config / metadata (used by transfer-engine for resume state).
+serde = ["dep:serde", "raptorq/serde"]
