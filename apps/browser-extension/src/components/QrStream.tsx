@@ -134,7 +134,7 @@ export function QrStream({
       // on the GPU-accelerated integer path (sub-pixel fillRect is ~5× slower).
       const djx = ditherJitter ? Math.round((Math.random() - 0.5) * 2) : 0
       const djy = ditherJitter ? Math.round((Math.random() - 0.5) * 2) : 0
-      drawMatrix(ctx, matrices[i].modules, matrices[i].side, ox + djx, oy + djy, cell, wantMulti ? 1 : 4)
+      drawMatrix(ctx, matrices[i].modules, matrices[i].side, ox + djx, oy + djy, cell, 4)
     }
 
     // Stats throttle: ~4 Hz.
