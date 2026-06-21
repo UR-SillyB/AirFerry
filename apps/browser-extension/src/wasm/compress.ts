@@ -110,23 +110,14 @@ function createEmscriptenImports(): { imports: WebAssembly.Imports; ctx: Emscrip
       a: (requestedSize: number) => {
         if (!ctx.memory) return 0
         const oldSize = ctx.memory.buffer.byteLength
-        const alignUp = (x: number, m: number) => x + ((m - (x % m)) % m)
-        const maxHeapSize = 2147483648
-        if (requestedSize > maxHeapSize) return 0
-        for (let cutDown = 1; cutDown <= 4; cutDown *= 2) {
-          const overGrown = oldSize * (1 + 0.2 / cutDown)
-          const newSize = Math.min(
-            maxHeapSize,
-            alignUp(Math.max(requestedSize, overGrown + 100663296), 65536)
-          )
-          try {
-            ctx.memory.grow((newSize - oldSize) / 65536)
-            return 1
-          } catch {
-            // couldn't grow, try smaller
-          }
+        if (requestedSize <= oldSize) return 1
+        const neededPages = Math.ceil((requestedSize - oldSize) / 65536)
+        try {
+          ctx.memory.grow(neededPages)
+          return 1
+        } catch {
+          return 0
         }
-        return 0
       },
       // "b" → _emscripten_memcpy_big(dest, src, num)
       b: (dest: number, src: number, num: number) => {
