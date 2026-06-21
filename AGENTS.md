@@ -4,6 +4,7 @@
 > 本文**不重复** `docs/*.md` 的细节，每条都指向权威来源。跨端不变量的位级规格见 [`docs/SPEC.md`](docs/SPEC.md)。
 > **遇到文档与代码冲突时，一律以代码为准**（见下方「文档与代码偏差清单」）。
 > **当本文与 `docs/SPEC.md` 互相矛盾时**（如默认值、常量、行号），先去读对应权威源代码裁决——两份文档都可能滞后，切勿仅凭其中一份下结论。
+> **每次改动代码后，必须同步更新相关文档**：改动若涉及常量、默认值、行号、签名、帧格式、文件路径、构建步骤等任一被文档引用的事实，**同一提交内**回写 AGENTS.md / docs/*.md 的对应位置，勿留滞后（本次审计即是文档滞后于代码的教训）。
 
 ## 项目一句话
 
@@ -293,6 +294,7 @@ adb install app/build/outputs/apk/release/app-release.apk
 - **构建 profile**：`release` 用 `opt-level="z"` + LTO + `panic="abort"`（求小体积）；但热路径 crate（raptorq-core / qr-protocol / raptorq / qrcode / crc32fast / transfer-engine）单独提升到 `opt-level=3`（见 `Cargo.toml`）。
 - **不提交产物**：`target/`、`wasm-pkg/`、`build/`、`dist/`、`*.so`、`*.apk`、`*.pem`、`*.keystore` 均在 `.gitignore`。
 - **修改帧/协议字段**：两端（Rust + TS + Kotlin）必须同步；更新 [`docs/SPEC.md`](docs/SPEC.md) 的位级规格。
+- **改码即改文档（AI 硬性收尾）**：每次改动代码后，凡是影响文档中引用过的**事实**——常量值、默认值、`file:line` 行号、函数签名、帧/字段布局、文件路径、目录结构、构建命令、版本号——都必须在**同一个提交**里回写对应文档（AGENTS.md 的 §3 导航 / §4 调试表 / §5 偏差清单，或 `docs/SPEC.md` 的权威源/速查表，或具体 `docs/*.md`）。改了哪一端，就核对该端在文档里的所有引用点。提交前自检：「本次改的符号/常量/路径，在文档里被引用过吗？被引用的地方还成立吗？」**不更新文档的代码改动视为未完成**。这是防止文档再次漂移的唯一手段，也是上一轮 SPEC.md/AGENTS.md 互相矛盾（浏览器默认 512 vs 1400）的根本成因——代码改了，文档没跟上。
 
 ## 8. 权威文档索引
 
