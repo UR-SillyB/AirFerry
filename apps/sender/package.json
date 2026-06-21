@@ -30,8 +30,8 @@
     "typescript": "^5.6.0"
   },
   "manifest": {
-    "name": "易传 - 离线文件传输",
-    "description": "通过屏幕二维码视频流，完全离线传输文件到手机。无需网络、蓝牙、USB。",
+    "name": "AirFerry - 无网文件传输",
+    "description": "通过屏幕二维码视频流，无网传输文件到手机。无需网络、蓝牙、USB。",
     "version": "1.0.0",
     "permissions": [
       "storage"

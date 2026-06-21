@@ -15,7 +15,7 @@ export default function Popup() {
     <div className="popup">
       <div className="popup-logo">易</div>
       <h2>AirFerry</h2>
-      <p>完全离线的光学文件传输<br />通过二维码视频流发送文件到手机</p>
+      <p>无网光学文件传输<br />通过二维码视频流发送文件到手机</p>
       <button onClick={openApp} disabled={opening}>
         {opening ? "打开中…" : "开始发送文件"}
       </button>
