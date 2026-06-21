@@ -48,7 +48,6 @@ async function walkEntry(entry: FileSystemEntry): Promise<File[]> {
 
 export function FileSelectPage({ files, onSelected }: Props) {
   const fileInputRef = useRef<HTMLInputElement | null>(null)
-  const folderInputRef = useRef<HTMLInputElement | null>(null)
   const [dragging, setDragging] = useState(false)
 
   const handleFiles = useCallback(
@@ -112,10 +111,61 @@ export function FileSelectPage({ files, onSelected }: Props) {
     onSelected([])
   }, [onSelected])
 
-  const handleDropzoneClick = useCallback(() => {
-    // Trigger file selector by default
-    fileInputRef.current?.click()
-  }, [])
+  /** Try to use File System Access API if available, otherwise fallback to file input */
+  const handleBrowseClick = useCallback(async () => {
+    // Check if File System Access API is available
+    if ('showOpenFilePicker' in window && 'showDirectoryPicker' in window) {
+      try {
+        // Show a menu to let user choose between file or folder
+        const choice = confirm("确定选择文件，取消选择文件夹")
+
+        if (choice) {
+          // Select files
+          const handles = await (window as any).showOpenFilePicker({ multiple: true })
+          const selectedFiles: File[] = []
+          for (const handle of handles) {
+            const file = await handle.getFile()
+            selectedFiles.push(file)
+          }
+          if (selectedFiles.length > 0) onSelected(selectedFiles)
+        } else {
+          // Select folder
+          const dirHandle = await (window as any).showDirectoryPicker()
+          const selectedFiles: File[] = []
+
+          // Recursively read all files from the directory
+          async function readDir(dirHandle: any, path = "") {
+            for await (const entry of dirHandle.values()) {
+              const entryPath = path ? `${path}/${entry.name}` : entry.name
+              if (entry.kind === 'file') {
+                const file = await entry.getFile()
+                // Preserve relative path
+                Object.defineProperty(file, 'webkitRelativePath', {
+                  value: entryPath,
+                  writable: false,
+                })
+                selectedFiles.push(file)
+              } else if (entry.kind === 'directory') {
+                await readDir(entry, entryPath)
+              }
+            }
+          }
+
+          await readDir(dirHandle)
+          if (selectedFiles.length > 0) onSelected(selectedFiles)
+        }
+      } catch (err) {
+        // User cancelled or error occurred, fallback to input
+        if ((err as Error).name !== 'AbortError') {
+          console.warn('File System Access API failed:', err)
+          fileInputRef.current?.click()
+        }
+      }
+    } else {
+      // Fallback to traditional file input
+      fileInputRef.current?.click()
+    }
+  }, [onSelected])
 
   return (
     <div className="page">
@@ -128,28 +178,13 @@ export function FileSelectPage({ files, onSelected }: Props) {
         }}
         onDragLeave={() => setDragging(false)}
         onDrop={handleDrop}
-        onClick={handleDropzoneClick}
+        onClick={handleBrowseClick}
       >
-        {/* File picker for individual files */}
+        {/* Fallback file input for browsers without File System Access API */}
         <input
           ref={fileInputRef}
           type="file"
           multiple
-          style={{ display: "none" }}
-          onChange={(e) => {
-            handleFiles(e.target.files)
-            e.target.value = ""
-          }}
-        />
-        {/* Folder picker */}
-        <input
-          ref={folderInputRef}
-          type="file"
-          multiple
-          /* @ts-ignore - webkitdirectory is webkit-specific but widely supported */
-          webkitdirectory=""
-          mozdirectory=""
-          directory=""
           style={{ display: "none" }}
           onChange={(e) => {
             handleFiles(e.target.files)
@@ -165,35 +200,13 @@ export function FileSelectPage({ files, onSelected }: Props) {
               共 {formatBytes(totalSize(files))}
               <br />
               <span className="muted">
-                点击或拖拽以{files.length > 1 ? "追加" : "更换"}文件
+                点击或拖拽以{files.length > 1 ? "追加" : "更换"}
               </span>
             </>
           ) : (
-            "拖拽文件或文件夹到此处，或点击选择"
+            "拖拽文件或文件夹到此处，或点击浏览"
           )}
         </p>
-        <div style={{ marginTop: 8, display: "flex", gap: 8, justifyContent: "center" }}>
-          <button
-            className="btn secondary"
-            style={{ fontSize: 12, padding: "4px 8px" }}
-            onClick={(e) => {
-              e.stopPropagation()
-              fileInputRef.current?.click()
-            }}
-          >
-            选择文件
-          </button>
-          <button
-            className="btn secondary"
-            style={{ fontSize: 12, padding: "4px 8px" }}
-            onClick={(e) => {
-              e.stopPropagation()
-              folderInputRef.current?.click()
-            }}
-          >
-            选择文件夹
-          </button>
-        </div>
       </div>
 
       {files.length > 0 && (
