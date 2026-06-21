@@ -117,17 +117,12 @@ export function QrStream({
     ctx.fillStyle = "#ffffff"
     ctx.fillRect(0, 0, px, px)
 
-    // Each code occupies an equal square cell, packed edge-to-edge. No inter-cell
-    // gap is needed: drawMatrix() already renders a 4-module quiet zone inside
-    // every cell, so two adjacent codes already have 8 modules of white between
-    // their data — twice the QR-spec minimum. Adding another gutter (the old
-    // 2%×N padding) just produced a wide white band between codes for no benefit.
-    // A 1px visual separator keeps the white strip crisp on fractional-DPR cells
-    // without stealing measurable area from the codes.
-    const sep = wantMulti ? 1 : 0
-    const cellW = Math.floor((px - sep * (cols - 1)) / cols)
-    const cellH = Math.floor((px - sep * (rows - 1)) / rows)
-    const cell = Math.min(cellW, cellH)
+    // Each code occupies an equal square cell, packed edge-to-edge. In multi-QR
+    // mode the 1px separator is removed (the quiet zone already provides enough
+    // white between codes) and drawMatrix centers the code with zero offset so
+    // the grid has no dead space between adjacent codes.
+    const sep = 0
+    const cell = Math.floor(px / (wantMulti ? cols : 1))
     for (let i = 0; i < n; i++) {
       const c = i % cols
       const r = Math.floor(i / cols)
@@ -254,8 +249,10 @@ function drawMatrix(
   // Module size that tiles evenly into the cell; floor keeps modules aligned.
   const modulePx = Math.max(1, Math.floor(cellPx / quiet))
   const drawSize = modulePx * quiet
-  // Center the code within the cell.
-  const offset = Math.floor((cellPx - drawSize) / 2)
+  // Center the code within the cell only for single-code mode (margin=4).
+  // In multi-code mode (margin=1) align to top-left so the gap between
+  // adjacent codes is minimized (just the quiet-zone overlap).
+  const offset = margin >= 4 ? Math.floor((cellPx - drawSize) / 2) : 0
 
   // Obtain a reusable ImageData for this drawSize.
   let imgData = imgDataCache.get(drawSize)
