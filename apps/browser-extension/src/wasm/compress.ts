@@ -48,17 +48,16 @@ export const enum CompressionAlgorithm {
   Xz = 2
 }
 
-/** Maximum zstd level (22). */
-const ZSTD_LEVEL = 22
+/** Fast zstd level (1). Speeds up compression start. */
+const ZSTD_LEVEL = 1
 /** Maximum XZ/LZMA2 preset level (9). */
 const XZ_LEVEL = 9
 /**
- * Early-exit threshold. If zstd only shrinks the file to ≥ this fraction of
- * the original, the file is treated as already compressed and the slower xz
- * pass is skipped (xz is very unlikely to beat zstd on already-compressed
- * data, and level-9 LZMA2 is expensive). 0.95 = 95%.
+ * Early-exit threshold. Only run the slow xz pass when zstd compresses
+ * below 70 % of the original — a strong signal the file is genuinely
+ * compressible enough that xz's better ratio is worth the time.
  */
-const ZSTD_ALREADY_COMPRESSED_RATIO = 0.95
+const ZSTD_ALREADY_COMPRESSED_RATIO = 0.70
 
 export interface PrepareResult {
   payload: Uint8Array
