@@ -1,6 +1,7 @@
 /** Browser-action popup: launches the sender app in a new tab. */
 import { useState } from "react"
 import "@/assets/app.css"
+import iconUrl from "../assets/icon128.png"
 
 export default function Popup() {
   const [opening, setOpening] = useState(false)
@@ -13,7 +14,7 @@ export default function Popup() {
 
   return (
     <div className="popup">
-      <div className="popup-logo">易</div>
+      <div className="popup-logo"><img src={iconUrl} alt="AirFerry" /></div>
       <h2>AirFerry</h2>
       <p>无网光学文件传输<br />通过二维码视频流发送文件到手机</p>
       <button onClick={openApp} disabled={opening}>

@@ -10,6 +10,7 @@
  */
 import { useState, useCallback, useEffect, useRef } from "react"
 import "@/assets/app.css"
+import iconUrl from "../assets/icon128.png"
 import { ensureWasm, SenderSessionWasm } from "@/wasm/loader"
 import { FileSelectPage } from "@/pages/FileSelectPage"
 import { ParamsPage } from "@/pages/ParamsPage"
@@ -230,7 +231,7 @@ export default function App() {
   return (
     <div className="app">
       <header className="app-header">
-        <div className="app-logo">易</div>
+        <div className="app-logo"><img src={iconUrl} alt="AirFerry" /></div>
         <h1>AirFerry · 无网文件传输</h1>
       </header>
       <div className="steps">
