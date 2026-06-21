@@ -579,15 +579,13 @@ class ScanActivity : ComponentActivity() {
                     it.setSurfaceProvider(previewView.surfaceProvider)
                 }
 
-                // Request a 720p analysis stream. Lower resolution means ZXing
-                // decodes ~2× faster per frame, reducing frame-queue drops on the
-                // 60-fps camera feed. At close range (<30 cm) the QR modules still
-                // have enough pixels (>3 px/module for 4×V25@720p); the trade-off
-                // is worthwhile when decode throughput is the bottleneck.
+                // Request a 1080p analysis stream so each QR module has more
+                // camera pixels, improving ZXing decode reliability — especially
+                // important with the reduced quiet zone (margin=1 for multi-QR).
                 val resolutionSelector = ResolutionSelector.Builder()
                     .setResolutionStrategy(
                         ResolutionStrategy(
-                            Size(1280, 720),
+                            Size(1920, 1080),
                             ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER
                         )
                     )
