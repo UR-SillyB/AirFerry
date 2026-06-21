@@ -97,7 +97,7 @@ export function QrStream({
 
     // Layout: single → fills canvas; multi → grid (2 → 1×2, 4 → 2×2, else row).
     const n = matrices.length
-    const cols = n === 2 ? 2 : n === 4 ? 2 : n === 9 ? 3 : n
+    const cols = n === 2 ? 2 : n === 4 ? 2 : n
     const rows = Math.ceil(n / cols)
     const cssSize = canvas.clientWidth || 480 // Fallback to 480 if clientWidth is 0
     const dpr = window.devicePixelRatio || 1
@@ -138,7 +138,7 @@ export function QrStream({
       // on the GPU-accelerated integer path (sub-pixel fillRect is ~5× slower).
       const djx = ditherJitter ? Math.round((Math.random() - 0.5) * 2) : 0
       const djy = ditherJitter ? Math.round((Math.random() - 0.5) * 2) : 0
-      drawMatrix(ctx, matrices[i].modules, matrices[i].side, ox + djx, oy + djy, cell)
+      drawMatrix(ctx, matrices[i].modules, matrices[i].side, ox + djx, oy + djy, cell, wantMulti ? 1 : 4)
     }
 
     // Stats throttle: ~4 Hz.
@@ -246,9 +246,10 @@ function drawMatrix(
   side: number,
   ox: number,
   oy: number,
-  cellPx: number
+  cellPx: number,
+  /** Quiet-zone margin in modules: 4 = QR spec, 1 = tight (multi-code only). */
+  margin: number
 ) {
-  const margin = 4
   const quiet = side + margin * 2
   // Module size that tiles evenly into the cell; floor keeps modules aligned.
   const modulePx = Math.max(1, Math.floor(cellPx / quiet))

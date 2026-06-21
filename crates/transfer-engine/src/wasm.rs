@@ -111,8 +111,8 @@ impl SenderSessionWasm {
     /// we clamp defensively). An empty buffer / count_actual == 0 signals
     /// failure.
     pub fn next_qr_multi(&mut self, count: u32) -> Result<Vec<u8>, JsValue> {
-        // Cap at a sane maximum to bound allocation; the UI offers 2/4/9.
-        let n = count.min(9) as usize;
+        // Cap at a sane maximum to bound allocation; the UI only offers 2/4.
+        let n = count.min(8) as usize;
         let mut out: Vec<u8> = Vec::new();
         // Reserve the count slot; we'll fill it after we know how many succeeded.
         out.extend_from_slice(&0u32.to_le_bytes());
