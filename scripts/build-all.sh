@@ -62,6 +62,18 @@ build_sender() {
 
 build_scanner() {
   info "构建 Android 扫码端 ..."
+
+  # 先编译 Rust JNI 库 (libtransfer_engine.so) 到 jniLibs/。
+  # 这一步必须在 gradlew 之前：APK 打包时直接拷贝 jniLibs/ 里的 .so，
+  # 不会触发 cargo。若跳过这步，APK 里会带着过期的 .so（比如 EasyTransfer
+  # 重命名为 AirFerry 后，旧 .so 的 JNI 符号还是 com.easytransfer.*，
+  # 运行时 receiverCreate 抛 UnsatisfiedLinkError 直接闪退）。
+  # 详见 docs/build-android.md。
+  info "编译 Rust JNI 库 (core/transfer-engine --features jni → jniLibs/arm64-v8a/) ..."
+  cargo ndk -t arm64-v8a -o "$ROOT/apps/scanner/app/src/main/jniLibs" \
+    build -p transfer-engine --features jni --release 2>&1 | tail -3
+  info "JNI 库编译完成 → apps/scanner/app/src/main/jniLibs/arm64-v8a/libtransfer_engine.so"
+
   cd "$ROOT/apps/scanner"
   ANDROID_HOME="${ANDROID_HOME:-$HOME/Library/Android/sdk}"
   ./gradlew assembleRelease 2>&1 | tail -3 | while read -r line; do info "$line"; done
