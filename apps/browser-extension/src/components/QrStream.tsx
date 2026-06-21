@@ -48,6 +48,18 @@ export function QrStream({
   const statsTimerRef = useRef<number>(0)
   const [fullscreen, setFullscreen] = useState(false)
 
+  // Refs for callback props so the render function's useCallback identity stays
+  // stable across parent re-renders. Without this, an inline arrow function
+  // (e.g. onError={(e) => setError(...)}) gets a new identity every time the
+  // parent re-renders — which happens every ~250ms via onStats → setStats.
+  // That would recreate `render`, which would restart the rAF loop (cancel +
+  // reschedule), causing periodic frame drops. By reading callbacks through
+  // refs we keep `render` dependent only on [session, multiQr].
+  const onStatsRef = useRef(onStats)
+  const onErrorRef = useRef(onError)
+  onStatsRef.current = onStats
+  onErrorRef.current = onError
+
   const render = useCallback(() => {
     const canvas = canvasRef.current
     if (!canvas) return
@@ -76,7 +88,7 @@ export function QrStream({
         }
       }
     } catch (e) {
-      onError?.(e as Error)
+      onErrorRef.current?.(e as Error)
       return
     }
 
@@ -127,7 +139,7 @@ export function QrStream({
       statsTimerRef.current = now
       try {
         const raw = JSON.parse(session.stats_json())
-        onStats?.({
+        onStatsRef.current?.({
           frames: raw.frames,
           fps: Number(raw.fps),
           throughputBps: Number(raw.throughput_bps),
@@ -138,7 +150,7 @@ export function QrStream({
         /* ignore */
       }
     }
-  }, [session, multiQr, onStats, onError])
+  }, [session, multiQr])
 
   // Apply brightness/contrast optimization at the canvas element level. This is
   // a constant for a given (brightness, autoOptimize) combination, so set it
