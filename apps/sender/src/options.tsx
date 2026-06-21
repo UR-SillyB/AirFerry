@@ -91,7 +91,7 @@ export interface AppState {
 
 export default function App() {
   useEffect(() => {
-    document.title = "易传 · 文件传输"
+    document.title = "AirFerry · 文件传输"
   }, [])
 
   // Initialize config from localStorage (so the user's last-used transfer
@@ -231,7 +231,7 @@ export default function App() {
     <div className="app">
       <header className="app-header">
         <div className="app-logo">易</div>
-        <h1>易传 · 文件传输</h1>
+        <h1>AirFerry · 文件传输</h1>
       </header>
       <div className="steps">
         <div className={`step ${state.page === "select" ? "active" : state.prepared ? "done" : ""}`} onClick={() => go("select")}>
