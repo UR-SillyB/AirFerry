@@ -579,25 +579,15 @@ class ScanActivity : ComponentActivity() {
                     it.setSurfaceProvider(previewView.surfaceProvider)
                 }
 
-                // Request a 1080p analysis stream for more px/module (critical for
-                // the 2×2 multi-QR grid, where each code is only ~1/4 of the
-                // screen). CLOSEST_HIGHER_THEN_LOWER lets CameraX pick whatever
-                // the device's sensor actually supports: a 1080p-capable sensor
-                // delivers 1920×1080, an older/limited one falls back to 720p or
-                // 480p gracefully. The actual delivered size is logged once by
-                // QrStreamAnalyzer so we can confirm per-device behavior.
-                //
-                // The 60fps pin (below) is the real throughput guardrail: if a
-                // device can only sustain 1080p@30, the fixed-[60,60] bind throws
-                // and we retry at [30,60] — which still yields a usable 30fps. We
-                // accept that tradeoff rather than hard-capping at 720p, because
-                // modern flagships (2024+) comfortably do 1080p@60 on the YUV
-                // analysis stream, and the px/module gain materially improves
-                // multi-code decode rate (the dominant factor for multi-QR).
+                // Request a 720p analysis stream. Lower resolution means ZXing
+                // decodes ~2× faster per frame, reducing frame-queue drops on the
+                // 60-fps camera feed. At close range (<30 cm) the QR modules still
+                // have enough pixels (>3 px/module for 4×V25@720p); the trade-off
+                // is worthwhile when decode throughput is the bottleneck.
                 val resolutionSelector = ResolutionSelector.Builder()
                     .setResolutionStrategy(
                         ResolutionStrategy(
-                            Size(1920, 1080),
+                            Size(1280, 720),
                             ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER
                         )
                     )
