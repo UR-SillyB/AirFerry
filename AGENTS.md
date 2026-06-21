@@ -10,7 +10,7 @@
 
 ---
 
-## 1. 仓库布局（实际路径，⚠️ README 的结构图已过时）
+## 1. 仓库布局
 
 ```
 AirFerry/
@@ -34,8 +34,6 @@ AirFerry/
 ├── Cargo.toml                  # Rust workspace 根配置
 └── dist/                       # 发布产物 + 签名密钥（git-ignored）
 ```
-
-> ⚠️ `README.md` 的「仓库结构」图仍写着旧路径 `crates/` 与 `apps/browser-extension/`、`apps/android/`，**实际是上面的 `core/` + `apps/sender/` + `apps/scanner/`**。导航请以上面这张表为准。
 
 ---
 
@@ -65,7 +63,10 @@ npm install            # 首次（含 postinstall: 提取 lzma-wasm）
 # ① 先构建 WASM（必须是扩展构建的前置）
 npm run wasm
 #   等价: wasm-pack build ../../core/transfer-engine --target web --features wasm,serde
+#         && rm -rf wasm-pkg && cp -r ../../core/transfer-engine/pkg wasm-pkg
 #   产物: apps/sender/wasm-pkg/transfer_engine*.js + *_bg.wasm
+#   说明: `wasm` feature 已隐含 `serde`（见 core/transfer-engine/Cargo.toml），
+#         故 `serde` 显式写出是冗余但无害的；后半段把产物从 pkg/ 搬到 wasm-pkg/。
 
 # ② 构建扩展（全部 4 个目标，会自动先跑 extract-lzma-wasm）
 npm run build
@@ -105,21 +106,76 @@ adb install app/build/outputs/apk/release/app-release.apk
 > ZXing-C++（`libairferry_zxing.so`）由 Gradle 的 CMake 任务在首次 APK 构建时从 GitHub 拉取 v3.0.2 自动编译（需网络；缓存后离线可用）。
 > **16 KiB 页对齐**：Android 15+ 的 16 KiB 页设备会拒绝 `dlopen` 仅 4 KiB 对齐的 `.so`（表现：所有 QR 解码静默失败）。`cpp/CMakeLists.txt` 用 `-Wl,-z,max-page-size=16384` 强制对齐；Rust `.so` 由 cargo-ndk 默认对齐。验证：`llvm-readelf -l lib*.so | grep LOAD`（Align 列应为 `0x4000`）。
 
-### 2.4 一键脚本
+### 2.4 一键脚本 `scripts/build-all.sh`
+
+| 子命令 | 动作 | 是否自动跑 cargo-ndk |
+|--------|------|---------------------|
+| `all`（默认） | `build_sender` + `build_scanner` | ✅ |
+| `sender` | WASM + 扩展 4 目标 | — |
+| `scanner` | `cargo ndk` 编译 `.so` → `./gradlew assembleRelease` | ✅ |
+| `wasm` | 仅 `npm run wasm` | — |
+| `dist` | **仅打包**：把已构建的 `build/` + APK 复制/签名到 `dist/`（不重新构建） | — |
+| `release` | `build_sender` → `build_scanner` → `pack_dist`（全量构建 + 打包） | ✅ |
 
 ```bash
-./scripts/build-all.sh              # 构建 sender + scanner
+./scripts/build-all.sh              # 构建 sender + scanner（不打包）
+./scripts/build-all.sh release      # 全量构建 + 打包到 dist/（最常用）
+./scripts/build-all.sh dist         # 仅打包（假设已构建好，不重新编译）
 ./scripts/build-all.sh sender       # 仅浏览器端（含 WASM）
-./scripts/build-all.sh scanner      # 仅 APK（不含 cargo-ndk，见下）
+./scripts/build-all.sh scanner      # 仅 APK
 ./scripts/build-all.sh wasm         # 仅 WASM
-./scripts/build-all.sh release      # 全部 + 打包到 dist/
 ```
+
+**脚本行为要点**（权威源 `scripts/build-all.sh`）：
+- **版本号**：从 `apps/sender/package.json` 的 `version` 读取（`read_version()`），与扩展 manifest 同源。改版本改这一处即可被脚本读取，但 APK/扩展本身的版本号仍需手动同步（见 §2.5）。
+- **`build_scanner` 自动跑 cargo-ndk**：在 `./gradlew assembleRelease` **之前**先用 `cargo ndk -t arm64-v8a ... build -p transfer-engine --features jni --release` 编译 `libtransfer_engine.so` 到 `jniLibs/`。这是为了避免打进过期 `.so`（AirFerry 重命名后旧符号 `com.easytransfer.*` 与 Kotlin 新包名对不上会 `UnsatisfiedLinkError` 闪退）。因此 `scanner`/`all`/`release` 子命令都自带这步，无需手动前置。
+- **Chrome crx 签名**：调用 macOS Chrome 的 `--pack-extension` + `--pack-extension-key`。私钥固定在 `dist/airferry-extension.pem`——**首次运行自动生成并挪到此处，之后 MV2/MV3 复用同一私钥**，保证扩展 ID 稳定。找不到 Chrome 二进制时跳过 crx、仅留 zip。
+- **`pack_dist` 会清旧产物**：删 `dist/airferry-{android-*.apk,sender-*.crx,sender-*.zip,sender-*.xpi}`，但**不动** `*.pem` 和 `*.keystore`。
+
+### 2.5 构建目录布局
+
+三层产物目录，**全部 git-ignored**（见 `.gitignore`）：
+
+```
+源码 ──构建──► 中间产物目录 ──打包──► dist/（发布）
+```
+
+| 目录 | 内容 | 来源 | git-ignored |
+|------|------|------|-------------|
+| `apps/sender/wasm-pkg/` | WASM 编译产物（`transfer_engine*.js` + `*_bg.wasm` + `.d.ts`）；内含 `.gitignore` 为 `*`（全忽略） | `npm run wasm` | ✅ |
+| `apps/sender/build/` | Plasmo 扩展构建产物：`{chrome,firefox}-{mv2,mv3}-prod/` 四个目录 + 构建期生成的 `.crx`/`.xpi`/`.zip` | `npm run build` | ✅ |
+| `apps/scanner/app/build/` | Gradle/APK 构建产物：`outputs/apk/{debug,release}/app-*.apk` + native-debug-symbols + baselineProfiles | `./gradlew` | ✅ |
+| `apps/scanner/app/src/main/jniLibs/arm64-v8a/` | Rust 编译的 `libtransfer_engine.so` + 遗留的 `libet_code.so`（**当前代码无任何 `System.loadLibrary("et_code")` 引用，未使用，建议清理**）。ZXing 的 `libairferry_zxing.so` 不在此处——由 CMake 在 APK 构建时直接编译进 APK | `cargo ndk ... build` | ✅ |
+| `dist/` | 发布归档 + 签名材料（`*.pem` Chrome 私钥、`airferry-release.keystore`） | `pack_dist` | ✅ |
+| `target/` | Rust 编译缓存（workspace 共享） | `cargo` | ✅ |
+
+> 构建产物**绝不提交 git**。分发走 GitHub Release，产物放 `dist/`。
+
+### 2.6 产物格式与命名规范
+
+发布归档（`dist/`）的命名格式 = `airferry-{端}-{平台}-v{版本}.{扩展}`：
+
+| 产物 | 命名格式 | 格式说明 |
+|------|---------|---------|
+| Android APK | `airferry-android-v{VER}.apk` | arm64-v8a 单 ABI；Android 10+（minSdk 29）；用 `apps/scanner/keystore.properties` 指向的 keystore 签名（缺失则回退 debug 签名） |
+| Chrome MV3 | `airferry-sender-chrome-mv3-v{VER}.crx` + `.zip` | `.crx` = Cr24 签名格式（Chrome 88+/Edge 88+，可拖拽安装）；`.zip` = 解压目录打包（商店外安装被拦截时的回退） |
+| Chrome MV2 | `airferry-sender-chrome-mv2-v{VER}.crx` + `.zip` | 同上，旧版兼容 |
+| Firefox MV3 | `airferry-sender-firefox-mv3-v{VER}.xpi` | Firefox 109+；`.xpi` 本质是 zip 改名 |
+| Firefox MV2 | `airferry-sender-firefox-mv2-v{VER}.xpi` | Firefox 91+ |
+
+**扩展产物内部结构**（每个 `*-prod/` 目录）：
+- `manifest.json`——由 `scripts/fix-manifest.cjs` 后处理：复制真实 RGBA 图标覆盖 Plasmo 占位图、MV2 删 `action` 留 `browser_action` 并把 CSP 改为 `wasm-eval`、Firefox 补 `browser_specific_settings.gecko.id = airferry@airferry.app`、修补 HTML `<title>`
+- `transfer_engine_bg.wasm` + `wasm-zstd.wasm` + `lzma-wasm.wasm`——运行时加载的 WASM 模块
+- 图标 `icon{16,32,48,64,128}.png`
+
+> MV2 与 MV3 用同一 Chrome 签名私钥打包会得到**相同的扩展 ID**（`nboajkjpabbekenmadidokmefholfmfk`），便于升级替换。
 
 ### ⚠️ 关键依赖顺序（最容易踩的坑）
 
-1. **WASM 必须先于扩展构建**：`npm run build` 不自动跑 `npm run wasm`，扩展构建前 `wasm-pkg/` 必须存在。
-2. **JNI `.so` 必须先于 APK 构建**：`cargo ndk ... build` 产出 `libtransfer_engine.so` 到 `jniLibs/` 后，`./gradlew` 才能打包进 APK。`./scripts/build-all.sh scanner` 与 `release` **都不自动跑 cargo-ndk**——必须手动先跑。
-3. **版本号三处同步**：`Cargo.toml`（`[workspace.package] version`）、`apps/sender/package.json`（`version` + `manifest.version`）、`apps/scanner/app/build.gradle.kts`（`versionName`/`versionCode`）目前都是 `1.0.0`，改版本时三处一起改。
+1. **WASM 必须先于扩展构建**：`npm run build` 不自动跑 `npm run wasm`，扩展构建前 `wasm-pkg/` 必须存在。（`build-all.sh sender/release` 会自动先跑 WASM。）
+2. **JNI `.so` 必须先于 APK 构建**：`cargo ndk ... build` 产出 `libtransfer_engine.so` 到 `jniLibs/` 后，`./gradlew` 才能打包进 APK。**`build-all.sh` 的 `scanner`/`all`/`release` 子命令会自动先跑 cargo-ndk**（见 §2.4），所以走脚本不会踩坑；但**若单独手动跑 `./gradlew`**（不经脚本），必须自己先跑 cargo-ndk，否则 APK 会带过期/缺失的 `.so`、扫码端运行时 `UnsatisfiedLinkError` 闪退。
+3. **`dist` 子命令不重新构建**：它假设 `apps/sender/build/` 与 APK 已就绪，只做复制/签名/打包。缺产物会 `error` 退出。
+4. **版本号三处同步**：`build-all.sh` 的发布文件名版本取自 `apps/sender/package.json`，但 APK 自身的 `versionName`（`build.gradle.kts`）和 Rust crate 版本（`Cargo.toml`）需手动保持一致。改版本时改 `package.json`（→ 文件名）+ `build.gradle.kts`（→ APK 内嵌）+ `Cargo.toml`（→ 核心库），三者一起改。
 
 ---
 
@@ -194,7 +250,7 @@ adb install app/build/outputs/apk/release/app-release.apk
 | 摄像头读不出码 | `qr_render.rs:74 encode`（版本选择）+ `scan_jni.cpp:64`（TryHarder） | 版本过高致模块过密；或 16KiB 页未对齐致 .so 加载失败 |
 | 压缩总是走 raw（100%） | `compress.ts:163 initZstdFromBytes` | worker 内 zstd WASM 未加载成功 |
 | 扩展构建缺 WASM | `apps/sender/wasm-pkg/` | 忘了先 `npm run wasm` |
-| APK 缺 native 库 | `jniLibs/arm64-v8a/libtransfer_engine.so` | 忘了先 `cargo ndk ... build` |
+| APK 缺 native 库 | `jniLibs/arm64-v8a/libtransfer_engine.so` | 手动跑 `./gradlew` 而未经 `build-all.sh`（后者已自动先跑 cargo-ndk） |
 
 ---
 
@@ -202,26 +258,27 @@ adb install app/build/outputs/apk/release/app-release.apk
 
 > 调研发现多处文档滞后于代码。**修改/引用时一律以代码为准**。下面是已确认的偏差：
 
-1. **README 仓库结构图过时**：写 `crates/`、`apps/browser-extension/`、`apps/android/`，实际是 `core/`、`apps/sender/`、`apps/scanner/`（见上方「仓库布局」）。
-
-2. **`docs/api.md` JNI 签名过时**：
+1. **`docs/api.md` JNI 签名过时**：
    - 写 `receiverIngest` 返回 `ByteArray?`（进度 JSON）—— **实际返回 packed `jlong` 位域**（`jni.rs:68`）。位布局见 [`docs/SPEC.md`](docs/SPEC.md) §JNI ingest 状态字。Kotlin 侧 `IngestStatus.unpack`（`ReceiverSessionManager.kt:67`）镜像此布局。
    - 写 `receiverAssemble(handle, outBuf): Int` —— **实际是 `receiverAssembleBytes(handle): ByteArray`**（原子返回完整字节，修复了 >2GB 截断 + 长度/填充竞态）。
 
-3. **压缩参数过时**：多处文档写「Zstd Lv22 / Xz Lv9 / 95% early-exit」。**实际代码（`compress.ts:55-64`）是 Zstd level 1、Xz level 9、early-exit 阈值 70%**（`e10079d`/`c2ae4a2` 提交已调）。
+2. **压缩参数（两端不同，勿混为一谈）**：
+   - **浏览器发送端**（`apps/sender/src/wasm/compress.ts:55-64`）：Zstd **level 1**、Xz **level 9**、early-exit 阈值 **70%**（`e10079d`/`c2ae4a2` 提交已调；三算法选优 raw/zstd/xz）。
+   - **Rust 核心库**（`core/qr-protocol/src/compress.rs:25,48`）：Zstd **level 22**（`DEFAULT_LEVEL`）、Xz **level 6 + EXTREME**（`XZ_PRESET`）。
+   - 两端用不同级别是**有意的**：发送端追求压缩启动快（Lv1），接收端只做解压、用高 ratio（见 `compress.rs:42-44` 的 NOTE）。两端产物是标准 zstd/xz 流，互操作正确。引用压缩参数时**必须分清是 TS 端还是 Rust 端**，不要合并描述。
 
-4. **版本号/Release 混用**：三处版本均为 `1.0.0`，但 README 与 dist 历史里出现过 v1.0.0/v1.1.0 混用。改版本时三处同步，且 `scripts/build-all.sh` 的 release 打包文件名需同时改。
+3. **版本号/Release 混用**：三处版本均为 `1.0.0`，但 README 与 dist 历史里出现过 v1.0.0/v1.1.0 混用。改版本时三处同步，且 `scripts/build-all.sh` 的 release 打包文件名需同时改。
 
-5. **高速录制模式为死代码**：`HighSpeedCaptureController.kt`、Settings 里的高速开关、`docs/architecture.md`/`data-flow.md` 的「实验性高速录制」段落——**当前代码中已禁用**（`ScanActivity` onCreate 中标记 disabled）。文档仍当可用功能描述。
+4. **高速录制模式为死代码**：`HighSpeedCaptureController.kt`、Settings 里的高速开关、`docs/architecture.md`/`data-flow.md` 的「实验性高速录制」段落——**当前代码中已禁用**（`ScanActivity` onCreate 中 `highSpeedEnabled = false`，UI 分支 `if (highSpeed)` 永不渲染）。文档仍当可用功能描述。
 
-6. **`derive_meta_from_totals` 已废弃**：`receiver.rs:417`，仅保留 JNI ABI 兼容，**新代码勿调用**（其 OTI 构建在大文件上会 assert）。现代路径：从描述符帧拿权威 OTI。
+5. **`derive_meta_from_totals` 已废弃**：`receiver.rs:422`，仅保留 JNI ABI 兼容，**新代码勿调用**（其 OTI 构建在大文件上会 assert）。现代路径：从描述符帧拿权威 OTI。
 
 ---
 
 ## 6. 架构关键不变量（速览，详见 [`docs/SPEC.md`](docs/SPEC.md)）
 
 - **同一份 Rust 源码** → 两个 FFI 目标：浏览器 `wasm32-unknown-unknown`（wasm-bindgen）、Android `aarch64-linux-android`（`#[no_mangle] extern "system"`）。编解码数学一致。
-- **帧格式**：`[Header 60B][Payload T][Footer 4B]`，大端，magic `0x4554`，version 1，双层 CRC32；T=symbol_size（浏览器默认 512，核心库默认 1024）。
+- **帧格式**：`[Header 60B][Payload T][Footer 4B]`，大端，magic `0x4554`，version 1，双层 CRC32；T=symbol_size（浏览器默认 1400——`DEFAULT_CONFIG.symbolSize`，核心库默认 1024——`Config::default()`）。
 - **会话 ID**：FNV-1a 128-bit（name/size/mtime/指纹），确定性 → 断点恢复。Rust 与 TS 实现必须位一致。
 - **喷泉码发射**：源符号跨块轮询发一遍 → 无限新鲜修复符号（ESI 单调递增、永不重复）。进度近似线性，无 coupon-collector 拖尾。
 - **接收端安全生命线**：`panic = "abort"` 构建，任何 panic = 进程崩溃。`ObjectMeta::validate` + `decompress_with_limit` 是把恶意/越界输入挡在解码器前的防线。
