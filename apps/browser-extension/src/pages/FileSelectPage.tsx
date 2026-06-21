@@ -107,6 +107,10 @@ export function FileSelectPage({ files, onSelected }: Props) {
     [files, onSelected]
   )
 
+  const clearAll = useCallback(() => {
+    onSelected([])
+  }, [onSelected])
+
   return (
     <div className="page">
       <h2>选择要发送的文件</h2>
@@ -124,6 +128,10 @@ export function FileSelectPage({ files, onSelected }: Props) {
           ref={inputRef}
           type="file"
           multiple
+          /* @ts-ignore - webkitdirectory is webkit-specific but widely supported */
+          webkitdirectory=""
+          mozdirectory=""
+          directory=""
           style={{ display: "none" }}
           onChange={(e) => {
             handleFiles(e.target.files)
@@ -149,39 +157,47 @@ export function FileSelectPage({ files, onSelected }: Props) {
       </div>
 
       {files.length > 0 && (
-        <ul className="file-list">
-          {files.map((f, idx) => (
-            <li key={`${f.name}-${idx}`} className="file-list-item">
-              <span className="file-list-name">
-                <span className="file-list-ico">{files.length > 1 ? "📄" : "📄"}</span>
-                <span className="file-list-text">
-                  <strong>{f.name}</strong>
-                  <span className="muted"> {formatBytes(f.size)}</span>
+        <>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 16, marginBottom: 8 }}>
+            <p className="hint" style={{ margin: 0 }}>
+              {files.length > 1
+                ? `${files.length} 个文件将打包为一次性传输`
+                : "已就绪，点击下一步"}
+            </p>
+            <button
+              className="btn secondary"
+              style={{ fontSize: 12, padding: "4px 12px" }}
+              onClick={clearAll}
+            >
+              清空
+            </button>
+          </div>
+          <ul className="file-list">
+            {files.map((f, idx) => (
+              <li key={`${f.name}-${idx}`} className="file-list-item">
+                <span className="file-list-name">
+                  <span className="file-list-ico">{files.length > 1 ? "📄" : "📄"}</span>
+                  <span className="file-list-text">
+                    <strong>{f.name}</strong>
+                    <span className="muted"> {formatBytes(f.size)}</span>
+                  </span>
                 </span>
-              </span>
-              {files.length > 1 && (
-                <button
-                  className="file-list-remove"
-                  title="移除"
-                  onClick={(e) => {
-                    e.stopPropagation()
-                    removeFile(idx)
-                  }}
-                >
-                  ✕
-                </button>
-              )}
-            </li>
-          ))}
-        </ul>
-      )}
-
-      {files.length > 0 && (
-        <p className="hint" style={{ marginTop: 8 }}>
-          {files.length > 1
-            ? `${files.length} 个文件将打包为一次性传输`
-            : "已就绪，点击下一步"}
-        </p>
+                {files.length > 1 && (
+                  <button
+                    className="file-list-remove"
+                    title="移除"
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      removeFile(idx)
+                    }}
+                  >
+                    ✕
+                  </button>
+                )}
+              </li>
+            ))}
+          </ul>
+        </>
       )}
     </div>
   )
