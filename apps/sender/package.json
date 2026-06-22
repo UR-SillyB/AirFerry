@@ -8,13 +8,15 @@
     "extract-lzma-wasm": "node scripts/extract-lzma-wasm.cjs",
     "postinstall": "node scripts/extract-lzma-wasm.cjs",
     "dev": "plasmo dev",
-    "build": "node scripts/build-all.cjs",
+    "build": "node scripts/extract-lzma-wasm.cjs && node scripts/build-wasm.cjs && node scripts/build-all.cjs",
     "build:chrome-mv3": "node scripts/extract-lzma-wasm.cjs && plasmo build --target=chrome-mv3 && node scripts/fix-manifest.cjs chrome-mv3-prod && cp node_modules/@foxglove/wasm-zstd/dist/wasm-zstd.wasm build/chrome-mv3-prod/wasm-zstd.wasm",
     "build:chrome-mv2": "node scripts/extract-lzma-wasm.cjs && plasmo build --target=chrome-mv2 && node scripts/fix-manifest.cjs chrome-mv2-prod && cp node_modules/@foxglove/wasm-zstd/dist/wasm-zstd.wasm build/chrome-mv2-prod/wasm-zstd.wasm",
     "build:firefox-mv3": "node scripts/extract-lzma-wasm.cjs && plasmo build --target=firefox-mv3 && node scripts/fix-manifest.cjs firefox-mv3-prod && cp node_modules/@foxglove/wasm-zstd/dist/wasm-zstd.wasm build/firefox-mv3-prod/wasm-zstd.wasm",
     "build:firefox-mv2": "node scripts/extract-lzma-wasm.cjs && plasmo build --target=firefox-mv2 && node scripts/fix-manifest.cjs firefox-mv2-prod && cp node_modules/@foxglove/wasm-zstd/dist/wasm-zstd.wasm build/firefox-mv2-prod/wasm-zstd.wasm",
     "package": "plasmo package",
-    "wasm": "wasm-pack build ../../core/transfer-engine --target web --features wasm,serde && rm -rf wasm-pkg && cp -r ../../core/transfer-engine/pkg wasm-pkg"
+    "wasm": "node scripts/build-wasm.cjs",
+    "wasm:legacy": "wasm-pack build ../../core/transfer-engine --target web --out-dir pkg-legacy -- --features wasm,serde && rm -rf wasm-pkg-legacy && cp -r ../../core/transfer-engine/pkg-legacy wasm-pkg-legacy",
+    "wasm:simd": "RUSTFLAGS='-C target-feature=+simd128' wasm-pack build ../../core/transfer-engine --target web --out-dir pkg-simd -- --features wasm,serde && rm -rf wasm-pkg-simd && cp -r ../../core/transfer-engine/pkg-simd wasm-pkg-simd"
   },
   "dependencies": {
     "@foxglove/wasm-zstd": "^1.0.1",

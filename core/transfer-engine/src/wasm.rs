@@ -142,6 +142,104 @@ impl SenderSessionWasm {
         Ok(out)
     }
 
+    /// Zero-allocation variant of [`Self::next_qr`]: writes the matrix into the
+    /// caller-supplied `out_modules` buffer instead of returning a fresh
+    /// `Vec<u8>` that wasm-bindgen would deep-copy into a new JS `Uint8Array`.
+    ///
+    /// The caller must size `out_modules` to at least `side*side` bytes — the
+    /// largest possible QR is Version 40 (177×177 = 31329 B), so a 32 KiB
+    /// buffer is always safe. `out_side[0]` is set to the matrix side length.
+    /// Returns the number of module bytes written (= `side*side`).
+    ///
+    /// Because the buffer is JS-owned (`&mut [u8]` is exposed as a `Uint8Array`
+    /// view), writes land directly in the caller's `ArrayBuffer` with no
+    /// per-frame allocation — this is the hot-path win for the render loop
+    /// (240 encodes/s at 4-code×60fps).
+    pub fn next_qr_into(
+        &mut self,
+        out_modules: &mut [u8],
+        out_side: &mut [u32],
+    ) -> Result<u32, JsValue> {
+        if out_side.is_empty() {
+            return Err(JsValue::from_str("out_side buffer empty"));
+        }
+        let frame = self.inner.next_frame().map_err(err_to_js)?;
+        let bytes = frame.to_bytes();
+        let matrix = qr_protocol::qr_render::encode(&bytes)
+            .map_err(|e| JsValue::from_str(&format!("qr encode failed: {e:?}")))?;
+        let n = matrix.modules.len();
+        if n > out_modules.len() {
+            return Err(JsValue::from_str(&format!(
+                "out_modules too small: need {n}, have {}",
+                out_modules.len()
+            )));
+        }
+        for (dst, &dark) in out_modules[..n].iter_mut().zip(matrix.modules.iter()) {
+            *dst = dark as u8;
+        }
+        out_side[0] = matrix.size as u32;
+        Ok(n as u32)
+    }
+
+    /// Zero-allocation variant of [`Self::next_qr_multi`]: writes the flat
+    /// little-endian buffer into the caller-supplied `out_buf` instead of
+    /// returning a fresh `Vec<u8>`.
+    ///
+    /// Buffer layout (same as `next_qr_multi`):
+    ///   `[u32 count_actual][for each matrix: u32 side + side*side bytes]`
+    /// Sizing: `4 + count * (4 + 177*177)` bytes is always safe (one u32 count
+    /// slot + per-matrix header + largest-version matrix). For the UI's 4-code
+    /// mode that is `4 + 4*(4+31329) ≈ 125 KiB`. Returns total bytes written.
+    pub fn next_qr_multi_into(&mut self, count: u32, out_buf: &mut [u8]) -> Result<u32, JsValue> {
+        let n = count.min(8) as usize;
+        let mut pos: usize = 0;
+        // Reserve and later backfill the count slot.
+        if out_buf.len() < 4 {
+            return Err(JsValue::from_str("out_buf too small for count slot"));
+        }
+        let count_slot = pos;
+        pos += 4;
+        let mut produced: u32 = 0;
+        for _ in 0..n {
+            let frame = match self.inner.next_frame() {
+                Ok(f) => f,
+                Err(e) => {
+                    android_log_wasm(&format!("next_qr_multi_into frame err: {e}"));
+                    break;
+                }
+            };
+            let bytes = frame.to_bytes();
+            let matrix = match qr_protocol::qr_render::encode(&bytes) {
+                Ok(m) => m,
+                Err(e) => {
+                    android_log_wasm(&format!("next_qr_multi_into qr err: {e:?}"));
+                    break;
+                }
+            };
+            let side_bytes = (matrix.size as u32).to_le_bytes();
+            let need = 4 + matrix.modules.len();
+            if pos + need > out_buf.len() {
+                return Err(JsValue::from_str(&format!(
+                    "out_buf overflow at matrix {}: need {need} at pos {pos}, have {}",
+                    produced,
+                    out_buf.len()
+                )));
+            }
+            out_buf[pos..pos + 4].copy_from_slice(&side_bytes);
+            pos += 4;
+            for (dst, &dark) in out_buf[pos..pos + matrix.modules.len()]
+                .iter_mut()
+                .zip(matrix.modules.iter())
+            {
+                *dst = dark as u8;
+            }
+            pos += matrix.modules.len();
+            produced += 1;
+        }
+        out_buf[count_slot..count_slot + 4].copy_from_slice(&produced.to_le_bytes());
+        Ok(pos as u32)
+    }
+
     /// Session id (low 64 bits).
     pub fn session_id_lo(&self) -> u64 {
         self.inner.session_id() as u64

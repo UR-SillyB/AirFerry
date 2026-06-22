@@ -51,6 +51,27 @@ export function QrStream({
   const statsTimerRef = useRef<number>(0)
   const [fullscreen, setFullscreen] = useState(false)
 
+  // Pre-allocated, reused-across-frames WASM scratch buffers. The hot path
+  // runs at up to 60fps×4 codes = 240 encodes/s; allocating fresh TypedArrays
+  // each tick heaps up GC pressure that shows up as rAF jitter. These buffers
+  // live for the component's whole lifetime and are fed to the zero-copy
+  // `next_qr_into` / `next_qr_multi_into` exports, which write directly into
+  // them and return only the byte count.
+  //
+  // Sizing: the largest QR is Version 40 = 177×177 = 31329 modules. The single
+  // buffer holds one matrix; the multi buffer holds the flat [u32 count][per
+  // matrix: u32 side + side² bytes] layout for up to 4 matrices.
+  // ⚠ The subarray views handed to drawMatrix are only valid for the current
+  // tick — the next tick overwrites the backing buffer. The render path reads
+  // them to the Canvas within the same tick (putImageData is synchronous), so
+  // this is safe; never store these views across frames.
+  const MAX_QR_SIDE = 177
+  const MAX_QR_MODULES = MAX_QR_SIDE * MAX_QR_SIDE
+  const matrixBufRef = useRef(new Uint8Array(MAX_QR_MODULES))
+  const sideBufRef = useRef(new Uint32Array(1))
+  // Multi buffer: u32 count + (u32 side + side²) per matrix, up to 4 matrices.
+  const multiBufRef = useRef(new Uint8Array(4 + 4 * (4 + MAX_QR_MODULES)))
+
   // Refs for callback props so the render function's useCallback identity stays
   // stable across parent re-renders. Without this, an inline arrow function
   // (e.g. onError={(e) => setError(...)}) gets a new identity every time the
@@ -75,16 +96,23 @@ export function QrStream({
     const wantMulti = multiQr >= 2
 
     // Collect the matrices to render this tick. Each entry: [side, modules].
+    // Uses the zero-copy `*_into` exports: the WASM side writes directly into
+    // our reused scratch buffers (matrixBufRef / multiBufRef), and we slice
+    // views into them — no per-tick allocation.
     type Matrix = { side: number; modules: Uint8Array }
     let matrices: Matrix[]
     try {
       if (!wantMulti) {
-        const sideBuf = new Uint32Array(1)
-        const modules = session.next_qr(sideBuf)
-        matrices = [{ side: sideBuf[0], modules }]
+        const n = session.next_qr_into(matrixBufRef.current, sideBufRef.current)
+        const side = sideBufRef.current[0]
+        // subarray is a zero-copy view; valid only until the next tick.
+        matrices = [{ side, modules: matrixBufRef.current.subarray(0, n) }]
       } else {
-        const buf = session.next_qr_multi(multiQr)
-        matrices = parseMultiQrBuf(buf)
+        const written = session.next_qr_multi_into(
+          multiQr,
+          multiBufRef.current
+        )
+        matrices = parseMultiQrBuf(multiBufRef.current, written)
         if (matrices.length === 0) {
           // Nothing produced this tick; skip the redraw.
           return
@@ -265,20 +293,26 @@ function drawMatrix(
   // Initialize to white (0xFFFFFFFF on little-endian = A=255,B=255,G=255,R=255).
   pixels.fill(0xFFFFFFFF)
 
-  // Plot dark modules as blocks of pixels.
+  // Plot dark modules as blocks of pixels. We tried replacing the inner
+  // modulePx-wide row write with `Uint32Array.set(blackRow, offset)` (batch
+  // copy of a pre-filled template), but benchmarking showed it is ~2× SLOWER
+  // at the realistic modulePx (4–7): TypedArray.set has per-call overhead
+  // (bounds check + memcpy setup) that exceeds the cost of 4–7 inline scalar
+  // writes. The crossover where set() wins is modulePx ≥ 16, far above what
+  // any real canvas size produces. The scalar loop below is the fast path.
+  // White modules are skipped (buffer is already white).
   const black = 0xFF000000
   for (let y = 0; y < side; y++) {
     const rowBase = y * side
     const baseY = (y + margin) * modulePx
     for (let x = 0; x < side; x++) {
-      if (matrix[rowBase + x] !== 0) {
-        const baseX = (x + margin) * modulePx
-        for (let dy = 0; dy < modulePx; dy++) {
-          const row = (baseY + dy) * drawSize
-          const end = baseX + modulePx
-          for (let dx = baseX; dx < end; dx++) {
-            pixels[row + dx] = black
-          }
+      if (matrix[rowBase + x] === 0) continue
+      const baseX = (x + margin) * modulePx
+      for (let dy = 0; dy < modulePx; dy++) {
+        const row = (baseY + dy) * drawSize + baseX
+        const end = baseX + modulePx
+        for (let dx = baseX; dx < end; dx++) {
+          pixels[row + dx] = black
         }
       }
     }
@@ -289,24 +323,30 @@ function drawMatrix(
 }
 
 /**
- * Parse the flat little-endian buffer returned by `next_qr_multi`:
+ * Parse the flat little-endian buffer returned by `next_qr_multi_into`:
  *   [u32 count][for each: u32 side + side*side bytes modules]
  * Returns the list of {side, modules}. An empty/short buffer yields [].
  *
- * The DataView reads over the same buffer the WASM call returned (a fresh
- * Uint8Array), so no extra copy is made beyond the slice views into modules.
+ * `len` is the number of bytes actually written by the WASM call (≤
+ * buf.byteLength), so the parser stops at the real end of the data rather
+ * than reading stale bytes from the reused backing buffer. The DataView reads
+ * over the same buffer the WASM call returned (the caller's scratch buffer),
+ * so no extra copy is made beyond the slice views into modules.
  */
-function parseMultiQrBuf(buf: Uint8Array): { side: number; modules: Uint8Array }[] {
-  if (buf.length < 4) return []
+function parseMultiQrBuf(
+  buf: Uint8Array,
+  len: number = buf.length
+): { side: number; modules: Uint8Array }[] {
+  if (len < 4) return []
   const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength)
   const count = dv.getUint32(0, true) // little-endian
   const out: { side: number; modules: Uint8Array }[] = []
   let pos = 4
-  for (let i = 0; i < count && pos + 4 <= buf.length; i++) {
+  for (let i = 0; i < count && pos + 4 <= len; i++) {
     const side = dv.getUint32(pos, true)
     pos += 4
     const n = side * side
-    if (pos + n > buf.length) break // truncated; stop
+    if (pos + n > len) break // truncated; stop
     out.push({ side, modules: buf.subarray(pos, pos + n) })
     pos += n
   }

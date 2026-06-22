@@ -7,14 +7,25 @@
 - Rust + wasm-pack（见 [开发环境搭建](dev-setup.md)）
 - 打包发布产物（可选）：macOS 上安装的 Google Chrome，用于签名 `.crx`
 
-## 构建 WASM 核心
+## 构建 WASM 核心（双产物）
 
 ```bash
 cd apps/sender
 npm run wasm
 ```
 
-此命令编译 `core/transfer-engine` 为 WebAssembly 并输出到 `wasm-pkg/`（即 `core/transfer-engine/pkg` 的副本）。
+此命令（`scripts/build-wasm.cjs`）编译 `core/transfer-engine` 为 WebAssembly **两份产物**：
+
+| 产物目录 | wasm-bindgen 版本 | 特性 | 供哪个目标 |
+|---------|------------------|------|-----------|
+| `wasm-pkg-legacy/` | `=0.2.92`（默认锁定） | 标量、无 externref（Chrome 87+ 可加载） | MV2（`chrome-mv2` / `firefox-mv2`） |
+| `wasm-pkg-simd/` | `=0.2.125`（脚本临时升级） | `+simd128` SIMD + externref（Chrome 96+ / FF 116+） | MV3（`chrome-mv3` / `firefox-mv3`） |
+
+> **Cargo.toml 还原**：构建 MV3 时脚本临时改写 `core/transfer-engine/Cargo.toml` 的 wasm-bindgen 版本到 0.2.125，构建完在 `finally` 里用 ① 内存回写 Cargo.toml + ② `git checkout Cargo.lock` 字节级还原。跑完后 `git status` 对 Cargo 文件零改动。详见 `apps/sender/scripts/build-wasm.cjs`。
+
+> **关于 SIMD 提速的实测结论**：`+simd128` 对当前纯标量的 `raptorq`/`qrcode` crate **无性能收益**（实测 0.95×，反而因 wasm 变大略慢）。双产物机制的真实价值是「MV2 兼容老 Chrome（无 externref）+ MV3 用新工具链」的兼容性分离，并为未来引入 SIMD 化的库保留构建基础设施。详见 `AGENTS.md` §5.6。
+
+> `npm run build` 已内嵌此步骤，通常无需单独跑 `npm run wasm`。
 
 ## 构建扩展
 
@@ -159,6 +170,7 @@ apps/sender/
 │   │   └── session.ts          # 会话 ID 派生（FNV-1a 128）
 │   └── assets/
 │       └── app.css             # 样式
-├── wasm-pkg/                   # wasm-pack 产物（generated）
+├── wasm-pkg-legacy/            # wasm-pack 产物（generated，MV2 用，标量+0.2.92）
+├── wasm-pkg-simd/              # wasm-pack 产物（generated，MV3 用，SIMD+0.2.125）
 └── assets/                     # 图标（icon{16,32,48,64,128}.png）
 ```
