@@ -1,5 +1,6 @@
 using System.Text.Json;
 using AirFerry.Windows.Scan;
+using Xunit;
 
 namespace AirFerry.Windows.Tests;
 

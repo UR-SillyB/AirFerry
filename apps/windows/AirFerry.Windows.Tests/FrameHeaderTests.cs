@@ -1,5 +1,6 @@
 using System.Buffers.Binary;
 using AirFerry.Windows.Scan;
+using Xunit;
 
 namespace AirFerry.Windows.Tests;
 

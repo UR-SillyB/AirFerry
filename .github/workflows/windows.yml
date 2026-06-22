@@ -27,7 +27,7 @@ jobs:
     name: Rust C ABI (cffi)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -58,7 +58,7 @@ jobs:
     name: C# protocol tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Setup .NET 8 SDK
         uses: actions/setup-dotnet@v4
@@ -74,11 +74,12 @@ jobs:
   # WPF (net8.0-windows TFM) 只能在 Windows 上构建。对标 build-windows.ps1：
   # ① cargo build --features cffi → transfer_engine.dll
   # ② dotnet build → AirFerry.exe（含 runtime/ DLL 拷贝）
+  # 不在此 job 跑 dotnet test（协议层测试已在 csharp-tests job 跑过，避免重复）。
   windows-build:
     name: Windows build (WPF + Rust DLL)
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -123,5 +124,3 @@ jobs:
       - name: dotnet build (WPF Release)
         run: dotnet build apps/windows/AirFerry.Windows/AirFerry.Windows.csproj -c Release --no-restore
 
-      - name: dotnet test (Windows runner, 完整测试含 P/Invoke 可用)
-        run: dotnet test apps/windows/AirFerry.Windows.Tests/AirFerry.Windows.Tests.csproj -c Release --no-restore --logger "console;verbosity=normal"

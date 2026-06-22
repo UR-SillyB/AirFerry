@@ -1,4 +1,5 @@
 using AirFerry.Windows.Bundle;
+using Xunit;
 
 namespace AirFerry.Windows.Tests;
 
