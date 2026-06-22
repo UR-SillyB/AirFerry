@@ -35,10 +35,8 @@ public class FrameHeaderTests
     [Fact]
     public void Parse_ValidHeader_ReadsAllFields()
     {
-        byte[] buf = BuildHeader();
-        var h = FrameHeader.Parse(buf);
-        Assert.NotNull(h);
-        Assert.Equal(0x4554, h!.Magic);
+        FrameHeader h = FrameHeader.Parse(BuildHeader()).Value;
+        Assert.Equal(0x4554, h.Magic);
         Assert.Equal(1, h.Version);
         Assert.Equal(0, h.Flags);
         Assert.Equal(0xDEADul, h.SessionIdLo);
@@ -54,23 +52,20 @@ public class FrameHeaderTests
     [Fact]
     public void Parse_DescriptorFlag_Detected()
     {
-        byte[] buf = BuildHeader(flags: 0x01);
-        var h = FrameHeader.Parse(buf);
-        Assert.NotNull(h);
-        Assert.True(h!.IsDescriptor);
+        FrameHeader h = FrameHeader.Parse(BuildHeader(flags: 0x01)).Value;
+        Assert.True(h.IsDescriptor);
         // Other flag bits must not affect IsDescriptor (only bit 0 matters).
-        h = FrameHeader.Parse(BuildHeader(flags: 0x02));
-        Assert.False(h!.IsDescriptor);
+        h = FrameHeader.Parse(BuildHeader(flags: 0x02)).Value;
+        Assert.False(h.IsDescriptor);
     }
 
     [Fact]
     public void Parse_SessionId_SplitsIntoHiLoHalves()
     {
         // 128-bit session id = hi(0x1111222233334444) || lo(0x5555666677778888).
-        byte[] buf = BuildHeader(sidHi: 0x1111222233334444, sidLo: 0x5555666677778888);
-        var h = FrameHeader.Parse(buf);
-        Assert.NotNull(h);
-        Assert.Equal(0x1111222233334444ul, h!.SessionIdHi);
+        FrameHeader h = FrameHeader.Parse(
+            BuildHeader(sidHi: 0x1111222233334444, sidLo: 0x5555666677778888)).Value;
+        Assert.Equal(0x1111222233334444ul, h.SessionIdHi);
         Assert.Equal(0x5555666677778888ul, h.SessionIdLo);
     }
 
