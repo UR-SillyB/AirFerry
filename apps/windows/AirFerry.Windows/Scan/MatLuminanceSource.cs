@@ -13,8 +13,10 @@ namespace AirFerry.Windows.Scan;
 public sealed class MatLuminanceSource : LuminanceSource
 {
     private readonly byte[] _luminances;
-    public override int Width { get; }
-    public override int Height { get; }
+    private readonly int _width;
+    private readonly int _height;
+    public override int Width => _width;
+    public override int Height => _height;
     public override byte[] Matrix => _luminances;
 
     /// <summary>
@@ -29,9 +31,9 @@ public sealed class MatLuminanceSource : LuminanceSource
             throw new ArgumentException(
                 $"Mat must be CV_8UC1 grayscale, got {gray.Type()}", nameof(gray));
         }
-        Width = gray.Width;
-        Height = gray.Height;
-        _luminances = new byte[Width * Height];
+        _width = gray.Width;
+        _height = gray.Height;
+        _luminances = new byte[_width * _height];
         CopyFromMat(gray);
     }
 
@@ -42,8 +44,8 @@ public sealed class MatLuminanceSource : LuminanceSource
     public MatLuminanceSource(byte[] pixels, int width, int height)
         : base(width, height)
     {
-        Width = width;
-        Height = height;
+        _width = width;
+        _height = height;
         _luminances = new byte[width * height];
         Buffer.BlockCopy(pixels, 0, _luminances, 0, width * height);
     }
@@ -52,8 +54,8 @@ public sealed class MatLuminanceSource : LuminanceSource
     public MatLuminanceSource(int width, int height)
         : base(width, height)
     {
-        Width = width;
-        Height = height;
+        _width = width;
+        _height = height;
         _luminances = new byte[width * height];
     }
 
