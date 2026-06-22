@@ -53,10 +53,6 @@ public sealed class VideoCapture : IDisposable
             _cap.FrameWidth = width;
             _cap.FrameHeight = height;
             _cap.Fps = fps;
-            // Buffersize keeps DirectShow's internal queue shallow so a stalled
-            // decoder drops old frames rather than delivering them late (mirrors
-            // CameraX's STRATEGY_KEEP_ONLY_LATEST).
-            _cap.Buffersize = 1;
         }
     }
 

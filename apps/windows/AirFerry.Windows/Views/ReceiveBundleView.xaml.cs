@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Media;
 using AirFerry.Windows.Bundle;
 using AirFerry.Windows.Models;
 using AirFerry.Windows.ViewModels;

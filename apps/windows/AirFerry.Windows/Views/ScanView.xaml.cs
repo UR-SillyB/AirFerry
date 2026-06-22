@@ -4,7 +4,9 @@ using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using AirFerry.Windows.ViewModels;
-using OpenCvSharp;
+using CvPoint = OpenCvSharp.Point;
+using CvSize = OpenCvSharp.Size;
+using CvVideoCapture = OpenCvSharp.VideoCapture;
 
 namespace AirFerry.Windows.Views;
 
@@ -20,7 +22,7 @@ public partial class ScanView : Page
     private readonly ScanViewModel _vm;
     private readonly DispatcherTimer _progressTimer;
     private readonly DispatcherTimer _previewTimer;
-    private VideoCapture? _previewCapture;
+    private AirFerry.Windows.Scan.VideoCapture? _previewCapture;
 
     public ScanView(int deviceIndex)
     {
@@ -74,7 +76,7 @@ public partial class ScanView : Page
         // scan still works — the preview is cosmetic.
         try
         {
-            _previewCapture = new VideoCapture(deviceIndex, width: 960, height: 540, fps: 30);
+            _previewCapture = new AirFerry.Windows.Scan.VideoCapture(deviceIndex, 960, 540, 30);
         }
         catch
         {
