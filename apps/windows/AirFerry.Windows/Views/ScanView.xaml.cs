@@ -7,6 +7,7 @@ using AirFerry.Windows.ViewModels;
 using CvPoint = OpenCvSharp.Point;
 using CvSize = OpenCvSharp.Size;
 using CvVideoCapture = OpenCvSharp.VideoCapture;
+using Mat = OpenCvSharp.Mat;
 
 namespace AirFerry.Windows.Views;
 

@@ -91,7 +91,7 @@ public partial class ScanViewModel : ObservableObject, IDisposable
         SelectedDeviceIndex = deviceIndex;
 
         _session = new ReceiverSession();
-        _capture = new VideoCapture(deviceIndex);
+        _capture = new Scan.VideoCapture(deviceIndex);
         if (!_capture.IsOpen)
         {
             StatusText = "无法打开设备，请检查是否被其他程序占用";
