@@ -3,35 +3,6 @@ using System.Text;
 
 namespace AirFerry.Windows.Bundle;
 
-/// <summary>
-/// Multi-file bundle container parser — mirrors the browser sender's
-/// <c>bundle.ts</c> byte-for-byte so the two sides stay interoperable.
-/// </summary>
-/// <remarks>
-/// <para>
-/// Wire layout (big-endian):
-/// <code>
-/// offset  size   field
-/// 0       8      magic: ASCII "ETBUNDL1"
-/// 8       2      version: u16 = 1
-/// 10      2      file_count: u16
-/// 12      …      file_count × { u16 name_len, name_len name UTF-8,
-///                                u64 size, size content }
-/// </code>
-/// </para>
-/// <para>
-/// The sender only emits a bundle when ≥2 files are selected. A single-file
-/// transfer never carries this magic, so the bundle path is transparent to old
-/// flows.
-/// </para>
-/// <para>
-/// All parsing is bounds-checked and returns <see langword="null"/> on any
-/// malformed input so the caller can fall back to treating the bytes as a
-/// plain single file. Mirrors <c>BundleParser.kt</c>.
-/// </para>
-/// </remarks>
-namespace AirFerry.Windows.Bundle;
-
 /// <summary>One file inside a multi-file bundle.</summary>
 public sealed class BundleFile(string name, byte[] data)
 {
@@ -49,11 +20,24 @@ public sealed class Bundle(IReadOnlyList<BundleFile> files)
 /// Multi-file bundle container parser — mirrors the browser sender's
 /// <c>bundle.ts</c> byte-for-byte so the two sides stay interoperable.
 /// </summary>
+/// <remarks>
+/// Wire layout (big-endian):
+/// <code>
+/// offset  size   field
+/// 0       8      magic: ASCII "ETBUNDL1"
+/// 8       2      version: u16 = 1
+/// 10      2      file_count: u16
+/// 12      …      file_count × { u16 name_len, name_len name UTF-8,
+///                                u64 size, size content }
+/// </code>
+/// The sender only emits a bundle when ≥2 files are selected.
+/// All parsing is bounds-checked and returns null on any malformed input.
+/// </remarks>
 public static class BundleParser
 {
     public static ReadOnlySpan<byte> Magic => "ETBUNDL1"u8;
 
-    /// <summary>True if <paramref name="bytes"/> starts with the 8-byte magic.</summary>
+    /// <summary>True if bytes starts with the 8-byte bundle magic.</summary>
     public static bool IsBundle(ReadOnlySpan<byte> bytes)
     {
         if (bytes.Length < 12)
@@ -64,10 +48,8 @@ public static class BundleParser
     }
 
     /// <summary>
-    /// Parse a bundle. Returns <see langword="null"/> on any structural problem
-    /// (bad magic, truncated entry, declared length beyond the buffer). The
-    /// caller should treat <see langword="null"/> as "not a bundle / corrupt"
-    /// and fall back to single-file handling.
+    /// Parse a bundle. Returns null on any structural problem (bad magic,
+    /// truncated entry, declared length beyond the buffer).
     /// </summary>
     public static Bundle? Parse(ReadOnlySpan<byte> bytes)
     {
@@ -75,7 +57,6 @@ public static class BundleParser
         {
             return null;
         }
-        // Read counts at fixed offsets (big-endian u16).
         int version = BinaryPrimitives.ReadUInt16BigEndian(bytes.Slice(8, 2));
         if (version != 1)
         {
@@ -88,10 +69,9 @@ public static class BundleParser
         }
 
         var files = new BundleFile[count];
-        int pos = 12; // past magic + version + count.
+        int pos = 12;
         for (int i = 0; i < count; i++)
         {
-            // Need at least: u16 name_len (2) + u64 size (8) = 10 bytes.
             if (pos + 2 > bytes.Length)
             {
                 return null;
@@ -106,7 +86,6 @@ public static class BundleParser
             pos += nameLen;
             long size = (long)BinaryPrimitives.ReadUInt64BigEndian(bytes.Slice(pos, 8));
             pos += 8;
-            // Defend against a malicious/over-long declared size.
             if (size < 0 || size > int.MaxValue)
             {
                 return null;
