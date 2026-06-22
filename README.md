@@ -1,4 +1,4 @@
-# 易传 AirFerry
+# AirFerry
 
 > 完全离线的光学文件传输系统 · Fully Offline Optical File Transfer
 
@@ -7,8 +7,8 @@
 > 🤖 **AI 代理/新开发者**：先读 [AGENTS.md](AGENTS.md)（构建命令、代码导航、调试速查、文档与代码偏差清单）。跨端线格式的位级权威定义见 [docs/SPEC.md](docs/SPEC.md)。
 
 - **发送端**：浏览器扩展（Chrome / Edge / Firefox，支持 MV2 与 MV3）
-- **接收端**：Android 原生 App
-- **核心库**：Rust，同时编译为 **WebAssembly**（浏览器插件）与 **Android Native Library**（JNI 调用），保证两端编解码逻辑完全一致
+- **接收端**：Android 原生 App · Windows 桌面应用（WPF）
+- **核心库**：Rust，同时编译为 **WebAssembly**（浏览器插件）、**Android Native Library**（JNI）、**Windows DLL**（C ABI，P/Invoke），保证三端编解码逻辑完全一致
 
 ## 数据流
 
@@ -40,7 +40,7 @@
 - ✅ 4 码并行模式（同帧 tile 4 个不同符号，吞吐 ~4×，默认开启）
 - ✅ 速度预设（稳定 / 高速 / 极限 / 激进，默认激进 1400B@60fps 实测最快）
 - ✅ 多浏览器支持（Chrome / Edge / Firefox，MV2 + MV3）
-- 🧪 实验性：旗舰机高速相机录制（120/240fps）→ 后台批量解码（设置中开启）
+- ✅ 多接收端：Android App（CameraX + ZXing-C++）与 Windows 应用（OpenCvSharp + ZXing.Net，支持摄像头 + USB/HDMI/SDI 采集卡）
 
 ## 下载安装
 
@@ -49,6 +49,7 @@
 | 文件 | 说明 |
 |------|------|
 | `airferry-android-v1.0.0.apk` | Android 接收端（Android 10+，arm64-v8a） |
+| `airferry-windows-x64-v1.0.0.zip` | Windows 接收端（Windows 10+，x64；需 .NET 8 运行时） |
 | `airferry-sender-chrome-mv3-v1.0.0.crx` | Chrome / Edge MV3 扩展（已签名 Cr24） |
 | `airferry-sender-chrome-mv3-v1.0.0.zip` | Chrome / Edge MV3（解压加载，crx 被拦截时用） |
 | `airferry-sender-chrome-mv2-v1.0.0.crx` | Chrome / Edge MV2 扩展（旧版兼容，已签名 Cr24） |
@@ -61,6 +62,10 @@
 ### Android 接收端
 
 下载 APK，允许「未知来源」后安装到 Android 10+ 设备（已用 release keystore 签名）。
+
+### Windows 接收端
+
+解压 `airferry-windows-x64-v1.0.0.zip`，安装 [.NET 8 运行时](https://dotnet.microsoft.com/download/dotnet/8.0) 后运行 `AirFerry.exe`。启动后在设备选择页挑选摄像头或采集卡（USB/HDMI/SDI 采集卡会被自动标注），进入扫码页对准屏幕二维码即可。
 
 ### Chrome / Edge 扩展
 
@@ -91,9 +96,11 @@ AirFerry/
 │   └── transfer-engine/   # 编排 / 状态机 / 进度 / 断点 + WASM&JNI 绑定
 ├── apps/
 │   ├── sender/            # Plasmo + React + TS + WASM 发送端（浏览器扩展）
-│   └── scanner/           # Kotlin + CameraX + ZXing-C++ 接收端（Android App）
+│   ├── scanner/           # Kotlin + CameraX + ZXing-C++ 接收端（Android App）
+│   └── windows/           # C# WPF + OpenCvSharp + ZXing.Net 接收端（Windows App）
 ├── scripts/
-│   └── build-all.sh       # 一键构建 + 打包（含 crx/xpi 签名）
+│   ├── build-all.sh       # 一键构建 + 打包（含 crx/xpi 签名，windows 子命令）
+│   └── build-windows.ps1  # Windows 端原生 PowerShell 构建脚本（首选）
 ├── docs/                  # 协议 / 架构 / API / 构建说明（中文）
 ├── Cargo.toml             # Rust workspace 根配置
 └── .gitignore             # dist/ 产物不入库（走 GitHub Release）
@@ -108,6 +115,7 @@ AirFerry/
 | 核心库 | `cargo build` / `cargo test` | Rust workspace |
 | 浏览器扩展 | `npm run build` | 构建全部 4 个目标 |
 | Android App | `./gradlew assembleDebug` | 需要 Android NDK |
+| Windows App | `./scripts/build-windows.ps1` | 须 Windows + .NET 8 SDK（详见 [docs/build-windows.md](docs/build-windows.md)） |
 
 ## 技术架构
 
@@ -116,7 +124,7 @@ AirFerry/
 - **压缩层**：三算法选优（Raw / Zstd Lv1 / Xz Lv9），70% Zstd early-exit 启发式跳过慢速 Xz
 - **传输层**：60 字节帧头 + symbol_size 负载（浏览器默认 1400）+ 4 字节 CRC，编码为**最小版本** EC-L 二维码（1404B 帧 → V25 117×117）；4 码模式同帧 tile 4 个符号、吞吐 ~4×
 - **协议层**：Descriptor 帧（每 16 帧，首帧即描述符）携带 OTI + 文件元数据（文件名、大小、CRC32、压缩标签）
-- **接收层**：CameraX 锁定 ~60fps → 并行解码池（多线程 ZXing + 中心 ROI 裁剪）→ 串行 JNI 摄入
+- **接收层**：Android（CameraX 锁定 ~60fps → 并行解码池 多线程 ZXing-C++ + 中心 ROI 裁剪 → 串行 JNI 摄入）；Windows（OpenCvSharp DirectShow 采集 → 并行解码池 多线程 ZXing.Net → 串行 P/Invoke 摄入）
 
 ## 文档
 
@@ -130,6 +138,7 @@ AirFerry/
 - [API 参考](docs/api.md) — 核心 API 文档
 - [构建指南 - 浏览器扩展](docs/build-browser.md)
 - [构建指南 - Android](docs/build-android.md)
+- [构建指南 - Windows](docs/build-windows.md)
 - [开发环境搭建](docs/dev-setup.md)
 
 ## 许可证

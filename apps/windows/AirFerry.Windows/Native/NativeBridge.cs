@@ -15,6 +15,16 @@ namespace AirFerry.Windows.Native;
 /// other function takes it as the first argument.
 /// </para>
 /// <para>
+/// <b>Symbol names</b>: Rust exports snake_case <c>airferry_*</c> symbols (the
+/// C ABI contract in <c>cffi.rs</c>). Unlike Android's JNI — where the JVM
+/// resolves <c>Java_&lt;class&gt;_&lt;method&gt;</c> names automatically — the
+/// .NET P/Invoke marshaler looks up the entry point by the managed method name
+/// unless <see cref="DllImportAttribute.EntryPoint"/> is given. Every declaration
+/// below therefore pins <c>EntryPoint</c> explicitly: dropping it would make the
+/// first call throw <c>EntryPointNotFoundException</c> at runtime (the build and
+/// the protocol-layer unit tests never touch native code, so they can't catch it).
+/// </para>
+/// <para>
 /// <b>Thread safety</b>: the Rust <c>ReceiverSession</c> is <b>not</b>
 /// thread-safe. All calls touching the same handle must be serialized by the
 /// caller — the Windows scan pool mirrors Android's <c>ingestLock</c> (a single
@@ -49,14 +59,16 @@ internal static class NativeBridge
     /// the authoritative OTI. Split the 128-bit session id into low/high
     /// 64-bit halves (host order), matching the Rust contract.
     /// </summary>
-    [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(LibName, CallingConvention = CallingConvention.Cdecl,
+        EntryPoint = "airferry_receiver_create")]
     public static extern IntPtr ReceiverCreate(ulong sidLo, ulong sidHi);
 
     /// <summary>
     /// Destroy a receiver. <see cref="IntPtr.Zero"/> is a no-op. After this
     /// returns the handle is invalid and must not be reused.
     /// </summary>
-    [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(LibName, CallingConvention = CallingConvention.Cdecl,
+        EntryPoint = "airferry_receiver_destroy")]
     public static extern void ReceiverDestroy(IntPtr handle);
 
     // ─── hot path ────────────────────────────────────────────────────────
@@ -75,11 +87,13 @@ internal static class NativeBridge
     /// Returns <see cref="IngestError"/> on a null handle or a frame that fails
     /// wire validation; the host treats this as "frame rejected, nothing to do".
     /// </remarks>
-    [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(LibName, CallingConvention = CallingConvention.Cdecl,
+        EntryPoint = "airferry_receiver_ingest")]
     public static extern ulong ReceiverIngest(IntPtr handle, byte[] frameBytes, nuint frameLen);
 
     /// <summary>1 once fully decoded, 0 otherwise (incl. null handle).</summary>
-    [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(LibName, CallingConvention = CallingConvention.Cdecl,
+        EntryPoint = "airferry_receiver_is_complete")]
     public static extern int ReceiverIsComplete(IntPtr handle);
 
     // ─── result retrieval ────────────────────────────────────────────────
@@ -91,7 +105,8 @@ internal static class NativeBridge
     /// name="outBuf"/> and its byte length into <paramref name="outLen"/>);
     /// 0 if not yet complete / null handle / decode error. The caller MUST
     /// release the buffer with <see cref="BufferFree"/>.</returns>
-    [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(LibName, CallingConvention = CallingConvention.Cdecl,
+        EntryPoint = "airferry_receiver_assemble")]
     public static extern int ReceiverAssemble(IntPtr handle, out IntPtr outBuf, out nuint outLen);
 
     /// <summary>
@@ -99,26 +114,30 @@ internal static class NativeBridge
     /// <see cref="IntPtr.Zero"/> / 0 is a no-op. Never call this on a pointer
     /// the host allocated itself.
     /// </summary>
-    [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(LibName, CallingConvention = CallingConvention.Cdecl,
+        EntryPoint = "airferry_buffer_free")]
     public static extern void BufferFree(IntPtr ptr, nuint len);
 
     /// <summary>
-    /// Write the NUL-terminated progress JSON into <paramref name="out"/>.
+    /// Write the NUL-terminated progress JSON into <paramref name="outBuf"/>.
     /// Two-pass protocol: pass a 0-capacity (or too-small) buffer to learn the
     /// required length (incl. NUL), then call again with a buffer of that size.
     /// </summary>
-    [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(LibName, CallingConvention = CallingConvention.Cdecl,
+        EntryPoint = "airferry_receiver_progress_json")]
     public static extern nuint ReceiverProgressJson(IntPtr handle, byte[]? outBuf, nuint cap);
 
     /// <summary>
     /// Write the recovered filename (UTF-8 + NUL) using the same two-pass
     /// protocol as <see cref="ReceiverProgressJson"/>.
     /// </summary>
-    [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(LibName, CallingConvention = CallingConvention.Cdecl,
+        EntryPoint = "airferry_receiver_file_name")]
     public static extern nuint ReceiverFileName(IntPtr handle, byte[]? outBuf, nuint cap);
 
     /// <summary>Original file size in bytes (0 if unknown / null handle).</summary>
-    [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(LibName, CallingConvention = CallingConvention.Cdecl,
+        EntryPoint = "airferry_receiver_file_size")]
     public static extern ulong ReceiverFileSize(IntPtr handle);
 
     /// <summary>
@@ -126,7 +145,8 @@ internal static class NativeBridge
     /// unsigned 32-bit range survives; <c>0xDEADBEEF</c> would look negative
     /// as a signed int). 0 if unknown.
     /// </summary>
-    [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(LibName, CallingConvention = CallingConvention.Cdecl,
+        EntryPoint = "airferry_receiver_crc32")]
     public static extern ulong ReceiverCrc32(IntPtr handle);
 
     /// <summary>
@@ -134,6 +154,7 @@ internal static class NativeBridge
     /// it); 0 if unknown and the CRC MUST NOT be compared. CRC32 can
     /// legitimately be 0, so do not test <c>Crc32() == 0</c>.
     /// </summary>
-    [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
+    [DllImport(LibName, CallingConvention = CallingConvention.Cdecl,
+        EntryPoint = "airferry_receiver_crc32_known")]
     public static extern int ReceiverCrc32Known(IntPtr handle);
 }
