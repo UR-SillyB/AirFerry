@@ -283,7 +283,7 @@ public partial class ScanViewModel : ObservableObject, IDisposable
     private RecoveryResult? StageBundle(byte[] bytes, ulong expectedCrc,
         bool crcKnown, ulong receivedCrc)
     {
-        Bundle? bundle = BundleParser.Parse(bytes);
+        AirFerry.Windows.Bundle.Bundle? bundle = BundleParser.Parse(bytes);
         if (bundle is null || bundle.Files.Count == 0)
         {
             return null;
