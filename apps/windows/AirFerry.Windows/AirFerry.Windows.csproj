@@ -1,0 +1,52 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWPF>true</UseWPF>
+    <LangVersion>latest</LangVersion>
+    <!-- Version mirrors apps/sender/package.json, apps/scanner build.gradle.kts,
+         and Cargo.toml workspace version — keep all four in sync. -->
+    <Version>1.0.0</Version>
+    <AssemblyName>AirFerry</AssemblyName>
+    <RootNamespace>AirFerry.Windows</RootNamespace>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <Platforms>x64</Platforms>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>false</SelfContained>
+    <PublishSingleFile>true</PublishSingleFile>
+    <!-- MatLuminanceSource uses unsafe pointers to copy OpenCV Mat data into
+         ZXing's LuminanceSource buffer without an intermediate managed copy. -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Camera + capture-card capture via OpenCV's DirectShow/Media Foundation
+         backends. OpenCvSharp4.runtime.win brings the native OpenCV DLLs. -->
+    <PackageReference Include="OpenCvSharp4" Version="4.9.0.20240103" />
+    <PackageReference Include="OpenCvSharp4.runtime.win" Version="4.9.0.20240103" />
+    <PackageReference Include="OpenCvSharp4.windows" Version="4.9.0.20240103" />
+    <!-- QR decoding — TryHarder/TryInvert mirror scan_jni.cpp's options.
+         We feed ZXing via a custom MatLuminanceSource (no extra binding pkg),
+         so only the core ZXing.Net package is needed. -->
+    <PackageReference Include="ZXing.Net" Version="0.16.9" />
+    <!-- DirectShow video-input device enumeration (webcams + USB/HDMI capture
+         cards are the same FilterCategory.VideoInputDevice). -->
+    <PackageReference Include="DirectShowLib.Standard" Version="1.0.0" />
+    <!-- MVVM source generators (ObservableObject, RelayCommand). -->
+    <PackageReference Include="CommunityToolkit.Mvvm" Version="8.2.2" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The Rust core library compiled with `cargo build --features cffi`.
+         Copied here by scripts/build-windows.ps1 (or build-all.sh windows).
+         File existance is not checked at design-time; load is deferred to
+         NativeBridge.cs where a clean error is raised if it's missing. -->
+    <None Update="runtime\transfer_engine.dll">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
+</Project>

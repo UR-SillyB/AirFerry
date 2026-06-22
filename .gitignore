@@ -38,6 +38,13 @@ apps/scanner/captures/
 *.keystore
 !debug.keystore
 
+# Windows / .NET (Rust C ABI DLL copied here by build-windows.ps1; C# build
+# artifacts. transfer_engine.dll is a release artifact, never checked in.)
+apps/windows/**/bin/
+apps/windows/**/obj/
+apps/windows/AirFerry.Windows/runtime/*.dll
+apps/windows/.vs/
+
 # IDE
 .idea/
 .vscode/
@@ -54,3 +61,6 @@ release/
 
 # CRX signing private key (do not commit)
 *.pem
+
+# Local agent working directories (session memory, scratch)
+.workbuddy/

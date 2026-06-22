@@ -14,7 +14,9 @@
 //! with Zstd (native/Android via `qr-protocol`, or JS-side on the browser) and
 //! hands the compressed bytes in. This keeps the engine target-agnostic.
 
-#![cfg_attr(not(feature = "jni"), forbid(unsafe_code))]
+// `cffi` (Windows/.NET P/Invoke, like `jni`) takes raw pointers across the FFI
+// boundary, so it must be exempt from `forbid(unsafe_code)` along with `jni`.
+#![cfg_attr(not(any(feature = "jni", feature = "cffi")), forbid(unsafe_code))]
 
 pub mod sender;
 pub mod receiver;
@@ -34,6 +36,12 @@ pub mod time;
 pub mod wasm;
 #[cfg(all(feature = "jni", target_os = "android"))]
 pub mod jni;
+// Plain C ABI for the Windows client (.NET P/Invoke). No platform gate: the
+// binding is pure C (`extern "C"`) with no host-specific dependency, so it
+// compiles on any target the host chooses to build the DLL on. The `cffi`
+// feature remains the on/off switch the build matrix controls.
+#[cfg(feature = "cffi")]
+pub mod cffi;
 
 pub use progress::{Progress, Stats};
 pub use receiver::ReceiverSession;

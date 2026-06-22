@@ -33,6 +33,21 @@ serde_json = { workspace = true, optional = true }
 # Chrome 87 is the baseline for MV3 extension_pages, so the sender must stay
 # loadable there. Keep the three pinned together: js-sys/web-sys 0.3.69 is the
 # release that accompanied wasm-bindgen 0.2.92.
+#
+# MV3 dual-track: apps/sender/scripts/build-wasm.cjs TEMPORARILY rewrites these
+# three `=0.2.92`/`=0.3.69` pins to `=0.2.125`/`=0.3.102` (a modern, matched
+# triple that enables externref) plus RUSTFLAGS=+simd128 to build the
+# `wasm-pkg-simd/` variant for MV3 targets, then restores this file verbatim
+# in `finally` (see build-wasm.cjs). The default checked-in state stays at the
+# legacy pins below so MV2 / `cargo test` / casual `cargo update` never emit
+# externref. Do NOT loosen these to `"0.2"`/`"0.3"` — that would let the
+# default lockfile drift to 0.2.93+ and break the MV2 build.
+#
+# Measured note: +simd128 yields NO speedup on the current hot path (0.95×,
+# slightly slower) — raptorq/qrcode are pure scalar Rust with no SIMD
+# intrinsics. It's kept only as build infrastructure for future SIMD-aware
+# libraries; the real value of the dual track is MV2/MV3 compatibility
+# separation. See AGENTS.md §5.6 for the full benchmark.
 js-sys = "=0.3.69"
 wasm-bindgen = { version = "=0.2.92", optional = true }
 web-sys = { version = "=0.3.69", features = ["console"] }

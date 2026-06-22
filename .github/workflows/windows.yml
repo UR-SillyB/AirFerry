@@ -1,0 +1,127 @@
+name: windows
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'core/**'
+      - 'apps/windows/**'
+      - '.github/workflows/windows.yml'
+  pull_request:
+    paths:
+      - 'core/**'
+      - 'apps/windows/**'
+      - '.github/workflows/windows.yml'
+  workflow_dispatch:
+
+# Cancel superseded runs on the same ref.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ── Job 1: Rust C ABI 层（跨平台，cargo test --features cffi）─────────────
+  # 验证 cffi.rs 的位域打包、句柄生命周期、端到端恢复。在任何 OS 上跑都行，
+  # 用 ubuntu 最快最省额度。对标 Android 的 cargo test -p transfer-engine。
+  rust-cffi:
+    name: Rust C ABI (cffi)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cffi-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}
+          restore-keys: ${{ runner.os }}-cffi-
+
+      - name: cargo test --features cffi (unit)
+        run: cargo test -p transfer-engine --features cffi --lib cffi
+
+      - name: cargo test --features cffi (e2e)
+        run: cargo test -p transfer-engine --features cffi --test cffi_e2e
+
+      - name: cargo build cdylib smoke (验证 DLL 目标可产出)
+        run: cargo build -p transfer-engine --features cffi --release
+
+  # ── Job 2: C# 协议层单元测试（跨平台）────────────────────────────────────
+  # 只测纯 C# 逻辑（IngestStatus/FrameHeader/BundleParser/FileNameUtil/Progress），
+  # 不依赖 P/Invoke，net8.0 TFM 可在 ubuntu 上跑。
+  csharp-tests:
+    name: C# protocol tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET 8 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: dotnet test (AirFerry.Windows.Tests)
+        run: |
+          cd apps/windows
+          dotnet test AirFerry.Windows.Tests/AirFerry.Windows.Tests.csproj -c Release --logger "console;verbosity=normal"
+
+  # ── Job 3: Windows 端完整构建（仅 Windows runner）─────────────────────────
+  # WPF (net8.0-windows TFM) 只能在 Windows 上构建。对标 build-windows.ps1：
+  # ① cargo build --features cffi → transfer_engine.dll
+  # ② dotnet build → AirFerry.exe（含 runtime/ DLL 拷贝）
+  windows-build:
+    name: Windows build (WPF + Rust DLL)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cffi-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}
+          restore-keys: ${{ runner.os }}-cffi-
+
+      - name: Setup .NET 8 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: ${{ runner.os }}-nuget-${{ hashFiles('apps/windows/**/*.csproj') }}
+          restore-keys: ${{ runner.os }}-nuget-
+
+      - name: Build Rust C ABI DLL (--features cffi)
+        run: cargo build -p transfer-engine --features cffi --release
+
+      - name: Copy DLL to C# runtime/
+        shell: pwsh
+        run: |
+          $dll = "target/release/transfer_engine.dll"
+          if (-not (Test-Path $dll)) { throw "Rust DLL not found: $dll" }
+          New-Item -ItemType Directory -Force -Path apps/windows/AirFerry.Windows/runtime | Out-Null
+          Copy-Item $dll apps/windows/AirFerry.Windows/runtime/transfer_engine.dll -Force
+          Write-Host "Copied $dll -> runtime/"
+
+      - name: dotnet restore
+        run: dotnet restore apps/windows/AirFerry.sln
+
+      - name: dotnet build (WPF Release)
+        run: dotnet build apps/windows/AirFerry.Windows/AirFerry.Windows.csproj -c Release --no-restore
+
+      - name: dotnet test (Windows runner, 完整测试含 P/Invoke 可用)
+        run: dotnet test apps/windows/AirFerry.Windows.Tests/AirFerry.Windows.Tests.csproj -c Release --no-restore --logger "console;verbosity=normal"

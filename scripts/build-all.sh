@@ -7,12 +7,14 @@ set -euo pipefail
 #   ./scripts/build-all.sh              # 构建全部（发送端 + 扫码端）
 #   ./scripts/build-all.sh sender       # 仅构建浏览器发送端
 #   ./scripts/build-all.sh scanner      # 仅构建 Android 扫码端
+#   ./scripts/build-all.sh windows      # 仅构建 Windows 端（须在 Windows + .NET 8 SDK 下）
 #   ./scripts/build-all.sh wasm         # 仅构建 Rust WASM
 #   ./scripts/build-all.sh dist         # 仅打包：把已构建的产物复制/签名到 dist/
 #   ./scripts/build-all.sh release      # 构建 + 打包到 dist/（发送 crx/xpi/zip + APK）
 #
 # 产物（dist/，均 git-ignored，通过 GitHub Release 分发）:
 #   airferry-android-v<VER>.apk                 接收端 APK
+#   airferry-windows-x64-v<VER>.zip             Windows 端（WPF + Rust DLL + OpenCV）
 #   airferry-sender-chrome-mv3-v<VER>.crx       Chrome/Edge MV3（已签名 Cr24）
 #   airferry-sender-chrome-mv3-v<VER>.zip       Chrome/Edge MV3（解压加载回退）
 #   airferry-sender-chrome-mv2-v<VER>.crx       Chrome/Edge MV2（已签名 Cr24）
@@ -46,14 +48,16 @@ VER="$(read_version)"
 CHROME_BIN="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 
 build_wasm() {
-  info "编译 Rust WASM (core/transfer-engine → sender/wasm-pkg/) ..."
+  info "编译 Rust WASM 双产物 (legacy=0.2.92/标量 → wasm-pkg-legacy/, simd=0.2.125+SIMD → wasm-pkg-simd/) ..."
   cd "$ROOT/apps/sender"
   npm run wasm 2>&1 | tail -3
-  info "WASM 编译完成"
+  info "WASM 双产物编译完成"
 }
 
 build_sender() {
-  build_wasm
+  # npm run build already runs extract-lzma-wasm + build-wasm.cjs (both wasm
+  # variants) + build-all.cjs (4 targets, swapping in the right variant per
+  # MV2/MV3). No separate build_wasm call here — it would compile wasm twice.
   info "构建浏览器发送端 (Chrome MV3/MV2 + Firefox MV3/MV2) ..."
   cd "$ROOT/apps/sender"
   npm run build 2>&1 | grep -E 'DONE|Finished' | while read -r line; do info "$line"; done
@@ -78,6 +82,43 @@ build_scanner() {
   ANDROID_HOME="${ANDROID_HOME:-$HOME/Library/Android/sdk}"
   ./gradlew assembleRelease 2>&1 | tail -3 | while read -r line; do info "$line"; done
   info "扫码端构建完成 → apps/scanner/app/build/outputs/apk/release/app-release.apk"
+}
+
+build_windows() {
+  info "构建 Windows 端 (WPF + Rust DLL) ..."
+
+  # 先编译 Rust C ABI 库 (transfer_engine.dll) 到 C# runtime/。
+  # 这一步必须在 dotnet build 之前：csproj 把 runtime/transfer_engine.dll
+  # 标为 CopyToOutputDirectory，若缺失，dotnet build 会带空引用导致运行时
+  # DllNotFoundException（对标 Android 的 jniLibs 缺 .so 问题）。
+  info "编译 Rust C ABI (core/transfer-engine --features cffi → transfer_engine.dll) ..."
+  cargo build -p transfer-engine --features cffi --release 2>&1 | tail -3
+
+  local runtime_dir="$ROOT/apps/windows/AirFerry.Windows/runtime"
+  mkdir -p "$runtime_dir"
+  local dll_src
+  # Linux/macOS 产物是 libtransfer_engine.{so,dylib}，Windows 是 transfer_engine.dll。
+  # 仅在 Windows 上构建时产物才会是 .dll（这里构建主机须为 Windows）。
+  dll_src="$ROOT/target/release/transfer_engine.dll"
+  if [[ ! -f "$dll_src" ]]; then
+    # 回退：当前主机非 Windows，Rust 产物可能是 .so/.dylib。在非 Windows 上
+    # 这步会失败——Windows 端只能在 Windows 主机上完整构建。
+    dll_src="$(ls "$ROOT/target/release/"libtransfer_engine.{dll,so,dylib} 2>/dev/null | head -1 || true)"
+    if [[ -z "$dll_src" ]]; then
+      error "未找到 transfer_engine 产物。Windows 端必须在 Windows 主机上用 PowerShell 脚本构建: ./scripts/build-windows.ps1"
+    fi
+    warn "当前主机非 Windows，Rust 产物为 $(basename "$dll_src")（仅供 Rust 层冒烟测试，C# 端无法在非 Windows 上构建 WPF）"
+  fi
+  cp "$dll_src" "$runtime_dir/transfer_engine.dll"
+  info "Rust DLL → apps/windows/AirFerry.Windows/runtime/transfer_engine.dll"
+
+  # 构建 C# WPF（须 Windows + .NET 8 SDK）。在非 Windows 上 dotnet build
+  # 会因 net8.0-windows TFM 失败——首选 scripts/build-windows.ps1。
+  if ! command -v dotnet >/dev/null 2>&1; then
+    error "未找到 dotnet。Windows 端请在 Windows 上运行: ./scripts/build-windows.ps1"
+  fi
+  (cd "$ROOT/apps/windows" && dotnet build -c Release 2>&1 | tail -5 | while read -r line; do info "$line"; done)
+  info "Windows 端构建完成 → apps/windows/AirFerry.Windows/bin/x64/Release/"
 }
 
 # 打包 Chrome MV2/MV3 为已签名 .crx。
@@ -124,6 +165,7 @@ pack_dist() {
   mkdir -p "$ROOT/dist"
   # 清掉旧产物，避免新旧版本/命名混留（pem / keystore 不动）。
   rm -f "$ROOT/dist"/airferry-android-*.apk \
+        "$ROOT/dist"/airferry-windows-*.zip \
         "$ROOT/dist"/airferry-sender-*.crx \
         "$ROOT/dist"/airferry-sender-*.zip \
         "$ROOT/dist"/airferry-sender-*.xpi \
@@ -136,6 +178,15 @@ pack_dist() {
   [[ -f "$apk_src" ]] || error "找不到 APK：$apk_src（先运行 build-all.sh scanner）"
   cp "$apk_src" "$ROOT/dist/airferry-android-v${VER}.apk"
   info "APK → dist/airferry-android-v${VER}.apk"
+
+  # Windows 端 zip（仅当已构建时打包——Windows 端须在 Windows 上构建）
+  local win_publish="$ROOT/apps/windows/AirFerry.Windows/bin/x64/Release/net8.0-windows/publish"
+  if [[ -d "$win_publish" ]]; then
+    ( cd "$win_publish" && zip -r -q -X "$ROOT/dist/airferry-windows-x64-v${VER}.zip" . )
+    info "Windows 端 → dist/airferry-windows-x64-v${VER}.zip"
+  else
+    warn "未找到 Windows 端构建产物（$win_publish）。如需打包 Windows 端，先在 Windows 上运行: ./scripts/build-windows.ps1 release"
+  fi
 
   # 发送端：Chrome crx + zip，Firefox xpi（即 zip 改名）
   for target in chrome-mv3-prod chrome-mv2-prod firefox-mv3-prod firefox-mv2-prod; do
@@ -177,6 +228,9 @@ case "$TARGET" in
   scanner)
     build_scanner
     ;;
+  windows)
+    build_windows
+    ;;
   wasm)
     build_wasm
     ;;
@@ -187,7 +241,8 @@ case "$TARGET" in
     build_release
     ;;
   *)
-    echo "用法: $0 [all|sender|scanner|wasm|dist|release]"
+    echo "用法: $0 [all|sender|scanner|windows|wasm|dist|release]"
+    echo "  windows 子命令须在 Windows + .NET 8 SDK 下运行（或用 scripts/build-windows.ps1）"
     exit 1
     ;;
 esac

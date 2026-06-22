@@ -26,13 +26,18 @@ AirFerry/
 │   │   ├── wasm-pkg/           #   wasm-pack 产物（generated, git-ignored）
 │   │   ├── assets/             #   扩展图标
 │   │   └── scripts/            #   构建 / manifest 修正 / lzma-wasm 提取
-│   └── scanner/                # Android App（Kotlin + CameraX + ZXing-C++）
-│       └── app/src/main/
-│           ├── java/com/airferry/app/   # Kotlin
-│           ├── cpp/                     # ZXing-C++ JNI 桥（CMake）
-│           └── jniLibs/arm64-v8a/       # Rust .so（cargo-ndk 产物, git-ignored）
+│   ├── scanner/                # Android App（Kotlin + CameraX + ZXing-C++）
+│   │   └── app/src/main/
+│   │       ├── java/com/airferry/app/   # Kotlin
+│   │       ├── cpp/                     # ZXing-C++ JNI 桥（CMake）
+│   │       └── jniLibs/arm64-v8a/       # Rust .so（cargo-ndk 产物, git-ignored）
+│   └── windows/                # Windows App（C# WPF + OpenCvSharp + ZXing.Net）
+│       ├── AirFerry.Windows/            #   主项目（Views/ViewModels/Scan/Bundle/Native）
+│       │   └── runtime/transfer_engine.dll  # Rust C ABI 产物（build-windows.ps1 拷入, git-ignored）
+│       └── AirFerry.Windows.Tests/      #   协议层单元测试（net8.0，跨平台可跑）
 ├── docs/                       # 协议 / 架构 / API / 构建说明（中文）
-├── scripts/build-all.sh        # 一键构建脚本
+├── scripts/build-all.sh        # 一键构建脚本（含 windows 子命令）
+├── scripts/build-windows.ps1   # Windows 端原生 PowerShell 构建脚本（首选）
 ├── Cargo.toml                  # Rust workspace 根配置
 └── dist/                       # 发布产物 + 签名密钥（git-ignored）
 ```
@@ -62,25 +67,38 @@ cargo build            # 或 cargo build --release
 cd apps/sender
 npm install            # 首次（含 postinstall: 提取 lzma-wasm）
 
-# ① 先构建 WASM（必须是扩展构建的前置）
+# ① 先构建 WASM 双产物（必须是扩展构建的前置）
 npm run wasm
-#   等价: wasm-pack build ../../core/transfer-engine --target web --features wasm,serde
-#         && rm -rf wasm-pkg && cp -r ../../core/transfer-engine/pkg wasm-pkg
-#   产物: apps/sender/wasm-pkg/transfer_engine*.js + *_bg.wasm
-#   说明: `wasm` feature 已隐含 `serde`（见 core/transfer-engine/Cargo.toml），
-#         故 `serde` 显式写出是冗余但无害的；后半段把产物从 pkg/ 搬到 wasm-pkg/。
-#   ⚠️ wasm-bindgen 版本锁：core/transfer-engine/Cargo.toml 把 wasm-bindgen 钉在
-#         `=0.2.92`、js-sys/web-sys 钉在 `=0.3.69`。0.2.93+ 默认开 reference-types
-#         proposal，生成的 .wasm 含 `externref` 值类型——该类型仅 Chrome 96+ 支持，
-#         Chrome 87/88 会在 `WebAssembly.instantiateStreaming()` 报
-#         `CompileError: invalid value type 'externref'`。Chrome 87 是 MV3
-#         extension_pages 的基线，发送端必须能在此加载。升级三者要一起升并回归此点。
+#   等价: node scripts/build-wasm.cjs，构建两份 wasm：
+#     • wasm-pkg-legacy/ — wasm-bindgen =0.2.92（默认锁定）、标量、无 SIMD、无 externref
+#       → Chrome 87+/FF 91+ 可加载，供 MV2 目标使用
+#     • wasm-pkg-simd/   — wasm-bindgen =0.2.125（脚本临时升级）、+simd128、含 externref
+#       → Chrome 91+/FF 89+ 支持 SIMD、Chrome 96+/FF 116+ 支持 externref，供 MV3 目标使用
+#   ⚠️ Cargo.toml 还原：build-wasm.cjs 在构建 MV3 时临时把 wasm-bindgen 改成 =0.2.125
+#       （js-sys/web-sys 同期 0.3.102），构建完在 finally 里：
+#         ① 内存还原 Cargo.toml（从脚本启动时读的 originalToml 字节级回写）
+#         ② `git checkout Cargo.lock` 还原 Cargo.lock（不能用 cargo generate-lockfile，
+#            那会把无关包也升到最新，污染 lockfile）
+#       跑完 `npm run wasm` 后 `git status` 对 Cargo.toml/Cargo.lock 必须无改动。
+#   说明: `wasm` feature 已隐含 `serde`（见 core/transfer-engine/Cargo.toml）。
+#         SIMD（+simd128）是 RUSTFLAGS target-feature，与 wasm-bindgen 版本正交——
+#         0.2.92 也能开 SIMD。MV3 同时开新版 wasm-bindgen（externref）+ SIMD。
+#   ⚠️ 实测结论（见 §5.7）：当前 raptorq/qrcode crate 均为纯标量 Rust，无 SIMD
+#       intrinsics，+simd128 对热路径无收益（0.95×，wasm 反而大 ~8KB）。新版
+#       wasm-bindgen 的 externref 对 JS↔WASM 交互也无显著提升。双产物机制的
+#       真实价值是「MV2 兼容老 Chrome + MV3 用新工具链」各得其所，并为未来
+#       引入 SIMD 化的库（如换更快 QR 库、RaptorQ 用 GF(256) SIMD）铺路。
 
-# ② 构建扩展（全部 4 个目标，会自动先跑 extract-lzma-wasm）
+# ② 构建扩展（全部 4 个目标，会自动先跑 extract-lzma-wasm + build-wasm.cjs）
 npm run build
+#   等价: extract-lzma-wasm.cjs && build-wasm.cjs（双 wasm 产物） && build-all.cjs
+#   build-all.cjs 按 MV2/MV3 把对应 wasm-pkg-* 目录复制到 wasm-pkg/ 后再 plasmo build：
+#     chrome-mv3 / firefox-mv3 → wasm-pkg-simd/   复制为 wasm-pkg/
+#     chrome-mv2 / firefox-mv2 → wasm-pkg-legacy/ 复制为 wasm-pkg/
+#   loader.ts 的 import 路径固定为 `../../wasm-pkg/`，靠 swap 目录名切换。
 #   产物: apps/sender/build/{chrome,firefox}-{mv2,mv3}-prod/
 
-# 单独构建某个目标
+# 单独构建某个目标（不自动跑 wasm 双产物，需先 `npm run wasm`）
 npm run build:chrome-mv3     # 或 :chrome-mv2 / :firefox-mv3 / :firefox-mv2
 
 npm run dev                  # Plasmo HMR 开发模式
@@ -114,16 +132,35 @@ adb install app/build/outputs/apk/release/app-release.apk
 > ZXing-C++（`libairferry_zxing.so`）由 Gradle 的 CMake 任务在首次 APK 构建时从 GitHub 拉取 v3.0.2 自动编译（需网络；缓存后离线可用）。
 > **16 KiB 页对齐**：Android 15+ 的 16 KiB 页设备会拒绝 `dlopen` 仅 4 KiB 对齐的 `.so`（表现：所有 QR 解码静默失败）。`cpp/CMakeLists.txt` 用 `-Wl,-z,max-page-size=16384` 强制对齐；Rust `.so` 由 cargo-ndk 默认对齐。验证：`llvm-readelf -l lib*.so | grep LOAD`（Align 列应为 `0x4000`）。
 
-### 2.4 一键脚本 `scripts/build-all.sh`
+### 2.4 Windows 扫码端（apps/windows）
 
-| 子命令 | 动作 | 是否自动跑 cargo-ndk |
+```powershell
+# 首选：PowerShell 原生脚本（须 Windows + .NET 8 SDK）
+.\scripts\build-windows.ps1           # 构建（cargo DLL + dotnet build）
+.\scripts\build-windows.ps1 -Pack     # 构建 + 打包到 dist/
+
+# 或 Git Bash/WSL 下用 build-all.sh 的 windows 子命令（逻辑等价）
+./scripts/build-all.sh windows
+```
+
+> **WPF 只能在 Windows 上构建**（`net8.0-windows` TFM 依赖 Windows SDK）。
+> **协议层单元测试**（`AirFerry.Windows.Tests`）用纯 `net8.0`，可在任何 OS 上跑（只测 IngestStatus 位域/FrameHeader/BundleParser 等纯逻辑，不依赖 P/Invoke）：
+> ```bash
+> cd apps/windows && dotnet test    # 任意 OS
+> ```
+> 详见 [`docs/build-windows.md`](docs/build-windows.md)。
+
+### 2.5 一键脚本 `scripts/build-all.sh`
+
+| 子命令 | 动作 | 是否自动跑 cargo 前置 |
 |--------|------|---------------------|
-| `all`（默认） | `build_sender` + `build_scanner` | ✅ |
-| `sender` | WASM + 扩展 4 目标 | — |
+| `all`（默认） | `build_sender` + `build_scanner` | ✅（scanner） |
+| `sender` | 双 wasm 产物 + 扩展 4 目标 | — |
 | `scanner` | `cargo ndk` 编译 `.so` → `./gradlew assembleRelease` | ✅ |
-| `wasm` | 仅 `npm run wasm` | — |
-| `dist` | **仅打包**：把已构建的 `build/` + APK 复制/签名到 `dist/`（不重新构建） | — |
-| `release` | `build_sender` → `build_scanner` → `pack_dist`（全量构建 + 打包） | ✅ |
+| `windows` | `cargo build --features cffi` 编译 DLL → `dotnet build`（须 Windows） | ✅ |
+| `wasm` | 仅 `npm run wasm`（= build-wasm.cjs，产 legacy + simd 两份） | — |
+| `dist` | **仅打包**：把已构建的 `build/` + APK + Windows zip 复制/签名到 `dist/`（不重新构建） | — |
+| `release` | `build_sender` → `build_scanner` → `pack_dist`（全量构建 + 打包） | ✅（scanner） |
 
 ```bash
 ./scripts/build-all.sh              # 构建 sender + scanner（不打包）
@@ -131,16 +168,18 @@ adb install app/build/outputs/apk/release/app-release.apk
 ./scripts/build-all.sh dist         # 仅打包（假设已构建好，不重新编译）
 ./scripts/build-all.sh sender       # 仅浏览器端（含 WASM）
 ./scripts/build-all.sh scanner      # 仅 APK
+./scripts/build-all.sh windows      # 仅 Windows 端（须 Windows + .NET 8 SDK；首选 build-windows.ps1）
 ./scripts/build-all.sh wasm         # 仅 WASM
 ```
 
 **脚本行为要点**（权威源 `scripts/build-all.sh`）：
-- **版本号**：从 `apps/sender/package.json` 的 `version` 读取（`read_version()`），与扩展 manifest 同源。改版本改这一处即可被脚本读取，但 APK/扩展本身的版本号仍需手动同步（见 §2.5）。
+- **版本号**：从 `apps/sender/package.json` 的 `version` 读取（`read_version()`），与扩展 manifest 同源。改版本改这一处即可被脚本读取，但 APK/扩展本身的版本号仍需手动同步（见 §2.7）。
 - **`build_scanner` 自动跑 cargo-ndk**：在 `./gradlew assembleRelease` **之前**先用 `cargo ndk -t arm64-v8a ... build -p transfer-engine --features jni --release` 编译 `libtransfer_engine.so` 到 `jniLibs/`。这是为了避免打进过期 `.so`（AirFerry 重命名后旧符号 `com.easytransfer.*` 与 Kotlin 新包名对不上会 `UnsatisfiedLinkError` 闪退）。因此 `scanner`/`all`/`release` 子命令都自带这步，无需手动前置。
+- **`build_windows` 自动跑 cargo**：在 `dotnet build` **之前**先用 `cargo build -p transfer-engine --features cffi --release` 编译 `transfer_engine.dll` 到 `runtime/`（对标 scanner 的 cargo-ndk 前置，防止过期/缺失 DLL 致运行时 `DllNotFoundException`）。**Windows 端只能在 Windows + .NET 8 SDK 下构建**，首选 `scripts/build-windows.ps1`。
 - **Chrome crx 签名**：调用 macOS Chrome 的 `--pack-extension` + `--pack-extension-key`。私钥固定在 `dist/airferry-extension.pem`——**首次运行自动生成并挪到此处，之后 MV2/MV3 复用同一私钥**，保证扩展 ID 稳定。找不到 Chrome 二进制时跳过 crx、仅留 zip。
-- **`pack_dist` 会清旧产物**：删 `dist/airferry-{android-*.apk,sender-*.crx,sender-*.zip,sender-*.xpi}`，但**不动** `*.pem` 和 `*.keystore`。
+- **`pack_dist` 会清旧产物**：删 `dist/airferry-{android-*.apk,windows-*.zip,sender-*.crx,sender-*.zip,sender-*.xpi}`，但**不动** `*.pem` 和 `*.keystore`。
 
-### 2.5 构建目录布局
+### 2.6 构建目录布局
 
 三层产物目录，**全部 git-ignored**（见 `.gitignore`）：
 
@@ -150,22 +189,27 @@ adb install app/build/outputs/apk/release/app-release.apk
 
 | 目录 | 内容 | 来源 | git-ignored |
 |------|------|------|-------------|
-| `apps/sender/wasm-pkg/` | WASM 编译产物（`transfer_engine*.js` + `*_bg.wasm` + `.d.ts`）；内含 `.gitignore` 为 `*`（全忽略） | `npm run wasm` | ✅ |
+| `apps/sender/wasm-pkg-legacy/` | WASM 编译产物（wasm-bindgen 0.2.92 / 标量 / 无 externref，Chrome87-safe）；供 MV2 目标使用。内含 `.gitignore` 为 `*`（全忽略） | `npm run wasm:legacy`（由 build-wasm.cjs 调度） | ✅ |
+| `apps/sender/wasm-pkg-simd/` | WASM 编译产物（wasm-bindgen 0.2.125 / +simd128 / 含 externref）；供 MV3 目标使用。内含 `.gitignore` 为 `*`（全忽略） | `npm run wasm:simd`（由 build-wasm.cjs 调度） | ✅ |
+| `apps/sender/wasm-pkg/` | **临时**目录：build-all.cjs 在每次 plasmo build 前按目标把 `wasm-pkg-legacy/` 或 `wasm-pkg-simd/` 复制到这里（loader.ts 的 import 路径固定指向它）。不长期存在 | `build-all.cjs` 的 `useWasmPkg()` | ✅ |
 | `apps/sender/build/` | Plasmo 扩展构建产物：`{chrome,firefox}-{mv2,mv3}-prod/` 四个目录 + 构建期生成的 `.crx`/`.xpi`/`.zip` | `npm run build` | ✅ |
 | `apps/scanner/app/build/` | Gradle/APK 构建产物：`outputs/apk/{debug,release}/app-*.apk` + native-debug-symbols + baselineProfiles | `./gradlew` | ✅ |
 | `apps/scanner/app/src/main/jniLibs/arm64-v8a/` | Rust 编译的 `libtransfer_engine.so` + 遗留的 `libet_code.so`（**当前代码无任何 `System.loadLibrary("et_code")` 引用，未使用，建议清理**）。ZXing 的 `libairferry_zxing.so` 不在此处——由 CMake 在 APK 构建时直接编译进 APK | `cargo ndk ... build` | ✅ |
+| `apps/windows/AirFerry.Windows/bin/` `obj/` | C# WPF 构建产物：`bin/x64/Release/net8.0-windows/AirFerry.exe` + OpenCV native DLLs | `dotnet build` / `dotnet publish` | ✅ |
+| `apps/windows/AirFerry.Windows/runtime/transfer_engine.dll` | Rust 编译的 C ABI DLL（`--features cffi`），csproj 标 `CopyToOutputDirectory=PreserveNewest` 打进 exe 同目录 | `cargo build`（由 build-windows.ps1 拷入） | ✅ |
 | `dist/` | 发布归档 + 签名材料（`*.pem` Chrome 私钥、`airferry-release.keystore`） | `pack_dist` | ✅ |
 | `target/` | Rust 编译缓存（workspace 共享） | `cargo` | ✅ |
 
 > 构建产物**绝不提交 git**。分发走 GitHub Release，产物放 `dist/`。
 
-### 2.6 产物格式与命名规范
+### 2.7 产物格式与命名规范
 
 发布归档（`dist/`）的命名格式 = `airferry-{端}-{平台}-v{版本}.{扩展}`：
 
 | 产物 | 命名格式 | 格式说明 |
 |------|---------|---------|
 | Android APK | `airferry-android-v{VER}.apk` | arm64-v8a 单 ABI；Android 10+（minSdk 29）；用 `apps/scanner/keystore.properties` 指向的 keystore 签名（缺失则回退 debug 签名） |
+| Windows zip | `airferry-windows-x64-v{VER}.zip` | x64 单架构；Windows 10+；`dotnet publish` 单文件 + 框架依赖（目标机须装 .NET 8 运行时）；内含 `AirFerry.exe` + `transfer_engine.dll` + OpenCV native DLLs。**只能在 Windows 上构建**（WPF TFM） |
 | Chrome MV3 | `airferry-sender-chrome-mv3-v{VER}.crx` + `.zip` | `.crx` = Cr24 签名格式（Chrome 88+/Edge 88+，可拖拽安装）；`.zip` = 解压目录打包（商店外安装被拦截时的回退） |
 | Chrome MV2 | `airferry-sender-chrome-mv2-v{VER}.crx` + `.zip` | 同上，旧版兼容 |
 | Firefox MV3 | `airferry-sender-firefox-mv3-v{VER}.xpi` | Firefox 109+；`.xpi` 本质是 zip 改名 |
@@ -180,10 +224,11 @@ adb install app/build/outputs/apk/release/app-release.apk
 
 ### ⚠️ 关键依赖顺序（最容易踩的坑）
 
-1. **WASM 必须先于扩展构建**：`npm run build` 不自动跑 `npm run wasm`，扩展构建前 `wasm-pkg/` 必须存在。（`build-all.sh sender/release` 会自动先跑 WASM。）
-2. **JNI `.so` 必须先于 APK 构建**：`cargo ndk ... build` 产出 `libtransfer_engine.so` 到 `jniLibs/` 后，`./gradlew` 才能打包进 APK。**`build-all.sh` 的 `scanner`/`all`/`release` 子命令会自动先跑 cargo-ndk**（见 §2.4），所以走脚本不会踩坑；但**若单独手动跑 `./gradlew`**（不经脚本），必须自己先跑 cargo-ndk，否则 APK 会带过期/缺失的 `.so`、扫码端运行时 `UnsatisfiedLinkError` 闪退。
-3. **`dist` 子命令不重新构建**：它假设 `apps/sender/build/` 与 APK 已就绪，只做复制/签名/打包。缺产物会 `error` 退出。
-4. **版本号三处同步**：`build-all.sh` 的发布文件名版本取自 `apps/sender/package.json`，但 APK 自身的 `versionName`（`build.gradle.kts`）和 Rust crate 版本（`Cargo.toml`）需手动保持一致。改版本时改 `package.json`（→ 文件名）+ `build.gradle.kts`（→ APK 内嵌）+ `Cargo.toml`（→ 核心库），三者一起改。
+1. **WASM 双产物必须先于扩展构建**：`npm run build` 已内嵌 `build-wasm.cjs`（产 `wasm-pkg-legacy/` + `wasm-pkg-simd/`）再 `build-all.cjs`，故一条命令搞定。但**单独跑 `npm run build:chrome-mv3` 等单目标脚本不自动跑 wasm**——需先 `npm run wasm` 产出双产物，否则 `build-all.cjs` 的 `useWasmPkg()` 会因 `wasm-pkg-*/` 缺失报错退出。（`build-all.sh sender/release` 走 `npm run build`，不会踩坑。）
+2. **JNI `.so` 必须先于 APK 构建**：`cargo ndk ... build` 产出 `libtransfer_engine.so` 到 `jniLibs/` 后，`./gradlew` 才能打包进 APK。**`build-all.sh` 的 `scanner`/`all`/`release` 子命令会自动先跑 cargo-ndk**（见 §2.5），所以走脚本不会踩坑；但**若单独手动跑 `./gradlew`**（不经脚本），必须自己先跑 cargo-ndk，否则 APK 会带过期/缺失的 `.so`、扫码端运行时 `UnsatisfiedLinkError` 闪退。
+3. **C ABI DLL 必须先于 C# 构建**：`cargo build --features cffi` 产出 `transfer_engine.dll` 到 `runtime/` 后，`dotnet build` 才能打包进 exe 同目录。**`build-windows.ps1`/`build-all.sh windows` 会自动先跑 cargo**（见 §2.5），但**若单独手动跑 `dotnet build`**，必须自己先跑 cargo，否则运行时第一个 P/Invoke 调用 `DllNotFoundException`。
+4. **`dist` 子命令不重新构建**：它假设 `apps/sender/build/` 与 APK 已就绪（Windows zip 可选），只做复制/签名/打包。缺 sender/scanner 产物会 `error` 退出；缺 Windows 产物则 `warn` 跳过（因为 Windows 端只能在 Windows 上构建）。
+5. **版本号四处同步**：`build-all.sh` 的发布文件名版本取自 `apps/sender/package.json`，但 APK 自身的 `versionName`（`build.gradle.kts`）、Rust crate 版本（`Cargo.toml`）、Windows exe 版本（`AirFerry.Windows.csproj` `<Version>`）需手动保持一致。改版本时四处一起改：`package.json`（→ 文件名）+ `build.gradle.kts`（→ APK 内嵌）+ `Cargo.toml`（→ 核心库）+ `AirFerry.Windows.csproj`（→ exe 内嵌）。
 
 ---
 
@@ -208,7 +253,8 @@ adb install app/build/outputs/apk/release/app-release.apk
 | 进度快照 | `core/transfer-engine/src/progress.rs` | `Progress` / `Stats` |
 | 断点状态序列化 | `core/transfer-engine/src/resume.rs` | `ResumeState`（serde-gated） |
 | **JNI 绑定（Android）** | `core/transfer-engine/src/jni.rs:68` | `receiverIngest` 返回**packed jlong**（非 JSON，见 SPEC） |
-| **WASM 绑定（浏览器）** | `core/transfer-engine/src/wasm.rs:86` | `next_qr`：帧+QR 编码一次调用 |
+| **C ABI 绑定（Windows/.NET P/Invoke）** | `core/transfer-engine/src/cffi.rs:78` | `airferry_receiver_ingest` 返回**packed u64**（位布局与 jni.rs 完全一致）；assemble 用「Rust 分配+free」单次调用 |
+| **WASM 绑定（浏览器）** | `core/transfer-engine/src/wasm.rs:86` | `next_qr`：帧+QR 编码一次调用；`next_qr_multi`（wasm.rs:113）多码版；`next_qr_into`（wasm.rs:158）零拷贝变体（热路径用）；`next_qr_multi_into`（wasm.rs:193）多码零拷贝 |
 
 ### 3.2 浏览器发送端
 
@@ -242,6 +288,24 @@ adb install app/build/outputs/apk/release/app-release.apk
 | 多文件包解包 | `app/.../scan/BundleParser.kt` | 恢复后拆包 |
 | UI | `app/.../ui/{ReceiveDetail,ReceiveBundle,FileList,Settings}Activity.kt` | 详情/列表/设置 |
 
+### 3.4 Windows 扫码端
+
+| 关注点 | 位置 | 说明 |
+|--------|------|------|
+| **Rust C ABI 桥（P/Invoke）** | `apps/windows/AirFerry.Windows/Native/NativeBridge.cs` | 10 个 `[DllImport]` 声明，对标 Android `NativeBridge.kt` |
+| **接收会话管理器** | `apps/windows/AirFerry.Windows/Scan/ReceiverSession.cs` | lazy init from descriptor + mismatch re-init（镜像 Kotlin） |
+| 帧头解析 | `apps/windows/AirFerry.Windows/Scan/FrameHeader.cs` | 60B 大端，magic/version/session_id hi+lo |
+| IngestStatus 位域解析 | `apps/windows/AirFerry.Windows/Scan/IngestStatus.cs` | `.Unpack(u64)`，位布局与 Rust/Kotlin 一致 |
+| **并行解码 + 串行摄入** | `apps/windows/AirFerry.Windows/Scan/QrDecodePool.cs` | N worker + `IngestLock` 串行化批摄入 |
+| ★**设备枚举（摄像头+采集卡）** | `apps/windows/AirFerry.Windows/Scan/DeviceEnumerator.cs` | DirectShow `DsDevice`，两类设备统一枚举 |
+| 视频采集 | `apps/windows/AirFerry.Windows/Scan/VideoCapture.cs` | OpenCvSharp VideoCapture（DirectShow 后端） |
+| QR 解码 | `apps/windows/AirFerry.Windows/Scan/ZxingDecoder.cs` | ZXing.Net（TryHarder/TryInvert，对标 scan_jni.cpp） |
+| 灰度→ZXing 桥 | `apps/windows/AirFerry.Windows/Scan/MatLuminanceSource.cs` | 紧凑 byte[] → LuminanceSource |
+| 多文件包解包 | `apps/windows/AirFerry.Windows/Bundle/BundleParser.cs` | ETBUNDL1（字节级镜像 Kotlin BundleParser.kt） |
+| 文件名 sanitize | `apps/windows/AirFerry.Windows/Bundle/FileNameUtil.cs` | + Windows 保留名（CON/PRN/COM1-9）处理 |
+| 主状态机 | `apps/windows/AirFerry.Windows/ViewModels/ScanViewModel.cs` | 编排采集→解码池→会话→恢复→落盘 |
+| UI | `apps/windows/AirFerry.Windows/Views/*.xaml` | Scan/DeviceSelect/ReceiveDetail/ReceiveBundle/FileList/Settings |
+
 ---
 
 ## 4. 调试速查表（症状 → 首查位置）
@@ -257,8 +321,11 @@ adb install app/build/outputs/apk/release/app-release.apk
 | JNI 摄入竞态/UAF | `QrDecodePool.ingestLock` + `ScanActivity` `ingestStopped` | 句柄非线程安全，未串行化 |
 | 摄像头读不出码 | `qr_render.rs:74 encode`（版本选择）+ `scan_jni.cpp:64`（TryHarder） | 版本过高致模块过密；或 16KiB 页未对齐致 .so 加载失败 |
 | 压缩总是走 raw（100%） | `compress.ts:163 initZstdFromBytes` | worker 内 zstd WASM 未加载成功 |
-| 扩展构建缺 WASM | `apps/sender/wasm-pkg/` | 忘了先 `npm run wasm` |
+| 扩展构建缺 WASM | `apps/sender/wasm-pkg-legacy/` 或 `wasm-pkg-simd/` | 单独跑 `npm run build:chrome-mv3` 等单目标脚本前忘了先 `npm run wasm`（双产物缺失） |
 | APK 缺 native 库 | `jniLibs/arm64-v8a/libtransfer_engine.so` | 手动跑 `./gradlew` 而未经 `build-all.sh`（后者已自动先跑 cargo-ndk） |
+| Windows 端 DllNotFoundException | `apps/windows/AirFerry.Windows/runtime/transfer_engine.dll` | 手动跑 `dotnet build` 而未经 `build-windows.ps1`（后者已自动先跑 cargo --features cffi） |
+| Windows 端设备打不开 | `DeviceEnumerator.cs` + `VideoCapture.cs` | 设备被其他程序独占；或 DirectShow 驱动问题（换 MSMF 后端或换设备） |
+| Windows 端扫码即崩 | `cffi.rs` + `ReceiverSession.cs` | 同 Android：恶意/越界输入应在 Rust `Frame::from_bytes` 拦截；检查 `panic=abort` 下 DLL 是否正确编译 |
 
 ---
 
@@ -275,19 +342,32 @@ adb install app/build/outputs/apk/release/app-release.apk
    - **Rust 核心库**（`core/qr-protocol/src/compress.rs:25,48`）：Zstd **level 22**（`DEFAULT_LEVEL`）、Xz **level 6 + EXTREME**（`XZ_PRESET`）。
    - 两端用不同级别是**有意的**：发送端追求压缩启动快（Lv1），接收端只做解压、用高 ratio（见 `compress.rs:42-44` 的 NOTE）。两端产物是标准 zstd/xz 流，互操作正确。引用压缩参数时**必须分清是 TS 端还是 Rust 端**，不要合并描述。
 
-3. **版本号/Release 混用**：三处版本均为 `1.0.0`，但 README 与 dist 历史里出现过 v1.0.0/v1.1.0 混用。改版本时三处同步，且 `scripts/build-all.sh` 的 release 打包文件名需同时改。
+3. **版本号/Release 混用**：四处版本均为 `1.0.0`（`apps/sender/package.json`、`apps/scanner/app/build.gradle.kts` versionName、`Cargo.toml` workspace version、`apps/windows/AirFerry.Windows/AirFerry.Windows.csproj` `<Version>`），但 README 与 dist 历史里出现过 v1.0.0/v1.1.0 混用。改版本时四处同步，且 `scripts/build-all.sh` 的 release 打包文件名需同时改。
 
 4. **高速录制模式为死代码**：`HighSpeedCaptureController.kt`、Settings 里的高速开关、`docs/architecture.md`/`data-flow.md` 的「实验性高速录制」段落——**当前代码中已禁用**（`ScanActivity` onCreate 中 `highSpeedEnabled = false`，UI 分支 `if (highSpeed)` 永不渲染）。文档仍当可用功能描述。
 
 5. **`derive_meta_from_totals` 已废弃**：`receiver.rs:422`，仅保留 JNI ABI 兼容，**新代码勿调用**（其 OTI 构建在大文件上会 assert）。现代路径：从描述符帧拿权威 OTI。
 
-6. **wasm-bindgen 必须钉在 0.2.92（js-sys/web-sys 0.3.69）**：`core/transfer-engine/Cargo.toml` 里三者用 `=` 精确版本锁死，**不要**改回宽松的 `"0.2"` / `"0.3"`。原因：wasm-bindgen **0.2.93+ 默认启用 reference-types proposal**，生成的 `.wasm` 含 `externref` 值类型；该类型仅 Chrome **96+** 支持，Chrome 87/88 会在 `WebAssembly.instantiateStreaming()` 报 `CompileError: invalid value type 'externref'`。Chrome 87 是 MV3 `extension_pages` 的基线浏览器版本，发送端扩展必须能在该版本加载。升级三者时要一起升（js-sys/web-sys 与 wasm-bindgen 同期发版，版本号必须匹配），并在 Chrome 87 回归。症状定位：若扩展在新 Chrome 正常、在旧 Chrome 报上述 CompileError，即为此问题。
+6. **wasm-bindgen 双轨制（MV2=0.2.92 旧版 / MV3=0.2.125 新版）**：`core/transfer-engine/Cargo.toml` **默认仍钉死 `=0.2.92`**（js-sys/web-sys `=0.3.69`），**不要**改回宽松的 `"0.2"` / `"0.3"`——任何 `cargo update` 都会把默认 lockfile 漂移到 0.2.93+ 并破坏 MV2 构建。MV3 走另一条路：`apps/sender/scripts/build-wasm.cjs` 在构建 `wasm-pkg-simd/` 时**临时**把 Cargo.toml 改写成 `=0.2.125`（js-sys/web-sys `=0.3.102`）+ `RUSTFLAGS=+simd128`，构建完在 `finally` 里用 ① 内存回写 Cargo.toml + ② `git checkout Cargo.lock` 字节级还原，保证跑完后 `git status` 对 Cargo 文件零改动。
+   - **为什么是双轨**：wasm-bindgen 0.2.93+ 默认开 reference-types proposal（`externref` 值类型），仅 Chrome 96+ 支持；Chrome 87/88 会在 `WebAssembly.instantiateStreaming()` 报 `CompileError: invalid value type 'externref'`。Chrome 87 是 MV2 的兼容目标。MV3 同时启用新版 externref（JS↔WASM 引用传递）+ SIMD（`+simd128` target-feature）。SIMD 本身与 wasm-bindgen 版本正交——0.2.92 也能开——但新版 externref 必须升 wasm-bindgen，MV3 默认把两者一起给。
+   - **⚠️ 实测性能结论（不要据此期待提速）**：对当前 `next_qr_into` 全链路（RaptorQ 取符号 + Frame 序列化 + QR Reed-Solomon 编码 + 矩阵构建）的 Node benchmark（V25/1400B symbol、5000 帧）：
+     - **SIMD vs 标量**：0.95×（**轻微变慢**）。`raptorq` 与 `qrcode` crate 均为纯标量 Rust，无 `std::arch::wasm32::*` SIMD intrinsics，`+simd128` 对它们毫无作用，只让 wasm 大 ~8KB（312KB vs 304KB）并因指令缓存压力略慢。
+     - **新版 wasm-bindgen externref**：对 `&mut [u8]` 传递无明显收益（淹没在 QR 编码耗时里）。
+     - **真实瓶颈是 QR 编码**：单帧 ~4.8ms，其中 QR Reed-Solomon + 矩阵构建占 ~98%，Frame 序列化 + 数据传递占 ~2%。要提速只能换更快的 QR 库（如 C 实现的 ZXing）、降 symbol size（低 QR 版本）、或多线程并行编码（需 SharedArrayBuffer + COOP/COEP）。
+   - **那为什么还保留双产物 + SIMD**：① 双产物解决「MV2 兼容老 Chrome + MV3 用新工具链」的根本诉求（externref 错误的根治方案）；② 为未来引入 SIMD 化的库（换 QR 库、RaptorQ 用 GF(256) SIMD）保留构建基础设施——届时去掉/保留 `+simd128` 即可即时生效。
+   - **产物分流**：`wasm-pkg-legacy/`（MV2 用，无 SIMD/externref）+ `wasm-pkg-simd/`（MV3 用，两者都有）。`build-all.cjs` 按 `target.endsWith('mv3')` 把对应目录复制到 `wasm-pkg/` 后 plasmo build。loader.ts 的 import 路径固定 `../../wasm-pkg/`，靠 swap 目录名切换。
+   - **升级现代版**：改 `build-wasm.cjs` 顶部的 `MODERN = { wasmBindgen, jsSys, webSys }` 三元组，三者必须同期发版、版本号匹配（见 crates.io）。改完跑 `npm run wasm` 验证 `git status` 干净。
+   - **症状定位**：若扩展在新 Chrome 正常、在旧 Chrome（87/88）报 `CompileError: invalid value type 'externref'`，即 MV2 产物意外用了新版 wasm-bindgen——检查 `build-all.cjs` 是否按 MV2/MV3 正确 swap。
+
+7. **WASM 零拷贝 API**：`SenderSessionWasm` 同时提供 `next_qr`/`next_qr_multi`（返回 `Vec<u8>`，wasm-bindgen 深拷贝成新 `Uint8Array`）和 `next_qr_into`/`next_qr_multi_into`（写入调用方提供的 `&mut [u8]`，无分配）。**热路径（`QrStream.tsx` 的 rAF 循环）用 `_into` 变体**——组件用 `useRef` 预分配最大尺寸 buffer（V40=177²=31329 字节）跨帧复用。保留旧变体是为了备用路径/调试。**注意**：`_into` 写入的 subarray 视图只在当帧有效（下一帧会被覆盖），`drawMatrix` 必须在同一 tick 内 putImageData 完毕。
+   - **⚠️ 实测性能结论**：零拷贝 vs 返回 `Vec` 实测 **0.99×（持平）**。QR 编码耗时（~4.8ms）完全主导，`Vec<u8>` → `Uint8Array` 的深拷贝（V25=13689 字节）相对可忽略。保留 `_into` 的真实价值不是单帧提速，而是**消除每帧的堆分配**（4码×60fps = 240 次/秒），降低 GC 压力（benchmark 测不到 GC 抖动，但长时间运行下 GC stall 会导致 rAF 周期性掉帧）。
+   - **drawMatrix 像素填充**：当前是逐像素 `pixels[i] = black` 写（跳过白模块）。曾尝试用 `Uint32Array.set(blackRow, offset)` 批量复制整行黑模块，**实测 0.5×（慢一倍）**——`TypedArray.set` 对 modulePx=4~7 的小块有调用开销（边界检查 + memcpy setup），拐点在 modulePx ≥ 16。已回退，勿再尝试此「优化」。
 
 ---
 
 ## 6. 架构关键不变量（速览，详见 [`docs/SPEC.md`](docs/SPEC.md)）
 
-- **同一份 Rust 源码** → 两个 FFI 目标：浏览器 `wasm32-unknown-unknown`（wasm-bindgen）、Android `aarch64-linux-android`（`#[no_mangle] extern "system"`）。编解码数学一致。
+- **同一份 Rust 源码** → 三个 FFI 目标：浏览器 `wasm32-unknown-unknown`（wasm-bindgen）、Android `aarch64-linux-android`（`#[no_mangle] extern "system"` JNI）、Windows `x86_64-pc-windows-msvc`（`#[no_mangle] extern "C"` C ABI，供 .NET P/Invoke）。编解码数学一致。
 - **帧格式**：`[Header 60B][Payload T][Footer 4B]`，大端，magic `0x4554`，version 1，双层 CRC32；T=symbol_size（浏览器默认 1400——`DEFAULT_CONFIG.symbolSize`，核心库默认 1024——`Config::default()`）。
 - **会话 ID**：FNV-1a 128-bit（name/size/mtime/指纹），确定性 → 断点恢复。Rust 与 TS 实现必须位一致。
 - **喷泉码发射**：源符号跨块轮询发一遍 → 无限新鲜修复符号（ESI 单调递增、永不重复）。进度近似线性，无 coupon-collector 拖尾。
@@ -317,4 +397,5 @@ adb install app/build/outputs/apk/release/app-release.apk
 | API 参考（⚠️ JNI 部分已过时，见 §5） | [docs/api.md](docs/api.md) |
 | 构建指南 - 浏览器 | [docs/build-browser.md](docs/build-browser.md) |
 | 构建指南 - Android | [docs/build-android.md](docs/build-android.md) |
+| 构建指南 - Windows | [docs/build-windows.md](docs/build-windows.md) |
 | 开发环境搭建 | [docs/dev-setup.md](docs/dev-setup.md) |

@@ -1,0 +1,88 @@
+<Page x:Class="AirFerry.Windows.Views.ScanView"
+      xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+      Title="AirFerry - 扫码接收"
+      Background="{StaticResource BgDark}"
+      MinWidth="640" MinHeight="560">
+    <Grid Margin="24">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <!-- Top bar: back + title. -->
+        <Grid Grid.Row="0" Margin="0,0,0,16">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+            <Button Grid.Column="0"
+                    Style="{StaticResource OutlinedButton}"
+                    Content="‹ 返回"
+                    Click="Back_Click" />
+            <TextBlock Grid.Column="1"
+                       Text="扫码接收"
+                       FontSize="20" FontWeight="SemiBold"
+                       Foreground="{StaticResource TextPrimary}"
+                       HorizontalAlignment="Center"
+                       VerticalAlignment="Center" />
+            <Button Grid.Column="2"
+                    Style="{StaticResource OutlinedButton}"
+                    Content="📂 文件"
+                    Click="FileList_Click" />
+        </Grid>
+
+        <!-- Camera preview + progress ring. -->
+        <Grid Grid.Row="1">
+            <Border Background="{StaticResource CardBg}" CornerRadius="12" ClipToBounds="True">
+                <Grid>
+                    <!-- Live camera preview (updated via WriteableBitmap in code-behind). -->
+                    <Image x:Name="PreviewImage" Stretch="Uniform" />
+                    <!-- Circular progress ring overlaid in the center. -->
+                    <Canvas x:Name="ProgressCanvas"
+                            Width="180" Height="180"
+                            HorizontalAlignment="Center"
+                            VerticalAlignment="Center" />
+                </Grid>
+            </Border>
+        </Grid>
+
+        <!-- Status card at the bottom. -->
+        <Border Grid.Row="2"
+                Background="{StaticResource CardBg}"
+                CornerRadius="12"
+                Padding="20"
+                Margin="0,16,0,0">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <StackPanel Grid.Column="0">
+                    <TextBlock x:Name="StatusText"
+                               Text="正在扫描…"
+                               FontSize="16" FontWeight="SemiBold"
+                               Foreground="{StaticResource TextPrimary}" />
+                    <TextBlock x:Name="ProgressText"
+                               Text="0 / 0"
+                               FontSize="13"
+                               Foreground="{StaticResource TextSecondary}"
+                               Margin="0,4,0,0" />
+                    <TextBlock x:Name="RecoveryStageText"
+                               Text=""
+                               FontSize="13"
+                               Foreground="{StaticResource Accent}"
+                               Margin="0,4,0,0"
+                               Visibility="Collapsed" />
+                </StackPanel>
+                <Button Grid.Column="1"
+                        Style="{StaticResource OutlinedButton}"
+                        Content="⏹ 停止"
+                        Click="Stop_Click"
+                        x:Name="StopButton" />
+            </Grid>
+        </Border>
+    </Grid>
+</Page>

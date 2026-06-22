@@ -1,0 +1,66 @@
+<Page x:Class="AirFerry.Windows.Views.SettingsView"
+      xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+      Title="AirFerry - 设置"
+      Background="{StaticResource BgDark}"
+      MinWidth="640" MinHeight="560">
+    <Grid Margin="32">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <TextBlock Grid.Row="0"
+                   Text="设置"
+                   FontSize="22" FontWeight="Bold"
+                   Foreground="{StaticResource TextPrimary}"
+                   Margin="0,0,0,20" />
+
+        <Border Grid.Row="1"
+                Background="{StaticResource CardBg}"
+                CornerRadius="12"
+                Padding="20"
+                Margin="0,0,0,16">
+            <StackPanel>
+                <TextBlock Text="默认冗余率"
+                           FontSize="14"
+                           Foreground="{StaticResource TextSecondary}" />
+                <TextBlock x:Name="RedundancyText"
+                           Text="5%"
+                           FontSize="28" FontWeight="Bold"
+                           Foreground="{StaticResource TextPrimary}"
+                           Margin="0,4,0,8" />
+                <Slider x:Name="RedundancySlider"
+                        Minimum="5" Maximum="50"
+                        TickFrequency="5" TickPlacement="BottomRight"
+                        IsSnapToTickEnabled="True"
+                        Value="5"
+                        ValueChanged="Redundancy_Changed" />
+            </StackPanel>
+        </Border>
+
+        <Border Grid.Row="2"
+                Background="{StaticResource CardBg}"
+                CornerRadius="12"
+                Padding="20">
+            <StackPanel>
+                <TextBlock Text="AirFerry"
+                           FontSize="16" FontWeight="Bold"
+                           Foreground="{StaticResource TextPrimary}" />
+                <TextBlock x:Name="VersionText"
+                           Text="版本 1.0.0"
+                           FontSize="13"
+                           Foreground="{StaticResource TextSecondary}"
+                           Margin="0,4,0,0" />
+            </StackPanel>
+        </Border>
+
+        <Button Grid.Row="4"
+                Style="{StaticResource OutlinedButton}"
+                Content="‹ 返回"
+                Click="Back_Click" />
+    </Grid>
+</Page>

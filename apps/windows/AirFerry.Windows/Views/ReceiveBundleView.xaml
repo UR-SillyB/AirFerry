@@ -1,0 +1,59 @@
+<Page x:Class="AirFerry.Windows.Views.ReceiveBundleView"
+      xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+      Title="AirFerry - 接收包"
+      Background="{StaticResource BgDark}"
+      MinWidth="640" MinHeight="560">
+    <Grid Margin="32">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <StackPanel Grid.Row="0" Margin="0,0,0,16">
+            <TextBlock Text="✓ 接收完成"
+                       FontSize="24" FontWeight="Bold"
+                       Foreground="#22C55E" />
+            <TextBlock x:Name="CrcStatusText"
+                       FontSize="14"
+                       Foreground="{StaticResource TextSecondary}"
+                       Margin="0,8,0,0" />
+        </StackPanel>
+
+        <Border Grid.Row="1"
+                Background="{StaticResource CardBg}"
+                CornerRadius="12"
+                Padding="8">
+            <ListView x:Name="FileListView"
+                      Background="Transparent"
+                      BorderThickness="0"
+                      Foreground="{StaticResource TextPrimary}">
+                <ListView.View>
+                    <GridView>
+                        <GridViewColumn Header="文件名" Width="320"
+                                        DisplayMemberBinding="{Binding Name}" />
+                        <GridViewColumn Header="大小" Width="120"
+                                        DisplayMemberBinding="{Binding SizeText}" />
+                    </GridView>
+                </ListView.View>
+            </ListView>
+        </Border>
+
+        <Grid Grid.Row="2" Margin="0,16,0,0">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="8" />
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="8" />
+                <ColumnDefinition Width="*" />
+            </Grid.ColumnDefinitions>
+            <Button Grid.Column="0" Style="{StaticResource PrimaryButton}"
+                    Content="💾 全部保存" Click="SaveAll_Click" />
+            <Button Grid.Column="2" Style="{StaticResource OutlinedButton}"
+                    Content="🔗 全部分享" Click="ShareAll_Click" />
+            <Button Grid.Column="4" Style="{StaticResource OutlinedButton}"
+                    Content="↻ 重新扫码" Click="Rescan_Click" />
+        </Grid>
+    </Grid>
+</Page>

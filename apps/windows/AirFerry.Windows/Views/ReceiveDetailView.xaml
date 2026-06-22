@@ -1,0 +1,73 @@
+<Page x:Class="AirFerry.Windows.Views.ReceiveDetailView"
+      xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+      Title="AirFerry - 接收详情"
+      Background="{StaticResource BgDark}"
+      MinWidth="640" MinHeight="560">
+    <Grid Margin="32">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <TextBlock Grid.Row="0"
+                   Text="✓ 接收完成"
+                   FontSize="24" FontWeight="Bold"
+                   Foreground="#22C55E"
+                   Margin="0,0,0,24" />
+
+        <Border Grid.Row="1"
+                Background="{StaticResource CardBg}"
+                CornerRadius="12"
+                Padding="24">
+            <StackPanel>
+                <TextBlock Text="文件名"
+                           FontSize="13"
+                           Foreground="{StaticResource TextSecondary}" />
+                <TextBlock x:Name="FileNameText"
+                           FontSize="18" FontWeight="SemiBold"
+                           Foreground="{StaticResource TextPrimary}"
+                           Margin="0,4,0,20"
+                           TextWrapping="Wrap" />
+
+                <TextBlock Text="大小"
+                           FontSize="13"
+                           Foreground="{StaticResource TextSecondary}" />
+                <TextBlock x:Name="FileSizeText"
+                           FontSize="16"
+                           Foreground="{StaticResource TextPrimary}"
+                           Margin="0,4,0,20" />
+
+                <TextBlock Text="CRC32 校验"
+                           FontSize="13"
+                           Foreground="{StaticResource TextSecondary}" />
+                <TextBlock x:Name="CrcStatusText"
+                           FontSize="16" FontWeight="SemiBold"
+                           Margin="0,4,0,8" />
+                <TextBlock x:Name="CrcValuesText"
+                           FontSize="12"
+                           Foreground="{StaticResource TextSecondary}"
+                           FontFamily="Consolas" />
+            </StackPanel>
+        </Border>
+
+        <StackPanel Grid.Row="2" Margin="0,24,0,0">
+            <Button Style="{StaticResource PrimaryButton}"
+                    Content="💾 保存到…"
+                    Click="SaveAs_Click"
+                    Margin="0,0,0,8" />
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="8" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <Button Grid.Column="0" Style="{StaticResource OutlinedButton}"
+                        Content="🔗 分享" Click="Share_Click" />
+                <Button Grid.Column="2" Style="{StaticResource OutlinedButton}"
+                        Content="↻ 重新扫码" Click="Rescan_Click" />
+            </Grid>
+        </StackPanel>
+    </Grid>
+</Page>
