@@ -33,7 +33,7 @@
                 Background="{StaticResource CardBg}"
                 CornerRadius="12"
                 Padding="8">
-            <ListView x:Name="FileListView"
+            <ListView x:Name="FilesListView"
                       Background="Transparent"
                       BorderThickness="0"
                       Foreground="{StaticResource TextPrimary}"

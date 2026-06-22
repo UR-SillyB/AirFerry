@@ -27,6 +27,20 @@ public sealed class MatLuminanceSource : LuminanceSource
     public int Width { get; }
     public int Height { get; }
 
+    /// <summary>Required by ZXing.Net: returns the luminance byte array.</summary>
+    public override byte[] Matrix => luminances;
+
+    /// <summary>
+    /// Required by ZXing.Net: copies one row of luminance data into the provided
+    /// buffer. The row index <paramref name="y"/> is 0-based.
+    /// </summary>
+    public override byte[] getRow(int y, byte[] row)
+    {
+        int start = y * Width;
+        System.Array.Copy(luminances, start, row, 0, Width);
+        return row;
+    }
+
     /// <summary>
     /// Build a luminance source over a grayscale <paramref name="gray"/> Mat.
     /// The Mat's pixels are copied into the internal buffer immediately; the

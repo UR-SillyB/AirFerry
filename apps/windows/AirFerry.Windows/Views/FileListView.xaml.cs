@@ -19,7 +19,7 @@ public partial class FileListView : Page
     public FileListView()
     {
         InitializeComponent();
-        FileListView.ItemsSource = _entries;
+        FilesListView.ItemsSource = _entries;
         Loaded += (_, _) => Refresh();
     }
 
@@ -72,7 +72,7 @@ public partial class FileListView : Page
 
     private void FileList_DoubleClick(object sender, RoutedEventArgs e)
     {
-        if (FileListView.SelectedItem is not FileEntry entry)
+        if (FilesListView.SelectedItem is not FileEntry entry)
         {
             return;
         }

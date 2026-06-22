@@ -58,13 +58,14 @@ public static class FileNameUtil
             base_ = base_[(slash + 1)..];
         }
 
-        // Strip genuinely-illegal chars + C0 control chars. Regex is overkill
-        // here (and allocates); a char-by-char filter is faster and clearer.
+        // Strip genuinely-illegal chars + C0 control chars, replacing with '_'
+        // (matches Android's Regex.replace("[/\\:*?\"<>|\\p{Cntrl}]", "_")).
         var sb = new StringBuilder(base_.Length);
         foreach (char c in base_)
         {
             if (IsIllegalFileNameChar(c))
             {
+                sb.Append('_');
                 continue;
             }
             sb.Append(c);

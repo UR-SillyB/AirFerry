@@ -34,9 +34,9 @@ public static class ZxingDecoder
     /// QR-only format, TryHarder, TryInvert. A fresh reader per worker avoids
     /// the shared-state threading hazard.
     /// </summary>
-    public static BarcodeReader CreateReader()
+    public static BarcodeReader<LuminanceSource> CreateReader()
     {
-        var reader = new BarcodeReader(CreateLuminanceSource)
+        var reader = new BarcodeReader<LuminanceSource>(CreateLuminanceSource)
         {
             AutoRotate = true,
             Options = new DecodingOptions
@@ -54,7 +54,7 @@ public static class ZxingDecoder
     /// Returns the raw payload bytes, or null if no QR is found. Mirrors
     /// <c>scan_jni.cpp::decodeInView</c> + ZXing's <c>ReadBarcode</c> (singular).
     /// </summary>
-    public static byte[]? Decode(BarcodeReader reader, MatLuminanceSource source)
+    public static byte[]? Decode(BarcodeReader<LuminanceSource> reader, MatLuminanceSource source)
     {
         Result? result = reader.Decode(source);
         return ResultToBytes(result);
@@ -66,7 +66,7 @@ public static class ZxingDecoder
     /// the sender tiles N codes per frame. Returns an empty list (not null) on
     /// miss.
     /// </summary>
-    public static List<byte[]> DecodeMultiple(BarcodeReader reader, MatLuminanceSource source)
+    public static List<byte[]> DecodeMultiple(BarcodeReader<LuminanceSource> reader, MatLuminanceSource source)
     {
         Result[] results = reader.DecodeMultiple(source);
         if (results is null || results.Length == 0)

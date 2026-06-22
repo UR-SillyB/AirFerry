@@ -176,7 +176,7 @@ public sealed class QrDecodePool : IDisposable
     private void WorkerLoop(CancellationToken ct)
     {
         // Per-worker reader (ZXing BarcodeReader is not thread-safe).
-        BarcodeReader reader = ZxingDecoder.CreateReader();
+        BarcodeReader<LuminanceSource> reader = ZxingDecoder.CreateReader();
         var pending = new List<byte[]>(IngestBatch);
 
         while (_running && !ct.IsCancellationRequested)

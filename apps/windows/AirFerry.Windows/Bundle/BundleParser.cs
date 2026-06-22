@@ -30,20 +30,28 @@ namespace AirFerry.Windows.Bundle;
 /// plain single file. Mirrors <c>BundleParser.kt</c>.
 /// </para>
 /// </remarks>
+namespace AirFerry.Windows.Bundle;
+
+/// <summary>One file inside a multi-file bundle.</summary>
+public sealed class BundleFile(string name, byte[] data)
+{
+    public string Name { get; } = name;
+    public byte[] Data { get; } = data;
+}
+
+/// <summary>A parsed multi-file bundle container.</summary>
+public sealed class Bundle(IReadOnlyList<BundleFile> files)
+{
+    public IReadOnlyList<BundleFile> Files { get; } = files;
+}
+
+/// <summary>
+/// Multi-file bundle container parser — mirrors the browser sender's
+/// <c>bundle.ts</c> byte-for-byte so the two sides stay interoperable.
+/// </summary>
 public static class BundleParser
 {
     public static ReadOnlySpan<byte> Magic => "ETBUNDL1"u8;
-
-    public sealed class BundleFile(string name, byte[] data)
-    {
-        public string Name { get; } = name;
-        public byte[] Data { get; } = data;
-    }
-
-    public sealed class Bundle(IReadOnlyList<BundleFile> files)
-    {
-        public IReadOnlyList<BundleFile> Files { get; } = files;
-    }
 
     /// <summary>True if <paramref name="bytes"/> starts with the 8-byte magic.</summary>
     public static bool IsBundle(ReadOnlySpan<byte> bytes)

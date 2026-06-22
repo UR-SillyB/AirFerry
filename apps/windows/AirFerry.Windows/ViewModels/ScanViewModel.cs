@@ -34,7 +34,7 @@ namespace AirFerry.Windows.ViewModels;
 /// </remarks>
 public partial class ScanViewModel : ObservableObject, IDisposable
 {
-    private VideoCapture? _capture;
+    private AirFerry.Windows.Scan.VideoCapture? _capture;
     private QrDecodePool? _pool;
     private ReceiverSession? _session;
     private Thread? _producerThread;
