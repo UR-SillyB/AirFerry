@@ -40,9 +40,9 @@
   </ItemGroup>
 
   <ItemGroup>
-    <!-- The Rust core library compiled with `cargo build --features cffi`.
+    <!-- The Rust core library compiled with cargo build (features = cffi).
          Copied here by scripts/build-windows.ps1 (or build-all.sh windows).
-         File existance is not checked at design-time; load is deferred to
+         File existence is not checked at design-time; load is deferred to
          NativeBridge.cs where a clean error is raised if it's missing. -->
     <None Update="runtime\transfer_engine.dll">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>

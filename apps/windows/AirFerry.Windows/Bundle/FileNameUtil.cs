@@ -169,19 +169,26 @@ public static class FileNameUtil
 
     private static bool IsReservedStem(string stem)
     {
-        if (stem.Length == 3)
+        int len = stem.Length;
+        if (len < 3 || len > 4)
         {
-            // COM1..9 / LPT1..9 share the pattern "<prefix><digit>", plus the
-            // three fixed names.
+            return false;
+        }
+        // Fixed 3-char names (CON/PRN/AUX/NUL).
+        if (len == 3)
+        {
             return stem.Equals("CON", StringComparison.OrdinalIgnoreCase)
                 || stem.Equals("PRN", StringComparison.OrdinalIgnoreCase)
                 || stem.Equals("AUX", StringComparison.OrdinalIgnoreCase)
-                || stem.Equals("NUL", StringComparison.OrdinalIgnoreCase)
-                || ((stem.StartsWith("COM", StringComparison.OrdinalIgnoreCase)
-                     || stem.StartsWith("LPT", StringComparison.OrdinalIgnoreCase))
-                    && char.IsDigit(stem[2]));
+                || stem.Equals("NUL", StringComparison.OrdinalIgnoreCase);
         }
-        // Allow the 4-char forms (COM10.. etc.) — Win32 only reserves COM1-9.
+        // COM1-9 / LPT1-9 (length 4: 3-letter prefix + one digit).
+        if (len == 4)
+        {
+            bool isComOrLpt = stem.StartsWith("COM", StringComparison.OrdinalIgnoreCase)
+                || stem.StartsWith("LPT", StringComparison.OrdinalIgnoreCase);
+            return isComOrLpt && char.IsDigit(stem[3]);
+        }
         return false;
     }
 

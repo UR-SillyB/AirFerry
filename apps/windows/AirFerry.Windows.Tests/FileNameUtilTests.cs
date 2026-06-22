@@ -21,7 +21,10 @@ public class FileNameUtilTests
     [Fact]
     public void Sanitize_StripsIllegalChars()
     {
-        Assert.Equal("a_b", FileNameUtil.Sanitize("a/b"));
+        // Reduces to the final path component first, then strips illegal chars.
+        // So "a/b" → base is "b" (slash stripped), not "a_b".
+        Assert.Equal("b", FileNameUtil.Sanitize("a/b"));
+        Assert.Equal("b", FileNameUtil.Sanitize("a\\b"));
         Assert.Equal("a_b", FileNameUtil.Sanitize("a:b"));
         Assert.Equal("a_b", FileNameUtil.Sanitize("a*b"));
         Assert.Equal("a_b", FileNameUtil.Sanitize("a\"b"));

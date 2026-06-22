@@ -85,7 +85,8 @@ public class FrameHeaderTests
     public void Parse_Rejects_TooShortBuffer()
     {
         Assert.Null(FrameHeader.Parse(new byte[63]));
-        // 64 is the minimum (60-byte header + 4-byte footer slot).
-        Assert.NotNull(FrameHeader.Parse(new byte[64]));
+        // 64 is the minimum (60-byte header + 4-byte footer slot), but
+        // the buffer must still carry valid magic + version to pass.
+        Assert.NotNull(FrameHeader.Parse(BuildHeader()));
     }
 }
