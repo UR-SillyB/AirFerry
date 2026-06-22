@@ -74,7 +74,9 @@ public static class DeviceEnumerator
             for (int i = 0; i < ds.Length; i++)
             {
                 string name = ds[i].Name ?? $"Device {i}";
-                string moniker = ds[i].MonikerString ?? i.ToString();
+                // DirectShowLib.Standard doesn't expose MonikerString; use
+                // index as identifier (VideoCapture binds by index).
+                string moniker = i.ToString();
                 bool isCard = LooksLikeCaptureCard(name);
                 list[i] = new DeviceInfo(name, moniker, i, isCard);
             }
