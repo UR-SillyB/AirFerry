@@ -69,6 +69,12 @@ npm run wasm
 #   产物: apps/sender/wasm-pkg/transfer_engine*.js + *_bg.wasm
 #   说明: `wasm` feature 已隐含 `serde`（见 core/transfer-engine/Cargo.toml），
 #         故 `serde` 显式写出是冗余但无害的；后半段把产物从 pkg/ 搬到 wasm-pkg/。
+#   ⚠️ wasm-bindgen 版本锁：core/transfer-engine/Cargo.toml 把 wasm-bindgen 钉在
+#         `=0.2.92`、js-sys/web-sys 钉在 `=0.3.69`。0.2.93+ 默认开 reference-types
+#         proposal，生成的 .wasm 含 `externref` 值类型——该类型仅 Chrome 96+ 支持，
+#         Chrome 87/88 会在 `WebAssembly.instantiateStreaming()` 报
+#         `CompileError: invalid value type 'externref'`。Chrome 87 是 MV3
+#         extension_pages 的基线，发送端必须能在此加载。升级三者要一起升并回归此点。
 
 # ② 构建扩展（全部 4 个目标，会自动先跑 extract-lzma-wasm）
 npm run build
@@ -274,6 +280,8 @@ adb install app/build/outputs/apk/release/app-release.apk
 4. **高速录制模式为死代码**：`HighSpeedCaptureController.kt`、Settings 里的高速开关、`docs/architecture.md`/`data-flow.md` 的「实验性高速录制」段落——**当前代码中已禁用**（`ScanActivity` onCreate 中 `highSpeedEnabled = false`，UI 分支 `if (highSpeed)` 永不渲染）。文档仍当可用功能描述。
 
 5. **`derive_meta_from_totals` 已废弃**：`receiver.rs:422`，仅保留 JNI ABI 兼容，**新代码勿调用**（其 OTI 构建在大文件上会 assert）。现代路径：从描述符帧拿权威 OTI。
+
+6. **wasm-bindgen 必须钉在 0.2.92（js-sys/web-sys 0.3.69）**：`core/transfer-engine/Cargo.toml` 里三者用 `=` 精确版本锁死，**不要**改回宽松的 `"0.2"` / `"0.3"`。原因：wasm-bindgen **0.2.93+ 默认启用 reference-types proposal**，生成的 `.wasm` 含 `externref` 值类型；该类型仅 Chrome **96+** 支持，Chrome 87/88 会在 `WebAssembly.instantiateStreaming()` 报 `CompileError: invalid value type 'externref'`。Chrome 87 是 MV3 `extension_pages` 的基线浏览器版本，发送端扩展必须能在该版本加载。升级三者时要一起升（js-sys/web-sys 与 wasm-bindgen 同期发版，版本号必须匹配），并在 Chrome 87 回归。症状定位：若扩展在新 Chrome 正常、在旧 Chrome 报上述 CompileError，即为此问题。
 
 ---
 

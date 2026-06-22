@@ -23,9 +23,19 @@ serde = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-js-sys = "0.3"
-wasm-bindgen = { version = "0.2", optional = true }
-web-sys = { version = "0.3", features = ["console"] }
+# Pin the wasm-bindgen family to versions BEFORE 0.2.93 / js-sys & web-sys 0.3.70.
+# wasm-bindgen 0.2.93 enabled the reference-types proposal (`externref` value
+# type) by default in its generated `.wasm`; that type only ships in Chrome 96+,
+# so the previous loose `"0.2"` / `"0.3"` requirements (resolving to 0.2.125 /
+# 0.3.102) emitted a module that Chrome 87/88 rejects at
+# `WebAssembly.instantiateStreaming()` with
+#   CompileError: invalid value type 'externref'
+# Chrome 87 is the baseline for MV3 extension_pages, so the sender must stay
+# loadable there. Keep the three pinned together: js-sys/web-sys 0.3.69 is the
+# release that accompanied wasm-bindgen 0.2.92.
+js-sys = "=0.3.69"
+wasm-bindgen = { version = "=0.2.92", optional = true }
+web-sys = { version = "=0.3.69", features = ["console"] }
 
 [target.'cfg(target_os = "android")'.dependencies]
 jni = "0.21"
@@ -39,3 +49,8 @@ serde = ["dep:serde", "dep:serde_json", "raptorq-core/serde", "qr-protocol/serde
 # guard that used to sit next to the call site.
 wasm = ["dep:wasm-bindgen", "serde"]
 jni = []
+# Plain C ABI export (`#[no_mangle] extern "C"`) for the Windows client's
+# P/Invoke. An empty feature, like `jni`: it only switches the `cffi` module in,
+# adds no new dependency, and relies on the already-declared `cdylib` crate-type
+# to emit `transfer_engine.dll` on Windows targets.
+cffi = []
