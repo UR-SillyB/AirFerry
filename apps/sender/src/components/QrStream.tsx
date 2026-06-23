@@ -310,8 +310,7 @@ function drawMatrix(
       const baseX = (x + margin) * modulePx
       for (let dy = 0; dy < modulePx; dy++) {
         const row = (baseY + dy) * drawSize + baseX
-        const end = baseX + modulePx
-        for (let dx = baseX; dx < end; dx++) {
+        for (let dx = 0; dx < modulePx; dx++) {
           pixels[row + dx] = black
         }
       }

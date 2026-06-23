@@ -135,6 +135,101 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_old_vs_new_sizes() {
+        use crate::{Frame, FLAG_DESCRIPTOR};
+        
+        let frame = Frame::build(
+            0u128,
+            0, // flags
+            1, // sbn
+            1, // esi
+            1, // total_blocks
+            10, // total_symbols
+            1024, // symbol_size
+            1, // frame_index
+            1234567, // timestamp_ms
+            &vec![0u8; 1024],
+        );
+        let bytes = frame.to_bytes();
+        
+        let m_new = encode(&bytes).unwrap();
+        
+        // Old encoding method
+        let encode_old = |data: &[u8]| -> QrMatrix {
+            let start = min_version_for(data.len()).unwrap();
+            let start_v = match start { Version::Normal(v) => v, _ => 1 };
+            for v in start_v..=40 {
+                if let Ok(code) = QrCode::with_version(data, Version::Normal(v), QR_EC_LEVEL) {
+                    let size = code.width();
+                    let modules = code.to_colors().into_iter().map(|c| c != qrcode::types::Color::Light).collect();
+                    return QrMatrix { modules, size };
+                }
+            }
+            panic!("failed old");
+        };
+        
+        let m_old = encode_old(&bytes);
+        
+        println!("Data frame - Old size: {}, New size: {}", m_old.size, m_new.size);
+        
+        let desc_frame = Frame::build(
+            0u128,
+            FLAG_DESCRIPTOR, // flags
+            0,
+            0,
+            1,
+            10,
+            1024,
+            0,
+            1234567,
+            &vec![0u8; 1024],
+        );
+        let desc_bytes = desc_frame.to_bytes();
+        let desc_m_new = encode(&desc_bytes).unwrap();
+        let desc_m_old = encode_old(&desc_bytes);
+        
+        println!("Descriptor frame - Old size: {}, New size: {}", desc_m_old.size, desc_m_new.size);
+        
+        panic!("Show sizes");
+    }
+
+    #[test]
+    fn compare_with_version_and_with_bits() {
+        use crate::{Frame, FLAG_DESCRIPTOR};
+        
+        let symbol_sizes = [512, 896, 1008, 1024, 1400];
+        
+        for &sym_size in &symbol_sizes {
+            let frame = Frame::build(
+                0u128,
+                0, // flags
+                1, // sbn
+                1, // esi
+                1, // total_blocks
+                10, // total_symbols
+                sym_size,
+                1, // frame_index
+                1234567, // timestamp_ms
+                &vec![0u8; sym_size as usize],
+            );
+            let bytes = frame.to_bytes();
+            
+            let version = min_version_for(bytes.len()).unwrap();
+            let code_version = QrCode::with_version(&bytes, version.clone(), QR_EC_LEVEL).unwrap();
+            
+            let mut bits = Bits::new(version.clone());
+            bits.push_byte_data(&bytes).unwrap();
+            bits.push_terminator(QR_EC_LEVEL).unwrap();
+            let code_bits = QrCode::with_bits(bits, QR_EC_LEVEL).unwrap();
+            
+            let m_version: Vec<bool> = code_version.to_colors().into_iter().map(|c| c != qrcode::types::Color::Light).collect();
+            let m_bits: Vec<bool> = code_bits.to_colors().into_iter().map(|c| c != qrcode::types::Color::Light).collect();
+            
+            assert_eq!(m_version, m_bits, "QR codes are not identical for sym_size = {}", sym_size);
+        }
+    }
+
+    #[test]
     fn encodes_frame_sized_payload() {
         // A 1088-byte frame fits in Version 23 (109×109) at EC-L — far sparser
         // than the old forced Version 40 (177×177).
