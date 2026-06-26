@@ -132,7 +132,7 @@ pack_chrome_crx() {
   local key="$ROOT/dist/airferry-extension.pem"
 
   if [[ ! -x "$CHROME_BIN" ]]; then
-    warn "未找到 Chrome（$CHROME_BIN），跳过 ${plat} 的 .crx 签名，仅保留 .zip"
+    warn "未找到 Chrome（${CHROME_BIN}），跳过 ${plat} 的 .crx 签名，仅保留 .zip"
     return 0
   fi
 
@@ -175,7 +175,7 @@ pack_dist() {
 
   # 扫码端 APK
   local apk_src="$ROOT/apps/scanner/app/build/outputs/apk/release/app-release.apk"
-  [[ -f "$apk_src" ]] || error "找不到 APK：$apk_src（先运行 build-all.sh scanner）"
+  [[ -f "$apk_src" ]] || error "找不到 APK：${apk_src}（先运行 build-all.sh scanner）"
   cp "$apk_src" "$ROOT/dist/airferry-android-v${VER}.apk"
   info "APK → dist/airferry-android-v${VER}.apk"
 
@@ -185,7 +185,7 @@ pack_dist() {
     ( cd "$win_publish" && zip -r -q -X "$ROOT/dist/airferry-windows-x64-v${VER}.zip" . )
     info "Windows 端 → dist/airferry-windows-x64-v${VER}.zip"
   else
-    warn "未找到 Windows 端构建产物（$win_publish）。如需打包 Windows 端，先在 Windows 上运行: ./scripts/build-windows.ps1 release"
+    warn "未找到 Windows 端构建产物（${win_publish}）。如需打包 Windows 端，先在 Windows 上运行: ./scripts/build-windows.ps1 release"
   fi
 
   # 发送端：Chrome crx + zip，Firefox xpi（即 zip 改名）
@@ -193,7 +193,7 @@ pack_dist() {
     local prod_dir="$target"
     local plat="${prod_dir%-prod}"
     local src_dir="$ROOT/apps/sender/build/$prod_dir"
-    [[ -d "$src_dir" ]] || error "找不到发送端构建：$src_dir（先运行 build-all.sh sender）"
+    [[ -d "$src_dir" ]] || error "找不到发送端构建：${src_dir}（先运行 build-all.sh sender）"
 
     if [[ "$plat" == chrome-* ]]; then
       # Chrome/Edge：签名 crx + 解压加载用的 zip
