@@ -46,6 +46,7 @@ import com.airferry.app.scan.HighSpeedCaptureController
 import com.airferry.app.scan.QrDecodePool
 import com.airferry.app.scan.QrStreamAnalyzer
 import com.airferry.app.scan.ReceiverSessionManager
+import com.airferry.app.scan.TextParser
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -844,6 +845,28 @@ class ScanActivity : ComponentActivity() {
         val expectedCrc = session.crc32()
         val crcKnown = session.crc32Known()
         val receivedCrc = crc32OfBytes(truncBytes)
+
+        // Text payload → decode UTF-8 and route to the text detail screen.
+        // Detected BEFORE the bundle check: the two magics never collide
+        // ("ETTEXTv1" vs "ETBUNDL1"), but checking text first keeps the intent
+        // explicit. No file is written to disk — the text lives in memory and
+        // the user copies / shares / saves it from the detail screen.
+        if (TextParser.isText(truncBytes)) {
+            val text = TextParser.parse(truncBytes)
+            if (text != null) {
+                clearRecoveryStage()
+                return Intent(this, ReceiveTextActivity::class.java).apply {
+                    putExtra("TEXT", text)
+                    putExtra("CRC32", expectedCrc)
+                    putExtra("CRC32_RECEIVED", receivedCrc)
+                    // Use the authoritative known-flag, NOT `expectedCrc == 0L`:
+                    // CRC32 can legitimately be 0.
+                    putExtra("CRC32_UNKNOWN", !crcKnown)
+                }
+            }
+            // If parsing failed, fall through and treat as a single file so the
+            // user still gets something rather than a dead end.
+        }
 
         // Multi-file bundle → unpack and route to the bundle detail screen.
         if (BundleParser.isBundle(truncBytes)) {

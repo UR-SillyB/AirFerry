@@ -190,7 +190,11 @@ public partial class ScanView : Page
         Dispatcher.BeginInvoke(() =>
         {
             DrawProgressRing(100);
-            if (result.IsBundle && result.Bundle is not null)
+            if (result.IsText)
+            {
+                NavigationService?.Navigate(new ReceiveTextView(result));
+            }
+            else if (result.IsBundle && result.Bundle is not null)
             {
                 NavigationService?.Navigate(new ReceiveBundleView(result));
             }

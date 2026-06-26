@@ -124,3 +124,94 @@ jobs:
       - name: dotnet build (WPF Release)
         run: dotnet build apps/windows/AirFerry.Windows/AirFerry.Windows.csproj -c Release --no-restore
 
+  # ── Job 4: Windows 发布打包 + 上传到 GitHub release ──────────────────────
+  # 镜像 build-windows.ps1 -Pack：
+  # ① cargo build --features cffi → transfer_engine.dll → runtime/
+  # ② dotnet publish -r win-x64 single-file self-contained=false → publish/
+  # ③ Compress publish/ → airferry-windows-x64-v1.0.0.zip
+  # ④ gh release upload 到 v1.0.0（tag 已存在，--clobber 覆盖同名 asset）
+  # 只在 workflow_dispatch + 打包后手动触发上传（避免每次 push 都发 release）。
+  windows-pack:
+    name: Windows publish + upload to release
+    needs: [rust-cffi, csharp-tests, windows-build]
+    runs-on: windows-latest
+    # 仅在手动触发时跑（不污染 push/PR）；确保质量门（前三个 job）通过。
+    if: github.event_name == 'workflow_dispatch'
+    permissions:
+      contents: write   # gh release upload 需要
+    env:
+      VER: '1.0.0'
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cffi-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}
+          restore-keys: ${{ runner.os }}-cffi-
+
+      - name: Setup .NET 8 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: ${{ runner.os }}-nuget-${{ hashFiles('apps/windows/**/*.csproj') }}
+          restore-keys: ${{ runner.os }}-nuget-
+
+      - name: Build Rust C ABI DLL (--features cffi)
+        run: cargo build -p transfer-engine --features cffi --release
+
+      - name: Copy DLL to C# runtime/
+        shell: pwsh
+        run: |
+          $dll = "target/release/transfer_engine.dll"
+          if (-not (Test-Path $dll)) { throw "Rust DLL not found: $dll" }
+          New-Item -ItemType Directory -Force -Path apps/windows/AirFerry.Windows/runtime | Out-Null
+          Copy-Item $dll apps/windows/AirFerry.Windows/runtime/transfer_engine.dll -Force
+          Write-Host "Copied $dll -> runtime/"
+
+      - name: dotnet restore
+        run: dotnet restore apps/windows/AirFerry.sln
+
+      - name: dotnet publish (single-file, win-x64, self-contained=false)
+        # 镜像 build-windows.ps1 -Pack：单文件、框架依赖（目标机须装 .NET 8 运行时）
+        run: >-
+          dotnet publish apps/windows/AirFerry.Windows/AirFerry.Windows.csproj
+          -c Release -r win-x64
+          -p:PublishSingleFile=true --self-contained false
+
+      - name: Pack zip
+        shell: pwsh
+        run: |
+          $PublishDir = "apps/windows/AirFerry.Windows/bin/x64/Release/net8.0-windows/publish"
+          if (-not (Test-Path $PublishDir)) { throw "未找到发布产物: $PublishDir" }
+          # 列出产物清单（便于日志核对：应含 AirFerry.exe + transfer_engine.dll + OpenCV native DLLs）
+          Write-Host "=== publish 内容 ==="
+          Get-ChildItem $PublishDir | Select-Object Name, Length | Format-Table -AutoSize
+          $ZipName = "airferry-windows-x64-v${env:VER}.zip"
+          if (Test-Path $ZipName) { Remove-Item $ZipName -Force }
+          Compress-Archive -Path "$PublishDir/*" -DestinationPath $ZipName
+          Write-Host "Windows 端 -> $ZipName ($((Get-Item $ZipName).Length) bytes)"
+
+      - name: Upload to GitHub release v1.0.0
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: pwsh
+        run: |
+          $ZipName = "airferry-windows-x64-v${env:VER}.zip"
+          # tag v1.0.0 已存在（发送端/APK 在本地构建后也上传到同一 release）。
+          # --clobber：覆盖同名 asset（覆盖式发布）。
+          gh release upload "v${env:VER}" $ZipName --clobber
+          Write-Host "已上传 $ZipName 到 release v${env:VER}"
+

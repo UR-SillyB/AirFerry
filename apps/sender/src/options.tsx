@@ -17,7 +17,7 @@ import { ParamsPage } from "@/pages/ParamsPage"
 import { PlayPage } from "@/pages/PlayPage"
 import { StatsPage } from "@/pages/StatsPage"
 import { CompressProgress, type CompressPhase } from "@/components/CompressProgress"
-import { loadConfig, saveConfig, type Page, type TransferConfig } from "@/types"
+import { loadConfig, saveConfig, type Page, type TransferConfig, type TransferKind } from "@/types"
 
 /**
  * The compress worker. Built by Parcel 2 into a separate bundle per target
@@ -52,7 +52,7 @@ const compressWorker = new Worker(
   }
 })()
 
-export type { Page, TransferConfig }
+export type { Page, TransferConfig, TransferKind }
 
 /** A "send unit": either one real file or a bundle of several. */
 interface PreparedPayload {
@@ -72,9 +72,13 @@ interface PreparedPayload {
 
 export interface AppState {
   page: Page
-  /** Files chosen by the user (1 or more). */
+  /** Transfer kind: "file" (default) or "text". Picks the select-page Tab. */
+  kind: TransferKind
+  /** Files chosen by the user (1 or more), in the file Tab. */
   files: File[]
-  /** The prepared transfer unit (once files are staged). Null until ready. */
+  /** Text typed in the text Tab. */
+  text: string
+  /** The prepared transfer unit (once files/text are staged). Null until ready. */
   prepared: PreparedPayload | null
   session: SenderSessionWasm | null
   config: TransferConfig
@@ -100,7 +104,9 @@ export default function App() {
   // every subsequent transfer instead of resetting to defaults each time).
   const [state, setState] = useState<AppState>({
     page: "select",
+    kind: "file",
     files: [],
+    text: "",
     prepared: null,
     session: null,
     config: loadConfig(),
@@ -165,10 +171,10 @@ export default function App() {
   }, [])
 
   /**
-   * Stage 1: files chosen → hand them to the compress worker, which packs (if
-   * >1), compresses, and derives the session id OFF the main thread while the
-   * UI shows a progress overlay. A single file skips bundling so the old
-   * single-file flow is byte-identical for old receivers.
+   * Stage 1 (file): files chosen → hand them to the compress worker, which
+   * packs (if >1), compresses, and derives the session id OFF the main thread
+   * while the UI shows a progress overlay. A single file skips bundling so the
+   * old single-file flow is byte-identical for old receivers.
    */
   const onFilesSelected = useCallback((files: File[]) => {
     if (files.length === 0) {
@@ -179,11 +185,44 @@ export default function App() {
     awaitingResult.current = true
     setState((s) => ({
       ...s,
+      kind: "file",
       files,
       compressPhase: "reading",
       error: null,
     }))
     compressWorker.postMessage({ files })
+  }, [])
+
+  /**
+   * Stage 1 (text): submitted text → hand it to the compress worker, which
+   * wraps it in the ETTEXTv1 magic, compresses, and derives the session id.
+   * Same worker pipeline as files; the result is a normal PreparedPayload.
+   */
+  const onTextEntered = useCallback((text: string) => {
+    if (text.trim().length === 0) return
+    awaitingResult.current = true
+    setState((s) => ({
+      ...s,
+      kind: "text",
+      text,
+      compressPhase: "reading",
+      error: null,
+    }))
+    compressWorker.postMessage({ text })
+  }, [])
+
+  /**
+   * Switch the select-page Tab. Clears the OTHER kind's staged selection so a
+   * half-prepared file transfer doesn't leak into a text flow and vice versa.
+   * Stays on the select page (no prepared payload → can't advance yet).
+   */
+  const onKindChange = useCallback((kind: TransferKind) => {
+    setState((s) => {
+      if (s.kind === kind) return s
+      return kind === "file"
+        ? { ...s, kind, text: "", prepared: null, page: "select" }
+        : { ...s, kind, files: [], prepared: null, page: "select" }
+    })
   }, [])
 
   /** Stage 2: params confirmed → build the WASM sender session, go to play. */
@@ -258,15 +297,23 @@ export default function App() {
           </div>
         )}
         {state.page === "select" && (
-          <FileSelectPage files={state.files} onSelected={onFilesSelected} />
+          <FileSelectPage
+            kind={state.kind}
+            files={state.files}
+            text={state.text}
+            onKindChange={onKindChange}
+            onSelected={onFilesSelected}
+            onTextEntered={onTextEntered}
+          />
         )}
         {state.page === "params" && state.prepared && (
           <ParamsPage
+            kind={state.kind}
             files={state.files}
             displayName={state.prepared.displayName}
             originalSize={state.prepared.originalSize}
             compressedSize={state.prepared.compressed.length}
-            isBundle={state.files.length > 1}
+            isBundle={state.kind === "file" && state.files.length > 1}
             config={state.config}
             onChange={updateConfig}
             onStart={onStart}
@@ -293,9 +340,19 @@ export default function App() {
           during the slow xz pass. */}
       <CompressProgress
         phase={state.compressPhase}
-        isBundle={state.files.length > 1}
-        displayName={state.files.length > 0 ? (state.files.length > 1 ? `${state.files.length}个文件` : state.files[0].name) : undefined}
-        originalSize={state.files.reduce((sum, f) => sum + f.size, 0) || undefined}
+        isBundle={state.kind === "file" && state.files.length > 1}
+        displayName={
+          state.kind === "text"
+            ? "文字消息"
+            : state.files.length > 0
+              ? (state.files.length > 1 ? `${state.files.length}个文件` : state.files[0].name)
+              : undefined
+        }
+        originalSize={
+          state.kind === "text"
+            ? (state.text.length > 0 ? new TextEncoder().encode(state.text).length + 8 : undefined)
+            : (state.files.reduce((sum, f) => sum + f.size, 0) || undefined)
+        }
       />
     </div>
   )

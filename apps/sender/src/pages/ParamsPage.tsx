@@ -1,11 +1,13 @@
 /** Page 2: transfer parameters (redundancy, fps, symbol size, brightness). */
-import type { TransferConfig } from "@/types"
+import type { TransferConfig, TransferKind } from "@/types"
 import { SPEED_PRESETS, presetForSymbolSize } from "@/types"
 
 interface Props {
-  /** Files chosen by the user (1 or more). */
+  /** Transfer kind — only affects the first KV row's label/list rendering. */
+  kind: TransferKind
+  /** Files chosen by the user (1 or more); empty for a text transfer. */
   files: File[]
-  /** Display name for the transfer (single file name or "N个文件打包"). */
+  /** Display name for the transfer (single file name, "N个文件打包", or "文字消息.txt"). */
   displayName: string
   /** Total original (pre-compression) byte count of the transfer unit. */
   originalSize: number
@@ -37,6 +39,7 @@ function formatDuration(seconds: number): string {
 }
 
 export function ParamsPage({
+  kind,
   files,
   displayName,
   originalSize,
@@ -59,13 +62,18 @@ export function ParamsPage({
   const visibleFiles = files.slice(0, 5)
   const hiddenCount = files.length - visibleFiles.length
 
+  // First-row label depends on kind: text shows "文字内容", file shows
+  // "打包内容" (bundle) or "文件" (single).
+  const contentLabel =
+    kind === "text" ? "文字内容" : isBundle ? "打包内容" : "文件"
+
   return (
     <div className="page">
       <h2>传输参数</h2>
       <table className="kv">
         <tbody>
           <tr>
-            <td>{isBundle ? "打包内容" : "文件"}</td>
+            <td>{contentLabel}</td>
             <td>
               {displayName}
               {isBundle && (

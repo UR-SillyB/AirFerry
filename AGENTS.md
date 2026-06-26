@@ -22,7 +22,7 @@ AirFerry/
 │   └── transfer-engine/        #   编排 / 状态机 / 进度 / 断点 + WASM&JNI 绑定
 ├── apps/
 │   ├── sender/                 # 浏览器扩展（Plasmo + React + TS + Vite + WASM）
-│   │   ├── src/                #   TS 源码（页面 / WASM 桥 / 压缩 worker）
+│   │   ├── src/                #   TS 源码（页面 / WASM 桥 / 压缩 worker / background 图标点击直跳）
 │   │   ├── wasm-pkg/           #   wasm-pack 产物（generated, git-ignored）
 │   │   ├── assets/             #   扩展图标
 │   │   └── scripts/            #   构建 / manifest 修正 / lzma-wasm 提取
@@ -261,16 +261,18 @@ adb install app/build/outputs/apk/release/app-release.apk
 | 关注点 | 位置 | 说明 |
 |--------|------|------|
 | 主应用（4 页路由） | `apps/sender/src/options.tsx:92` | select→params→play→stats |
-| popup（仅启动器） | `apps/sender/src/popup.tsx` | 打开 options 新标签页 |
+| **图标点击直跳（MV2/MV3 兼容）** | `apps/sender/src/background/index.ts` | `chrome.action.onClicked`/`browserAction.onClicked` → 新标签页打开 options。**无 `default_popup`**（popup.tsx 已删），listener 才会触发；有 popup 时 onClicked 永不触发 |
+| popup（仅启动器） | ~~`apps/sender/src/popup.tsx`~~ | **已删除**——图标点击改为直接跳转，不再弹小窗 |
 | **QR 渲染循环** | `apps/sender/src/components/QrStream.tsx:37` | Canvas2D rAF 驱动 `next_qr`/`next_qr_multi` |
 | 单次 putImageData 绘制 | `apps/sender/src/components/QrStream.tsx:239` | `drawMatrix`：避免逐模块 fillRect |
+| **文字传输魔数（ETTEXTv1）** | `apps/sender/src/wasm/text.ts` | `buildTextPayload`（文字→[magic][UTF-8]）/ `isTextPayload`；与 `bundle.ts` 的 ETBUNDL1 并列，**descriptor 不变** |
 | **三算法选优压缩** | `apps/sender/src/wasm/compress.ts:277` | `preparePayload`：raw/zstd/xz，早期退出阈值 **70%** |
-| 压缩 worker（离主线程） | `apps/sender/src/workers/compress.worker.ts` | 读→压缩→CRC32→会话 ID |
+| 压缩 worker（离主线程） | `apps/sender/src/workers/compress.worker.ts` | 读→压缩→CRC32→会话 ID。文件走 `processFiles`，文字走 `processText`，共用 `finalizeAndPost` |
 | WASM 加载器 | `apps/sender/src/wasm/loader.ts:14` | `ensureWasm` 一次性初始化 |
 | 会话 ID（TS 端，镜像 Rust） | `apps/sender/src/wasm/session.ts:17` | `deriveSessionId` |
-| 多文件容器 | `apps/sender/src/wasm/bundle.ts` | 打包格式 |
-| 4 个页面 | `apps/sender/src/pages/*.tsx` | FileSelect / Params / Play / Stats |
-| manifest 后处理 | `apps/sender/scripts/fix-manifest.cjs` | 图标/MV2 CSP/Firefox id |
+| 多文件容器 | `apps/sender/src/wasm/bundle.ts` | 打包格式（ETBUNDL1） |
+| 4 个页面 | `apps/sender/src/pages/*.tsx` | FileSelect / Params / Play / Stats。FileSelect 顶部有「文件/文字」Tab 切换 |
+| manifest 后处理 | `apps/sender/scripts/fix-manifest.cjs` | 图标/MV2 CSP/Firefox id；**兜底删 `default_popup`**（保证 onClicked 生效） |
 
 ### 3.3 Android 扫码端
 
@@ -285,8 +287,10 @@ adb install app/build/outputs/apk/release/app-release.apk
 | 帧头解析（Kotlin 侧） | `app/.../scan/ReceiverSessionManager.kt:98` | `parseHeader`：60B 大端 |
 | ZXing JNI 桥（Kotlin） | `app/.../scan/ZxingDecoder.kt` | 单码/多码/ROI 解码 |
 | **ZXing-C++ JNI（native）** | `app/src/main/cpp/scan_jni.cpp:52` | `decodeInView`：TryHarder+TryInvert |
-| 多文件包解包 | `app/.../scan/BundleParser.kt` | 恢复后拆包 |
-| UI | `app/.../ui/{ReceiveDetail,ReceiveBundle,FileList,Settings}Activity.kt` | 详情/列表/设置 |
+| 多文件包解包 | `app/.../scan/BundleParser.kt` | 恢复后拆包（ETBUNDL1） |
+| **文字载荷解析** | `app/.../scan/TextParser.kt` | `isText`/`parse`（ETTEXTv1 → UTF-8）；字节级镜像 TS `text.ts` 与 C# `TextParser.cs` |
+| UI | `app/.../ui/{ReceiveDetail,ReceiveText,ReceiveBundle,FileList,Settings}Activity.kt` | 详情/文字/列表/设置。`ScanActivity.recoverAndStage` 按 text→bundle→单文件顺序分流 |
+| **文字接收页（可复制/分享/存 .txt）** | `app/.../ui/ReceiveTextActivity.kt` | 内存中持有文字（不落盘）；剪贴板 `ClipboardManager` + `ACTION_SEND` text/plain |
 
 ### 3.4 Windows 扫码端
 
@@ -302,9 +306,11 @@ adb install app/build/outputs/apk/release/app-release.apk
 | QR 解码 | `apps/windows/AirFerry.Windows/Scan/ZxingDecoder.cs` | ZXing.Net（TryHarder/TryInvert，对标 scan_jni.cpp） |
 | 灰度→ZXing 桥 | `apps/windows/AirFerry.Windows/Scan/MatLuminanceSource.cs` | 紧凑 byte[] → LuminanceSource |
 | 多文件包解包 | `apps/windows/AirFerry.Windows/Bundle/BundleParser.cs` | ETBUNDL1（字节级镜像 Kotlin BundleParser.kt） |
+| **文字载荷解析** | `apps/windows/AirFerry.Windows/Bundle/TextParser.cs` | `IsText`/`Parse`（ETTEXTv1 → UTF-8）；字节级镜像 TS `text.ts` 与 Kotlin `TextParser.kt`。有跨平台单测 `TextParserTests.cs` |
 | 文件名 sanitize | `apps/windows/AirFerry.Windows/Bundle/FileNameUtil.cs` | + Windows 保留名（CON/PRN/COM1-9）处理 |
-| 主状态机 | `apps/windows/AirFerry.Windows/ViewModels/ScanViewModel.cs` | 编排采集→解码池→会话→恢复→落盘 |
-| UI | `apps/windows/AirFerry.Windows/Views/*.xaml` | Scan/DeviceSelect/ReceiveDetail/ReceiveBundle/FileList/Settings |
+| 主状态机 | `apps/windows/AirFerry.Windows/ViewModels/ScanViewModel.cs` | 编排采集→解码池→会话→恢复→落盘。`RecoverAndStage` 按 text→bundle→单文件顺序分流 |
+| UI | `apps/windows/AirFerry.Windows/Views/*.xaml` | Scan/DeviceSelect/ReceiveDetail/ReceiveText/ReceiveBundle/FileList/Settings |
+| **文字接收页（可复制/保存 .txt）** | `apps/windows/AirFerry.Windows/Views/ReceiveTextView.xaml` | `Clipboard.SetText` + SaveFileDialog UTF-8；RecoveryResult 新增 `Text`/`IsText` |
 
 ---
 
@@ -312,6 +318,8 @@ adb install app/build/outputs/apk/release/app-release.apk
 
 | 症状 | 首查 | 可能原因 |
 |------|------|---------|
+| 点扩展图标仍弹小窗（而非直跳 options） | `apps/sender/src/background/index.ts` + `fix-manifest.cjs` | manifest 残留 `default_popup`（popup 优先级高于 `onClicked`）；或 `src/popup.tsx` 误被恢复（Plasmo 据此重新注入 popup）。删 popup.tsx + `fix-manifest.cjs` 兜底删 `default_popup` 是触发 `onClicked` 的前提 |
+| 文字传输收端当文件保存 | `TextParser.kt`/`TextParser.cs` + `text.ts` | 收端不认 ETTEXTv1 魔数 → 落到单文件兜底分支（向后兼容，存成 .txt 仍可打开）；确认魔数 8 字节位级一致 |
 | 收端卡「恢复中 0%」 | `descriptor.rs:178 parse_payload` + `receiver.rs:147 ingest` | OTI 未确认（`meta_confirmed=false`）；描述符解析失败 |
 | 收端崩溃（扫码即崩） | `meta.rs:97 validate` + `receiver.rs:208-222` 守卫 | 恶意/越界坐标未在入解码器前拦截（panic=abort 下致命） |
 | 进度越往后越慢 | `sender.rs:235 next_symbol_id` | 必须是「源一遍→无限新鲜修复」，不能循环有限计划 |

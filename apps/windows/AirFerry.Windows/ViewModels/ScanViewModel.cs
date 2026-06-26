@@ -243,7 +243,28 @@ public partial class ScanViewModel : ObservableObject, IDisposable
         _pool.IngestStopped = true;
 
         RecoveryResult? result;
-        if (BundleParser.IsBundle(bytes))
+        if (TextParser.IsText(bytes))
+        {
+            // Text payload → decode UTF-8 and carry the string in-memory. No
+            // file is written to disk; the user copies / shares / saves from
+            // the text view. Checked BEFORE the bundle branch: the two magics
+            // never collide ("ETTEXTv1" vs "ETBUNDL1"). If decoding fails, fall
+            // through to single-file handling so the user still gets something.
+            string? text = TextParser.Parse(bytes);
+            result = text is not null
+                ? new RecoveryResult(
+                    SingleFilePath: null,
+                    SingleFileSize: null,
+                    ExpectedCrc32: expectedCrc,
+                    Crc32Known: crcKnown,
+                    ReceivedCrc32: receivedCrc,
+                    Bundle: null,
+                    BundleDir: null,
+                    Text: text)
+                : StageSingleFile(bytes, displayName, originalSize,
+                    expectedCrc, crcKnown, receivedCrc);
+        }
+        else if (BundleParser.IsBundle(bytes))
         {
             result = StageBundle(bytes, expectedCrc, crcKnown, receivedCrc);
             // If parsing failed, fall through to single-file handling.

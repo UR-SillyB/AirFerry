@@ -1,0 +1,77 @@
+<Page x:Class="AirFerry.Windows.Views.ReceiveTextView"
+      xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+      Title="AirFerry - 文字消息"
+      Background="{StaticResource BgDark}"
+      MinWidth="640" MinHeight="560">
+    <Grid Margin="32">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <TextBlock Grid.Row="0"
+                   Text="✓ 文字接收完成"
+                   FontSize="24" FontWeight="Bold"
+                   Foreground="#22C55E"
+                   Margin="0,0,0,24" />
+
+        <!-- Scrollable, read-only text content. -->
+        <Border Grid.Row="1"
+                Background="{StaticResource CardBg}"
+                CornerRadius="12"
+                Padding="16">
+            <TextBox x:Name="ContentBox"
+                     IsReadOnly="True"
+                     BorderThickness="0"
+                     Background="Transparent"
+                     Foreground="{StaticResource TextPrimary}"
+                     FontSize="15"
+                     FontFamily="Consolas"
+                     TextWrapping="Wrap"
+                     VerticalScrollBarVisibility="Auto"
+                     AcceptsReturn="True"
+                     Focusable="True" />
+        </Border>
+
+        <!-- CRC verification card. -->
+        <Border Grid.Row="2"
+                Background="{StaticResource CardBg}"
+                CornerRadius="12"
+                Padding="16"
+                Margin="0,16,0,0">
+            <StackPanel>
+                <TextBlock Text="CRC32 校验"
+                           FontSize="13"
+                           Foreground="{StaticResource TextSecondary}" />
+                <TextBlock x:Name="CrcStatusText"
+                           FontSize="16" FontWeight="SemiBold"
+                           Margin="0,4,0,8" />
+                <TextBlock x:Name="CrcValuesText"
+                           FontSize="12"
+                           Foreground="{StaticResource TextSecondary}"
+                           FontFamily="Consolas" />
+            </StackPanel>
+        </Border>
+
+        <StackPanel Grid.Row="3" Margin="0,24,0,0">
+            <Button Style="{StaticResource PrimaryButton}"
+                    Content="📋 复制到剪贴板"
+                    Click="Copy_Click"
+                    Margin="0,0,0,8" />
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="8" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <Button Grid.Column="0" Style="{StaticResource OutlinedButton}"
+                        Content="💾 保存为 .txt" Click="SaveAs_Click" />
+                <Button Grid.Column="2" Style="{StaticResource OutlinedButton}"
+                        Content="↻ 重新扫码" Click="Rescan_Click" />
+            </Grid>
+        </StackPanel>
+    </Grid>
+</Page>

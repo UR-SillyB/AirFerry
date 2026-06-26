@@ -2,6 +2,17 @@
 
 export type Page = "select" | "params" | "play" | "stats"
 
+/**
+ * What kind of content is being sent. Both kinds end up as an opaque byte
+ * payload fed to the same compress → RaptorQ → QR pipeline; the distinction
+ * only affects how the payload is *produced* (a File's bytes vs. a text
+ * message with a magic prefix) and a few cosmetic bits in the UI.
+ *
+ *  - "file" → one or more File objects (≥2 are bundled via `bundle.ts`)
+ *  - "text" → a user-typed string, wrapped in the `ETTEXTv1` magic (`text.ts`)
+ */
+export type TransferKind = "file" | "text"
+
 export interface TransferConfig {
   redundancyPct: number
   fps: number

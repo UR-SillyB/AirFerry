@@ -76,6 +76,17 @@ if (isMV2) {
   }
 }
 
+// Strip any default_popup so chrome.action.onClicked fires on icon click.
+// Plasmo auto-generates default_popup from src/popup.tsx; once that file is
+// removed Plasmo stops emitting it, but we delete defensively in case a stale
+// cached manifest still carries it. A declared popup ALWAYS takes precedence
+// over the onClicked listener, so leaving it in would silently re-introduce
+// the popup.
+const actionKey = isMV2 ? "browser_action" : "action";
+if (manifest[actionKey]) {
+  delete manifest[actionKey].default_popup;
+}
+
 // 2. MV2: CSP must be a string with wasm-eval (not wasm-unsafe-eval).
 if (isMV2) {
   manifest.content_security_policy =
