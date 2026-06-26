@@ -194,8 +194,21 @@ jobs:
       - name: Pack zip
         shell: pwsh
         run: |
-          $PublishDir = "apps/windows/AirFerry.Windows/bin/x64/Release/net8.0-windows/publish"
-          if (-not (Test-Path $PublishDir)) { throw "未找到发布产物: $PublishDir" }
+          # dotnet publish 把单文件产物写到 bin/$(Platform)/$(Configuration)/$(TFM)/$(RID)/publish/。
+          # RID 段（win-x64）是否出现取决于 csproj 的 Platform/附带 RID，故不硬编码路径，
+          # 而是在 bin 树里递归找 publish 目录（应恰有一个）。
+          $BinRoot = "apps/windows/AirFerry.Windows/bin"
+          $publishDirs = Get-ChildItem -Path $BinRoot -Recurse -Directory -Filter "publish" -ErrorAction SilentlyContinue
+          if ($publishDirs.Count -eq 0) {
+            throw "未找到 publish 目录（在 $BinRoot 下递归查找）——dotnet publish 是否真的产出了单文件？"
+          }
+          if ($publishDirs.Count -gt 1) {
+            # 多个 publish 目录时挑最深/最新的那个，并打印警告以便日志核对。
+            Write-Host "WARN: 找到 $($publishDirs.Count) 个 publish 目录，取最后一个："
+            $publishDirs | ForEach-Object { Write-Host "  - $($_.FullName)" }
+          }
+          $PublishDir = $publishDirs[-1].FullName
+          Write-Host "=== publish 目录: $PublishDir ==="
           # 列出产物清单（便于日志核对：应含 AirFerry.exe + transfer_engine.dll + OpenCV native DLLs）
           Write-Host "=== publish 内容 ==="
           Get-ChildItem $PublishDir | Select-Object Name, Length | Format-Table -AutoSize
