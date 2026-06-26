@@ -27,6 +27,7 @@
     <Compile Include="..\AirFerry.Windows\Scan\ReceiverSession.cs" Link="Scan\ReceiverSession.cs" />
     <Compile Include="..\AirFerry.Windows\Scan\ProgressSnapshot.cs" Link="Scan\ProgressSnapshot.cs" />
     <Compile Include="..\AirFerry.Windows\Bundle\BundleParser.cs" Link="Bundle\BundleParser.cs" />
+    <Compile Include="..\AirFerry.Windows\Bundle\TextParser.cs" Link="Bundle\TextParser.cs" />
     <Compile Include="..\AirFerry.Windows\Bundle\FileNameUtil.cs" Link="Bundle\FileNameUtil.cs" />
     <Compile Include="..\AirFerry.Windows\Native\NativeBridge.cs" Link="Native\NativeBridge.cs" />
   </ItemGroup>
