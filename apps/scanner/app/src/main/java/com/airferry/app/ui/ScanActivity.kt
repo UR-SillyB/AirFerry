@@ -846,17 +846,29 @@ class ScanActivity : ComponentActivity() {
         val crcKnown = session.crc32Known()
         val receivedCrc = crc32OfBytes(truncBytes)
 
-        // Text payload → decode UTF-8 and route to the text detail screen.
-        // Detected BEFORE the bundle check: the two magics never collide
-        // ("ETTEXTv1" vs "ETBUNDL1"), but checking text first keeps the intent
-        // explicit. No file is written to disk — the text lives in memory and
-        // the user copies / shares / saves it from the detail screen.
+        // Text payload → decode UTF-8, archive it as a .txt (so it shows up in
+        // the received-files history like a file does), then route to the text
+        // detail screen. Detected BEFORE the bundle check: the two magics never
+        // collide ("ETTEXTv1" vs "ETBUNDL1"), but checking text first keeps the
+        // intent explicit.
         if (TextParser.isText(truncBytes)) {
             val text = TextParser.parse(truncBytes)
             if (text != null) {
+                // Stage to cacheDir like a single file (the detail screen reads
+                // from here), and ALSO archive to received/ + .meta so the text
+                // shows up in the history (FileListActivity). The .meta carries
+                // kind=text so the history can re-open it in ReceiveTextActivity
+                // (with copy/share) instead of the generic file detail screen.
+                updateRecoveryStage("正在保存文字…")
+                val safeName = com.airferry.app.scan.FileNameUtil.sanitize(TEXT_RECEIVED_NAME)
+                val tmp = java.io.File(cacheDir, "recovered_$safeName")
+                tmp.writeText(text, Charsets.UTF_8)
+                val archiveName = archiveText(tmp, expectedCrc, crcKnown)
                 clearRecoveryStage()
                 return Intent(this, ReceiveTextActivity::class.java).apply {
                     putExtra("TEXT", text)
+                    putExtra("FILE_PATH", tmp.absolutePath)
+                    putExtra("FILE_NAME", archiveName)
                     putExtra("CRC32", expectedCrc)
                     putExtra("CRC32_RECEIVED", receivedCrc)
                     // Use the authoritative known-flag, NOT `expectedCrc == 0L`:
@@ -942,6 +954,35 @@ class ScanActivity : ComponentActivity() {
                 java.io.File(bundleDir, "${target.name}.meta").writeText("$name\n$size\nunknown\ntrue")
             }
         } catch (_: Exception) {}
+    }
+
+    /**
+     * Archive a recovered text transfer into `received/` as a `.txt` + a `.meta`
+     * sidecar, mirroring how single files are archived. This is what makes text
+     * show up in the file-list history (FileListActivity scans `received/`).
+     *
+     * The `.meta` carries a 5th line `kind=text` so the history can re-open the
+     * entry in [ReceiveTextActivity] (copy / share) instead of the generic file
+     * detail screen. Returns the on-disk archive filename (unique'd).
+     */
+    private fun archiveText(src: java.io.File, expectedCrc: Long, crcKnown: Boolean): String {
+        return try {
+            val parent = java.io.File(getExternalFilesDir(null), "received")
+            if (!parent.exists()) parent.mkdirs()
+            val target = com.airferry.app.scan.FileNameUtil.uniqueTarget(parent, TEXT_RECEIVED_NAME)
+            src.copyTo(target, overwrite = true)
+            // .meta: name / size / crcHex / crcUnknown / kind
+            // Line 5 (kind) is optional for old readers (they use getOrElse on
+            // indices 0..3); only text items carry it.
+            val crcStr = if (crcKnown) java.lang.Long.toHexString(expectedCrc) else "unknown"
+            val size = src.length().toString()
+            java.io.File(parent, "${target.name}.meta").writeText(
+                "$TEXT_RECEIVED_NAME\n$size\n$crcStr\n$crcKnown\nkind=text"
+            )
+            target.name
+        } catch (_: Exception) {
+            TEXT_RECEIVED_NAME
+        }
     }
 
     private fun resetSession() {
@@ -1080,6 +1121,13 @@ class ScanActivity : ComponentActivity() {
         private const val TAG = "ScanActivity"
         /** Slot index for a single on-screen code (used by gridSlotOf). */
         private const val SLOT_CENTER = -1
+        /**
+         * Filename used when archiving a recovered TEXT transfer to received/.
+         * uniqueTarget appends (1)/(2)… on collision so each text is a distinct
+         * history entry. The `.txt` extension keeps it openable as plain text
+         * by any app.
+         */
+        private const val TEXT_RECEIVED_NAME = "文字消息.txt"
 
         fun formatSize(bytes: Long): String {
             if (bytes < 1024) return "$bytes B"

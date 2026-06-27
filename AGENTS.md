@@ -290,7 +290,7 @@ adb install app/build/outputs/apk/release/app-release.apk
 | 多文件包解包 | `app/.../scan/BundleParser.kt` | 恢复后拆包（ETBUNDL1） |
 | **文字载荷解析** | `app/.../scan/TextParser.kt` | `isText`/`parse`（ETTEXTv1 → UTF-8）；字节级镜像 TS `text.ts` 与 C# `TextParser.cs` |
 | UI | `app/.../ui/{ReceiveDetail,ReceiveText,ReceiveBundle,FileList,Settings}Activity.kt` | 详情/文字/列表/设置。`ScanActivity.recoverAndStage` 按 text→bundle→单文件顺序分流 |
-| **文字接收页（可复制/分享/存 .txt）** | `app/.../ui/ReceiveTextActivity.kt` | 内存中持有文字（不落盘）；剪贴板 `ClipboardManager` + `ACTION_SEND` text/plain |
+| **文字接收页（可复制/分享/存 .txt）** | `app/.../ui/ReceiveTextActivity.kt` | 文字接收后落盘为 `received/文字消息.txt` + `.meta`（第 5 行 `kind=text`）进历史记录；剪贴板 `ClipboardManager` + `ACTION_SEND` text/plain。FileListActivity 见 `kind=text` 跳本页（否则跳 ReceiveDetail） |
 
 ### 3.4 Windows 扫码端
 

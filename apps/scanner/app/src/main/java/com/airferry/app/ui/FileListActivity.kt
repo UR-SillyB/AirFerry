@@ -16,6 +16,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Message
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Description
@@ -50,6 +51,18 @@ private sealed class ListItem {
     /** A bundle subdirectory (e.g. "发送_0622_001234"). */
     data class DirItem(val dir: java.io.File) : ListItem()
 }
+
+/**
+ * Parsed .meta sidecar + (for text) a first-line preview, used by FileCard.
+ *  - [isText] is true when the .meta's 5th line is `kind=text`.
+ *  - [preview] is the first non-empty line of the .txt (text items only).
+ */
+private data class FileMeta(
+    val name: String,
+    val size: Long,
+    val isText: Boolean,
+    val preview: String,
+)
 
 class FileListActivity : ComponentActivity() {
 
@@ -385,19 +398,34 @@ class FileListActivity : ComponentActivity() {
         onSingleDelete: (java.io.File) -> Unit
     ) {
         val metaFile = remember(file) { java.io.File(file.parentFile, "${file.name}.meta") }
-        val meta: Triple<String, Long, Long> = remember(file) {
+        // meta: name / size / isText / preview (first line of the text, for text items)
+        val meta = remember(file) {
+            var name = file.name
+            var size = file.length()
+            var isText = false
+            var preview = ""
             if (metaFile.exists()) {
                 val lines = metaFile.readLines()
-                val name = lines.getOrElse(0) { file.name }
-                val size = lines.getOrElse(1) { file.length().toString() }.toLongOrNull() ?: file.length()
-                val crc = lines.getOrElse(2) { "0" }.toLongOrNull(16) ?: 0L
-                Triple(name, size, crc)
-            } else {
-                Triple(file.name, file.length(), 0L)
+                name = lines.getOrElse(0) { file.name }
+                size = lines.getOrElse(1) { file.length().toString() }.toLongOrNull() ?: file.length()
+                isText = lines.getOrElse(4) { "" }.trim() == "kind=text"
             }
+            // For text items, read the first non-empty line as a preview. Cheap
+            // (texts are small) and makes the history entry recognizable.
+            if (isText) {
+                preview = try {
+                    file.readText(Charsets.UTF_8)
+                        .lineSequence()
+                        .firstOrNull { it.isNotBlank() }
+                        ?.trim()
+                        ?.take(60) ?: ""
+                } catch (_: Exception) { "" }
+            }
+            FileMeta(name, size, isText, preview)
         }
-        val origName = meta.first
-        val origSize = meta.second
+        val origName = meta.name
+        val origSize = meta.size
+        val isText = meta.isText
 
         var showDeleteDialog by remember { mutableStateOf(false) }
         val cardColor by animateColorAsState(if (selected) SelectHighlight else CardBg, label = "cardBg")
@@ -419,13 +447,25 @@ class FileListActivity : ComponentActivity() {
                     )
                     Spacer(Modifier.width(12.dp))
                 } else {
-                    Icon(Icons.Default.Description, contentDescription = null, tint = Accent, modifier = Modifier.size(32.dp))
+                    // Text transfers get a message icon so they're visually
+                    // distinct from ordinary files in the history.
+                    Icon(
+                        if (isText) Icons.AutoMirrored.Filled.Message else Icons.Default.Description,
+                        contentDescription = null, tint = Accent, modifier = Modifier.size(32.dp)
+                    )
                     Spacer(Modifier.width(12.dp))
                 }
                 Column(modifier = Modifier.weight(1f)) {
                     Text(origName, color = TextPrimary, fontSize = 15.sp, fontWeight = FontWeight.Medium, maxLines = 1)
                     val dateStr = java.text.SimpleDateFormat("MM-dd HH:mm", java.util.Locale.getDefault()).format(java.util.Date(file.lastModified()))
-                    Text("${ScanActivity.formatSize(origSize)} · $dateStr", color = TextSecondary, fontSize = 12.sp)
+                    if (isText && meta.preview.isNotEmpty()) {
+                        // Text item: show the first line as a preview instead of
+                        // a bare size, so the entry is recognizable at a glance.
+                        Text(meta.preview, color = TextSecondary, fontSize = 12.sp, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
+                        Text("${ScanActivity.formatSize(origSize)} · $dateStr", color = TextSecondary, fontSize = 12.sp)
+                    } else {
+                        Text("${ScanActivity.formatSize(origSize)} · $dateStr", color = TextSecondary, fontSize = 12.sp)
+                    }
                 }
                 if (!inSelectionMode) {
                     IconButton(onClick = { showDeleteDialog = true }) {
@@ -614,12 +654,35 @@ class FileListActivity : ComponentActivity() {
         var fileSize = file.length()
         var expectedCrc = 0L
         var crcUnknown = true
+        var isText = false
         if (metaFile.exists()) {
             val lines = metaFile.readLines()
             fileName = lines.getOrElse(0) { file.name }
             fileSize = lines.getOrElse(1) { file.length().toString() }.toLongOrNull() ?: file.length()
             expectedCrc = lines.getOrElse(2) { "0" }.toLongOrNull(16) ?: 0L
             crcUnknown = lines.getOrElse(3) { "true" }.trim() != "false"
+            // Optional 5th line `kind=text` marks a text transfer (archived as a
+            // .txt). Route it to ReceiveTextActivity (copy/share) instead of the
+            // generic file detail screen.
+            isText = lines.getOrElse(4) { "" }.trim() == "kind=text"
+        }
+        if (isText) {
+            // Text transfer: read the .txt back and open the text detail screen.
+            // No re-archiving (file is already in received/), so we just show it.
+            try {
+                val text = file.readText(Charsets.UTF_8)
+                val intent = Intent(this, ReceiveTextActivity::class.java).apply {
+                    putExtra("TEXT", text)
+                    putExtra("FILE_NAME", fileName)
+                    putExtra("CRC32", expectedCrc)
+                    putExtra("CRC32_RECEIVED", ScanActivity.crc32OfBytes(text.toByteArray(Charsets.UTF_8)))
+                    putExtra("CRC32_UNKNOWN", crcUnknown)
+                }
+                startActivity(intent)
+            } catch (_: Exception) {
+                Toast.makeText(this, "无法读取文字", Toast.LENGTH_SHORT).show()
+            }
+            return
         }
         // Off-load the disk read + CRC to a background thread so a multi-MB file
         // doesn't freeze the UI on click. We compute the ACTUAL CRC of the bytes
