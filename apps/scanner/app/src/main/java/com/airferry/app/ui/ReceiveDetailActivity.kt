@@ -123,20 +123,16 @@ class ReceiveDetailActivity : ComponentActivity() {
                 Column(modifier = Modifier.padding(20.dp)) {
                     DetailRow("文件名", fileName)
                     DetailRow("大小", ScanActivity.formatSize(fileSize))
-                    DetailRow(
-                        "校验",
-                        when {
-                            crcUnknown -> "— CRC32 未知（未收到描述符）"
-                            crcOk -> "✓ CRC32 校验通过"
-                            else -> "✗ 校验失败（数据可能损坏）"
-                        },
-                        valueColor = when {
-                            crcUnknown -> TextSecondary
-                            crcOk -> Success
-                            else -> Error
-                        }
-                    )
+                    // Only show the CRC row when we actually have a value to
+                    // verify. A real "unknown" (no descriptor CRC) shows nothing
+                    // rather than a ghost "未知" — the user asked for either a
+                    // real verification or no row, never a placeholder.
                     if (!crcUnknown) {
+                        DetailRow(
+                            "校验",
+                            if (crcOk) "✓ CRC32 校验通过" else "✗ 校验失败（数据可能损坏）",
+                            valueColor = if (crcOk) Success else Error
+                        )
                         DetailRow("期望 CRC32", "0x%08X".format(expectedCrc))
                         DetailRow("实际 CRC32", "0x%08X".format(receivedCrc))
                     }
@@ -264,13 +260,16 @@ class ReceiveDetailActivity : ComponentActivity() {
             // on collision so the on-disk name matches what the user sent.
             val target = com.airferry.app.scan.FileNameUtil.uniqueTarget(dir, fileName)
             src.copyTo(target, overwrite = true)
-            // Also write a small metadata sidecar for file size + crc.
-            // Write "unknown" when no expected CRC was supplied so the file
-            // list does not display a misleading "0x0".
-            val crcStr = if (crcUnknown) "unknown" else java.lang.Long.toHexString(expectedCrc)
-            // Line 4: whether the CRC is unknown, so the re-open path can
-            // restore the crcUnknown flag instead of treating 0 as verified.
-            File(dir, "${target.name}.meta").writeText("$fileName\n$fileSize\n$crcStr\n$crcUnknown")
+            // Store the CRC32 of the ACTUAL bytes on disk. This is exactly what
+            // the re-open path recomputes, so the history always shows a
+            // consistent "✓ 通过" instead of a ghost "未知" caused by an
+            // old/desynced descriptor crc-known flag (which can read false even
+            // for a complete, verifiable file). The fresh-receive screen still
+            // verifies the descriptor's CRC against the recovered bytes; the
+            // .meta only needs to be self-consistent for re-opening.
+            val onDiskCrc = ScanActivity.crc32OfBytes(src.readBytes())
+            val crcStr = java.lang.Long.toHexString(onDiskCrc)
+            File(dir, "${target.name}.meta").writeText("$fileName\n$fileSize\n$crcStr\nfalse")
         } catch (_: Exception) {}
     }
 

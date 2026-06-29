@@ -135,19 +135,17 @@ class ReceiveTextActivity : ComponentActivity() {
             ) {
                 Column(modifier = Modifier.padding(16.dp)) {
                     DetailRow("字数", "$charCount 字")
-                    DetailRow(
-                        "校验",
-                        when {
-                            crcUnknown -> "— CRC32 未知（未收到描述符）"
-                            crcOk -> "✓ CRC32 校验通过"
-                            else -> "✗ 校验失败（数据可能损坏）"
-                        },
-                        valueColor = when {
-                            crcUnknown -> TextSecondary
-                            crcOk -> Success
-                            else -> Error
-                        }
-                    )
+                    // Only show the CRC row when we actually have a value to
+                    // verify — a real "unknown" shows nothing rather than a
+                    // ghost "未知" (user asked for either a real verification
+                    // or no row).
+                    if (!crcUnknown) {
+                        DetailRow(
+                            "校验",
+                            if (crcOk) "✓ CRC32 校验通过" else "✗ 校验失败（数据可能损坏）",
+                            valueColor = if (crcOk) Success else Error
+                        )
+                    }
                 }
             }
 
