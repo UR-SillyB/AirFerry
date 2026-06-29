@@ -863,7 +863,13 @@ class ScanActivity : ComponentActivity() {
                 val safeName = com.airferry.app.scan.FileNameUtil.sanitize(TEXT_RECEIVED_NAME)
                 val tmp = java.io.File(cacheDir, "recovered_$safeName")
                 tmp.writeText(text, Charsets.UTF_8)
-                val archiveName = archiveText(tmp, expectedCrc, crcKnown)
+                // 文字归档的 .meta 必须存「纯文本字节」的 CRC —— 因为重新打开时
+                // FileListActivity 读回的是去掉魔数后的 .txt 内容，重算 CRC 用的是
+                // 纯文本字节。若存描述符的 CRC（含魔数载荷），重开会校验失败。
+                // contentCrc 是确定性的（同一份文本恒等），故存档视为「已知」。
+                val contentBytes = text.toByteArray(Charsets.UTF_8)
+                val contentCrc = crc32OfBytes(contentBytes)
+                val archiveName = archiveText(tmp, contentCrc)
                 clearRecoveryStage()
                 return Intent(this, ReceiveTextActivity::class.java).apply {
                     putExtra("TEXT", text)
@@ -964,20 +970,28 @@ class ScanActivity : ComponentActivity() {
      * The `.meta` carries a 5th line `kind=text` so the history can re-open the
      * entry in [ReceiveTextActivity] (copy / share) instead of the generic file
      * detail screen. Returns the on-disk archive filename (unique'd).
+     *
+     * [contentCrc] is the CRC32 of the PLAIN TEXT bytes (not the magic-bearing
+     * payload) — it's deterministic, so we always store it as a KNOWN crc. The
+     * re-open path recomputes CRC over the same plain-text .txt and matches.
      */
-    private fun archiveText(src: java.io.File, expectedCrc: Long, crcKnown: Boolean): String {
+    private fun archiveText(src: java.io.File, contentCrc: Long): String {
         return try {
             val parent = java.io.File(getExternalFilesDir(null), "received")
             if (!parent.exists()) parent.mkdirs()
             val target = com.airferry.app.scan.FileNameUtil.uniqueTarget(parent, TEXT_RECEIVED_NAME)
             src.copyTo(target, overwrite = true)
             // .meta: name / size / crcHex / crcUnknown / kind
-            // Line 5 (kind) is optional for old readers (they use getOrElse on
-            // indices 0..3); only text items carry it.
-            val crcStr = if (crcKnown) java.lang.Long.toHexString(expectedCrc) else "unknown"
+            // Line 4 follows the SAME semantics as ReceiveDetailActivity's
+            // sidecar: it is the `crcUnknown` flag (true = no crc), NOT
+            // `crcKnown`. We always have a deterministic text CRC, so it's
+            // always "false" (crc is known). Line 5 (kind) is optional for old
+            // readers (they use getOrElse on indices 0..3); only text items
+            // carry it.
+            val crcStr = java.lang.Long.toHexString(contentCrc)
             val size = src.length().toString()
             java.io.File(parent, "${target.name}.meta").writeText(
-                "$TEXT_RECEIVED_NAME\n$size\n$crcStr\n$crcKnown\nkind=text"
+                "$TEXT_RECEIVED_NAME\n$size\n$crcStr\nfalse\nkind=text"
             )
             target.name
         } catch (_: Exception) {

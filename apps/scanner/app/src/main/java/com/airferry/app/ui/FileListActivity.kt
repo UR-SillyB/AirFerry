@@ -663,8 +663,16 @@ class FileListActivity : ComponentActivity() {
             val lines = metaFile.readLines()
             fileName = lines.getOrElse(0) { file.name }
             fileSize = lines.getOrElse(1) { file.length().toString() }.toLongOrNull() ?: file.length()
-            expectedCrc = lines.getOrElse(2) { "0" }.toLongOrNull(16) ?: 0L
-            crcUnknown = lines.getOrElse(3) { "true" }.trim() != "false"
+            // The CRC's known/unknown state is derived from the stored hex
+            // string itself (line 3), NOT the boolean flag (line 4): the flag's
+            // semantics flipped once in archiveText (it wrote `crcKnown`
+            // instead of `crcUnknown`), and a stale `.meta` written by an older
+            // build carries the wrong polarity. The hex string is the source of
+            // truth — "unknown" (or absent) means no CRC; any other value means
+            // we have a real expected CRC to compare against.
+            val crcStr = lines.getOrElse(2) { "unknown" }.trim()
+            expectedCrc = crcStr.toLongOrNull(16) ?: 0L
+            crcUnknown = crcStr == "unknown" || crcStr.isEmpty()
             // Optional 5th line `kind=text` marks a text transfer (archived as a
             // .txt). Route it to ReceiveTextActivity (copy/share) instead of the
             // generic file detail screen.
