@@ -426,6 +426,10 @@ class FileListActivity : ComponentActivity() {
         val origName = meta.name
         val origSize = meta.size
         val isText = meta.isText
+        // 文字项主标题不裸露「文字消息.txt」文件名——它对接收场景没有意义，
+        // 且与首行预览重复。统一显示「文字消息」，首行预览作副标题。文件名仅在
+        // 真正「保存为文件 / 分享」时用到（见 ReceiveTextActivity 的 saveAs）。
+        val displayTitle = if (isText) "文字消息" else origName
 
         var showDeleteDialog by remember { mutableStateOf(false) }
         val cardColor by animateColorAsState(if (selected) SelectHighlight else CardBg, label = "cardBg")
@@ -456,7 +460,7 @@ class FileListActivity : ComponentActivity() {
                     Spacer(Modifier.width(12.dp))
                 }
                 Column(modifier = Modifier.weight(1f)) {
-                    Text(origName, color = TextPrimary, fontSize = 15.sp, fontWeight = FontWeight.Medium, maxLines = 1)
+                    Text(displayTitle, color = TextPrimary, fontSize = 15.sp, fontWeight = FontWeight.Medium, maxLines = 1)
                     val dateStr = java.text.SimpleDateFormat("MM-dd HH:mm", java.util.Locale.getDefault()).format(java.util.Date(file.lastModified()))
                     if (isText && meta.preview.isNotEmpty()) {
                         // Text item: show the first line as a preview instead of
@@ -483,8 +487,8 @@ class FileListActivity : ComponentActivity() {
         if (showDeleteDialog) {
             AlertDialog(
                 onDismissRequest = { showDeleteDialog = false },
-                title = { Text("删除文件") },
-                text = { Text("确定删除「$origName」？此操作不可撤销。") },
+                title = { Text(if (isText) "删除文字消息" else "删除文件") },
+                text = { Text(if (isText) "确定删除这条文字消息？此操作不可撤销。" else "确定删除「$origName」？此操作不可撤销。") },
                 confirmButton = {
                     TextButton(onClick = {
                         showDeleteDialog = false

@@ -12,7 +12,6 @@
  */
 import { useCallback, useRef, useState } from "react"
 import type { TransferKind } from "@/types"
-import { TEXT_MAGIC } from "@/wasm/text"
 
 interface Props {
   /** Current transfer kind (which Tab is active). */
@@ -319,7 +318,6 @@ function TextTab({
       <div className="text-input-stats">
         <span>{charCount} 字</span>
         <span className="muted">· 约 {formatBytes(payloadBytes)}</span>
-        <span className="muted">· {TEXT_MAGIC} 载荷</span>
       </div>
       <button
         className="btn primary"
