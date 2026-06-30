@@ -36,10 +36,19 @@ const compressWorker = new Worker(
  * causing compression to always fall back to raw (100% ratio). By loading the
  * bytes here and passing them as a transferable, we guarantee the worker always
  * has the WASM binary available regardless of its execution context.
+ *
+ * Environment-detection: in a browser extension `chrome.runtime.getURL` resolves
+ * the asset packed alongside the page; on a plain web page (apps/web) that API
+ * is unavailable, so we resolve relative to the document. If the pre-load fails
+ * for any reason the worker still has its own fetch fallback (see compress.ts),
+ * so this is an optimization, not a hard dependency.
  */
 ;(async () => {
   try {
-    const wasmUrl = chrome.runtime.getURL("wasm-zstd.wasm")
+    const wasmUrl =
+      typeof chrome !== "undefined" && chrome.runtime?.getURL
+        ? chrome.runtime.getURL("wasm-zstd.wasm")
+        : new URL("wasm-zstd.wasm", document.baseURI).href
     const resp = await fetch(wasmUrl, { credentials: "same-origin" })
     if (resp.ok) {
       const bytes = await resp.arrayBuffer()

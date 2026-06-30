@@ -1,0 +1,46 @@
+{
+  "compilerOptions": {
+    "target": "ESNext",
+    "useDefineForClassFields": true,
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": [
+      "DOM",
+      "DOM.Iterable",
+      "ESNext",
+      "WebWorker"
+    ],
+    "jsx": "react-jsx",
+    "strict": true,
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noEmit": true,
+    "types": [
+      "chrome"
+    ],
+    "baseUrl": ".",
+    "paths": {
+      "@/*": [
+        "../sender/src/*"
+      ]
+    }
+  },
+  "include": [
+    "src",
+    "../sender/src"
+  ],
+  "exclude": [
+    "node_modules",
+    "dist",
+    "../sender/wasm-pkg",
+    "../sender/wasm-pkg-legacy",
+    "../sender/wasm-pkg-simd",
+    "../sender/node_modules",
+    "../sender/build",
+    "../sender/.plasmo"
+  ]
+}

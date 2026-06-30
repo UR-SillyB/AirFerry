@@ -21,11 +21,15 @@ AirFerry/
 │   ├── qr-protocol/            #   帧格式 / 分块 / 压缩 / CRC / QR 矩阵 / 会话 ID
 │   └── transfer-engine/        #   编排 / 状态机 / 进度 / 断点 + WASM&JNI 绑定
 ├── apps/
-│   ├── sender/                 # 浏览器扩展（Plasmo + React + TS + Vite + WASM）
+│   ├── sender/                 # 浏览器扩展（Plasmo + React + TS + WASM）
 │   │   ├── src/                #   TS 源码（页面 / WASM 桥 / 压缩 worker / background 图标点击直跳）
 │   │   ├── wasm-pkg/           #   wasm-pack 产物（generated, git-ignored）
 │   │   ├── assets/             #   扩展图标
 │   │   └── scripts/            #   构建 / manifest 修正 / lzma-wasm 提取
+│   ├── web/                    # 网页端（Vite + React + TS）— 直接复用 sender/src 源码，无代码重复
+│   │   ├── src/main.tsx        #   薄入口：mount sender 的 App（options.tsx）
+│   │   ├── scripts/            #   prepare-wasm（校验 sender wasm-pkg + 拷 wasm-zstd）/ lzma 提取
+│   │   └── public/             #   wasm-zstd.wasm（worker 运行时 fetch，构建时拷入）
 │   ├── scanner/                # Android App（Kotlin + CameraX + ZXing-C++）
 │   │   └── app/src/main/
 │   │       ├── java/com/airferry/app/   # Kotlin
@@ -150,7 +154,26 @@ adb install app/build/outputs/apk/release/app-release.apk
 > ```
 > 详见 [`docs/build-windows.md`](docs/build-windows.md)。
 
-### 2.5 一键脚本 `scripts/build-all.sh`
+### 2.5 网页端（apps/web）
+
+```bash
+cd apps/web
+npm install            # 首次（含 postinstall: 提取 lzma-wasm）
+
+npm run dev            # Vite HMR 开发（http://localhost:5180）
+npm run build          # 产出静态站点 dist/（可部署到任意静态托管）
+npm run preview        # 本地预览构建产物
+```
+
+> **复用 sender 源码，零代码重复**：web 端是薄入口（`src/main.tsx` 只 mount sender 的 `App`），通过 Vite alias `@/ → ../sender/src/` 直接跨工程 import `apps/sender/src/` 的全部页面/组件/worker/wasm 模块。改 sender 业务代码，web 端自动同步。
+>
+> **唯一前置依赖**：web 构建复用 `apps/sender/wasm-pkg/`（Rust WASM 产物）。首次构建前需在 sender 下先跑一次 `npm run wasm`（即 `build-wasm.cjs`）。`predev`/`prebuild` 会跑 `prepare-wasm.cjs` 校验存在性，缺失时报清晰错误。
+>
+> **环境自适应**：sender 的 `options.tsx` 用 `typeof chrome` 判断 —— 扩展走 `chrome.runtime.getURL`，网页走 `new URL(..., document.baseURI)`。`compress.ts` 的 worker 内 zstd 加载同样有网页 fallback。两端共用同一份 `options.tsx`，扩展行为不变。
+>
+> **部署**：`dist/` 是纯静态文件，资源用相对路径（`base: "./"`），可放 GitHub Pages / Netlify / 任意静态服务器的任意子路径。`wasm-zstd.wasm` 在产物根目录供 worker 运行时 fetch。核心传输**不需要** COOP/COEP 头（不依赖 SharedArrayBuffer）。详见 [`docs/build-web.md`](docs/build-web.md)。
+
+### 2.6 一键脚本 `scripts/build-all.sh`
 
 | 子命令 | 动作 | 是否自动跑 cargo 前置 |
 |--------|------|---------------------|
@@ -179,7 +202,7 @@ adb install app/build/outputs/apk/release/app-release.apk
 - **Chrome crx 签名**：调用 macOS Chrome 的 `--pack-extension` + `--pack-extension-key`。私钥固定在 `dist/airferry-extension.pem`——**首次运行自动生成并挪到此处，之后 MV2/MV3 复用同一私钥**，保证扩展 ID 稳定。找不到 Chrome 二进制时跳过 crx、仅留 zip。
 - **`pack_dist` 会清旧产物**：删 `dist/airferry-{android-*.apk,windows-*.zip,sender-*.crx,sender-*.zip,sender-*.xpi}`，但**不动** `*.pem` 和 `*.keystore`。
 
-### 2.6 构建目录布局
+### 2.7 构建目录布局
 
 三层产物目录，**全部 git-ignored**（见 `.gitignore`）：
 
@@ -193,6 +216,8 @@ adb install app/build/outputs/apk/release/app-release.apk
 | `apps/sender/wasm-pkg-simd/` | WASM 编译产物（wasm-bindgen 0.2.125 / +simd128 / 含 externref）；供 MV3 目标使用。内含 `.gitignore` 为 `*`（全忽略） | `npm run wasm:simd`（由 build-wasm.cjs 调度） | ✅ |
 | `apps/sender/wasm-pkg/` | **临时**目录：build-all.cjs 在每次 plasmo build 前按目标把 `wasm-pkg-legacy/` 或 `wasm-pkg-simd/` 复制到这里（loader.ts 的 import 路径固定指向它）。不长期存在 | `build-all.cjs` 的 `useWasmPkg()` | ✅ |
 | `apps/sender/build/` | Plasmo 扩展构建产物：`{chrome,firefox}-{mv2,mv3}-prod/` 四个目录 + 构建期生成的 `.crx`/`.xpi`/`.zip` | `npm run build` | ✅ |
+| `apps/web/public/wasm-zstd.wasm` | zstd WASM，构建时由 `prepare-wasm.cjs` 从 `@foxglove/wasm-zstd/dist/` 拷入，供 worker 运行时 fetch | `predev`/`prebuild`（prepare-wasm.cjs） | ✅ |
+| `apps/web/dist/` | Vite 网页构建产物：`index.html` + `assets/`（JS/CSS/wasm/worker）+ 根目录 `wasm-zstd.wasm`。相对路径 `base:"./"`，可部署到任意子路径 | `npm run build` | ✅ |
 | `apps/scanner/app/build/` | Gradle/APK 构建产物：`outputs/apk/{debug,release}/app-*.apk` + native-debug-symbols + baselineProfiles | `./gradlew` | ✅ |
 | `apps/scanner/app/src/main/jniLibs/arm64-v8a/` | Rust 编译的 `libtransfer_engine.so` + 遗留的 `libet_code.so`（**当前代码无任何 `System.loadLibrary("et_code")` 引用，未使用，建议清理**）。ZXing 的 `libairferry_zxing.so` 不在此处——由 CMake 在 APK 构建时直接编译进 APK | `cargo ndk ... build` | ✅ |
 | `apps/windows/AirFerry.Windows/bin/` `obj/` | C# WPF 构建产物：`bin/x64/Release/net8.0-windows/AirFerry.exe` + OpenCV native DLLs | `dotnet build` / `dotnet publish` | ✅ |
@@ -202,7 +227,7 @@ adb install app/build/outputs/apk/release/app-release.apk
 
 > 构建产物**绝不提交 git**。分发走 GitHub Release，产物放 `dist/`。
 
-### 2.7 产物格式与命名规范
+### 2.8 产物格式与命名规范
 
 发布归档（`dist/`）的命名格式 = `airferry-{端}-{平台}-v{版本}.{扩展}`：
 
@@ -312,6 +337,19 @@ adb install app/build/outputs/apk/release/app-release.apk
 | UI | `apps/windows/AirFerry.Windows/Views/*.xaml` | Scan/DeviceSelect/ReceiveDetail/ReceiveText/ReceiveBundle/FileList/Settings |
 | **文字接收页（可复制/保存 .txt）** | `apps/windows/AirFerry.Windows/Views/ReceiveTextView.xaml` | `Clipboard.SetText` + SaveFileDialog UTF-8；RecoveryResult 新增 `Text`/`IsText` |
 
+### 3.5 网页发送端
+
+> **功能与浏览器扩展（§3.2）完全一致**，**直接复用 `apps/sender/src/` 全部源码，无代码重复**。下表只列 web 端特有的接入点；业务逻辑（页面/组件/worker/wasm）见 §3.2。
+
+| 关注点 | 位置 | 说明 |
+|--------|------|------|
+| 薄入口（mount sender App） | `apps/web/src/main.tsx` | `import App from "@/options"`（alias → `../sender/src/options.tsx`）+ `createRoot().render(<App/>)`。仅此一个源文件是 web 专有 |
+| Vite 配置（跨工程 alias） | `apps/web/vite.config.ts` | `resolve.alias: { "@/": "../sender/src/" }` —— sender 源码内部所有 `@/` 引用全部重定向到真实文件；worker 的 `new URL("./workers/...", import.meta.url)` 跨工程解析 |
+| WASM 前置校验 + zstd 拷贝 | `apps/web/scripts/prepare-wasm.cjs` | `predev`/`prebuild` 跑：①校验 `apps/sender/wasm-pkg/transfer_engine.js` 存在（缺失报错指向 `cd apps/sender && npm run wasm`）；②拷 `@foxglove/wasm-zstd/dist/wasm-zstd.wasm` → `public/wasm-zstd.wasm`（worker 运行时 fetch） |
+| lzma-wasm 提取 | `apps/web/scripts/extract-lzma-wasm.cjs` | 同 sender 版（base64 → 物理 .wasm，解 Rollup 静态分析）。`postinstall` 跑 |
+| **环境自适应接入点** | `apps/sender/src/options.tsx:42` | zstd 预加载 IIFE 用 `typeof chrome !== "undefined" && chrome.runtime?.getURL` 判断：扩展走 `chrome.runtime.getURL`，**网页走 `new URL("wasm-zstd.wasm", document.baseURI)`**。两端共用同一份 options.tsx，扩展行为不变（见 §5.8） |
+| 相对路径部署 | `apps/web/vite.config.ts` `base:"./"` | 产物 `dist/` 资源用 `./assets/...`，可部署到任意子路径（GitHub Pages 的 `user.github.io/repo/` 等） |
+
 ---
 
 ## 4. 调试速查表（症状 → 首查位置）
@@ -329,6 +367,8 @@ adb install app/build/outputs/apk/release/app-release.apk
 | JNI 摄入竞态/UAF | `QrDecodePool.ingestLock` + `ScanActivity` `ingestStopped` | 句柄非线程安全，未串行化 |
 | 摄像头读不出码 | `qr_render.rs:74 encode`（版本选择）+ `scan_jni.cpp:64`（TryHarder） | 版本过高致模块过密；或 16KiB 页未对齐致 .so 加载失败 |
 | 压缩总是走 raw（100%） | `compress.ts:163 initZstdFromBytes` | worker 内 zstd WASM 未加载成功 |
+| **网页端压缩走 raw（100%）** | `apps/web/public/wasm-zstd.wasm` + `prepare-wasm.cjs` | `public/wasm-zstd.wasm` 缺失（未跑 `prebuild`），worker fetch 404 → 回退 raw。重新跑 `npm run build`（会触发 `prebuild`→prepare-wasm） |
+| **网页端启动报 transfer_engine.js 找不到** | `apps/sender/wasm-pkg/` | web 复用 sender 的 Rust WASM，首次构建前需 `cd apps/sender && npm run wasm`。`prepare-wasm.cjs` 会校验并报清晰错误 |
 | 扩展构建缺 WASM | `apps/sender/wasm-pkg-legacy/` 或 `wasm-pkg-simd/` | 单独跑 `npm run build:chrome-mv3` 等单目标脚本前忘了先 `npm run wasm`（双产物缺失） |
 | APK 缺 native 库 | `jniLibs/arm64-v8a/libtransfer_engine.so` | 手动跑 `./gradlew` 而未经 `build-all.sh`（后者已自动先跑 cargo-ndk） |
 | Windows 端 DllNotFoundException | `apps/windows/AirFerry.Windows/runtime/transfer_engine.dll` | 手动跑 `dotnet build` 而未经 `build-windows.ps1`（后者已自动先跑 cargo --features cffi） |
@@ -372,11 +412,19 @@ adb install app/build/outputs/apk/release/app-release.apk
    - **⚠️ 实测性能结论**：零拷贝 vs 返回 `Vec` 实测 **0.99×（持平）**。QR 编码耗时（~4.8ms）完全主导，`Vec<u8>` → `Uint8Array` 的深拷贝（V25=13689 字节）相对可忽略。保留 `_into` 的真实价值不是单帧提速，而是**消除每帧的堆分配**（4码×60fps = 240 次/秒），降低 GC 压力（benchmark 测不到 GC 抖动，但长时间运行下 GC stall 会导致 rAF 周期性掉帧）。
    - **drawMatrix 像素填充**：当前是逐像素 `pixels[i] = black` 写（跳过白模块）。曾尝试用 `Uint32Array.set(blackRow, offset)` 批量复制整行黑模块，**实测 0.5×（慢一倍）**——`TypedArray.set` 对 modulePx=4~7 的小块有调用开销（边界检查 + memcpy setup），拐点在 modulePx ≥ 16。已回退，勿再尝试此「优化」。
 
+8. **网页端（apps/web）零代码复用 sender**：web 工程通过 Vite alias `@/ → ../sender/src/` **直接跨工程 import** `apps/sender/src/options.tsx` 的 `App`，所有页面/组件/worker/wasm 模块都来自 sender，**不复制任何业务代码**。改 sender 业务代码，web 端自动同步。
+   - **环境自适应（关键接入点）**：sender 源码里有两处扩展 API 调用，均已做环境判断，**扩展和网页共用同一份源文件**：
+     - `options.tsx:42` zstd 预加载 IIFE：`typeof chrome !== "undefined" && chrome.runtime?.getURL` 为真走扩展路径，否则走 `new URL("wasm-zstd.wasm", document.baseURI)`。
+     - `compress.ts:186` worker 内 zstd 加载 fallback：`new URL("wasm-zstd.wasm", self.location.href)`。
+   - **WASM 依赖关系**：web 构建复用 `apps/sender/wasm-pkg/`（Rust WASM），不自己编译 Rust。`apps/web/scripts/prepare-wasm.cjs`（`predev`/`prebuild`）校验存在性 + 拷贝 `wasm-zstd.wasm` 到 `public/`。
+   - **不要在 web 里 fork 业务代码**：若要改发送逻辑，改 `apps/sender/src/`（单一事实源），两端同步生效。web 的 `src/main.tsx` 只应是 mount 入口，不承载业务逻辑。
+
 ---
 
 ## 6. 架构关键不变量（速览，详见 [`docs/SPEC.md`](docs/SPEC.md)）
 
 - **同一份 Rust 源码** → 三个 FFI 目标：浏览器 `wasm32-unknown-unknown`（wasm-bindgen）、Android `aarch64-linux-android`（`#[no_mangle] extern "system"` JNI）、Windows `x86_64-pc-windows-msvc`（`#[no_mangle] extern "C"` C ABI，供 .NET P/Invoke）。编解码数学一致。
+  - **浏览器扩展（apps/sender）与网页端（apps/web）共用同一份 WASM**（`apps/sender/wasm-pkg/transfer_engine_bg.wasm`）和同一份 TS 源码（`apps/sender/src/`）。web 通过 Vite alias 跨工程 import，**不单独编译 Rust、不复制业务代码**。三个 FFI 目标实际对应**四个发布端**（扩展 MV2/MV3 共用一份 wasm、网页复用同一份、Android、Windows）。
 - **帧格式**：`[Header 60B][Payload T][Footer 4B]`，大端，magic `0x4554`，version 1，双层 CRC32；T=symbol_size（浏览器默认 1400——`DEFAULT_CONFIG.symbolSize`，核心库默认 1024——`Config::default()`）。
 - **会话 ID**：FNV-1a 128-bit（name/size/mtime/指纹），确定性 → 断点恢复。Rust 与 TS 实现必须位一致。
 - **喷泉码发射**：源符号跨块轮询发一遍 → 无限新鲜修复符号（ESI 单调递增、永不重复）。进度近似线性，无 coupon-collector 拖尾。
@@ -405,6 +453,7 @@ adb install app/build/outputs/apk/release/app-release.apk
 | 数据流 | [docs/data-flow.md](docs/data-flow.md) |
 | API 参考（⚠️ JNI 部分已过时，见 §5） | [docs/api.md](docs/api.md) |
 | 构建指南 - 浏览器 | [docs/build-browser.md](docs/build-browser.md) |
+| 构建指南 - 网页端 | [docs/build-web.md](docs/build-web.md) |
 | 构建指南 - Android | [docs/build-android.md](docs/build-android.md) |
 | 构建指南 - Windows | [docs/build-windows.md](docs/build-windows.md) |
 | 开发环境搭建 | [docs/dev-setup.md](docs/dev-setup.md) |
