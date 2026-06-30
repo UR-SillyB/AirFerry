@@ -177,19 +177,21 @@ npm run preview        # 本地预览构建产物
 
 | 子命令 | 动作 | 是否自动跑 cargo 前置 |
 |--------|------|---------------------|
-| `all`（默认） | `build_sender` + `build_scanner` | ✅（scanner） |
+| `all`（默认） | `build_sender` + `build_web` + `build_scanner` | ✅（scanner） |
 | `sender` | 双 wasm 产物 + 扩展 4 目标 | — |
+| `web` | `npm run build`（apps/web，Vite 静态站点；自动跑 `prebuild`→prepare-wasm 校验 sender `wasm-pkg/` + 拷 `wasm-zstd.wasm`） | — |
 | `scanner` | `cargo ndk` 编译 `.so` → `./gradlew assembleRelease` | ✅ |
 | `windows` | `cargo build --features cffi` 编译 DLL → `dotnet build`（须 Windows） | ✅ |
 | `wasm` | 仅 `npm run wasm`（= build-wasm.cjs，产 legacy + simd 两份） | — |
-| `dist` | **仅打包**：把已构建的 `build/` + APK + Windows zip 复制/签名到 `dist/`（不重新构建） | — |
-| `release` | `build_sender` → `build_scanner` → `pack_dist`（全量构建 + 打包） | ✅（scanner） |
+| `dist` | **仅打包**：把已构建的 `build/` + APK + Windows zip + web zip 复制/签名到 `dist/`（不重新构建） | — |
+| `release` | `build_sender` → `build_web` → `build_scanner` → `pack_dist`（全量构建 + 打包） | ✅（scanner） |
 
 ```bash
-./scripts/build-all.sh              # 构建 sender + scanner（不打包）
+./scripts/build-all.sh              # 构建 sender + web + scanner（不打包）
 ./scripts/build-all.sh release      # 全量构建 + 打包到 dist/（最常用）
 ./scripts/build-all.sh dist         # 仅打包（假设已构建好，不重新编译）
 ./scripts/build-all.sh sender       # 仅浏览器端（含 WASM）
+./scripts/build-all.sh web          # 仅网页端（须先有 apps/sender/wasm-pkg/）
 ./scripts/build-all.sh scanner      # 仅 APK
 ./scripts/build-all.sh windows      # 仅 Windows 端（须 Windows + .NET 8 SDK；首选 build-windows.ps1）
 ./scripts/build-all.sh wasm         # 仅 WASM
@@ -199,8 +201,9 @@ npm run preview        # 本地预览构建产物
 - **版本号**：从 `apps/sender/package.json` 的 `version` 读取（`read_version()`），与扩展 manifest 同源。改版本改这一处即可被脚本读取，但 APK/扩展本身的版本号仍需手动同步（见 §2.7）。
 - **`build_scanner` 自动跑 cargo-ndk**：在 `./gradlew assembleRelease` **之前**先用 `cargo ndk -t arm64-v8a ... build -p transfer-engine --features jni --release` 编译 `libtransfer_engine.so` 到 `jniLibs/`。这是为了避免打进过期 `.so`（AirFerry 重命名后旧符号 `com.easytransfer.*` 与 Kotlin 新包名对不上会 `UnsatisfiedLinkError` 闪退）。因此 `scanner`/`all`/`release` 子命令都自带这步，无需手动前置。
 - **`build_windows` 自动跑 cargo**：在 `dotnet build` **之前**先用 `cargo build -p transfer-engine --features cffi --release` 编译 `transfer_engine.dll` 到 `runtime/`（对标 scanner 的 cargo-ndk 前置，防止过期/缺失 DLL 致运行时 `DllNotFoundException`）。**Windows 端只能在 Windows + .NET 8 SDK 下构建**，首选 `scripts/build-windows.ps1`。
+- **`build_web` 不编译 Rust**：`cd apps/web && npm run build`（Vite 静态站点），`prebuild` 会跑 `prepare-wasm.cjs` 校验 `apps/sender/wasm-pkg/transfer_engine.js` 存在 + 拷贝 `wasm-zstd.wasm` 到 `public/`。web 复用 sender 的 wasm-pkg，**首次构建前须先 `cd apps/sender && npm run wasm`**（缺失时 `prepare-wasm.cjs` 报清晰错误并中断，不会静默打进过期产物）。`pack_dist` 用 warn（非 error）模式打包 web zip——产物缺失时跳过而非中断，因为用户可能只发扩展+APK 不发网页端。
 - **Chrome crx 签名**：调用 macOS Chrome 的 `--pack-extension` + `--pack-extension-key`。私钥固定在 `dist/airferry-extension.pem`——**首次运行自动生成并挪到此处，之后 MV2/MV3 复用同一私钥**，保证扩展 ID 稳定。找不到 Chrome 二进制时跳过 crx、仅留 zip。
-- **`pack_dist` 会清旧产物**：删 `dist/airferry-{android-*.apk,windows-*.zip,sender-*.crx,sender-*.zip,sender-*.xpi}`，但**不动** `*.pem` 和 `*.keystore`。
+- **`pack_dist` 会清旧产物**：删 `dist/airferry-{android-*.apk,windows-*.zip,sender-*.crx,sender-*.zip,sender-*.xpi,web-*.zip}`，但**不动** `*.pem` 和 `*.keystore`。
 
 ### 2.7 构建目录布局
 
@@ -239,6 +242,7 @@ npm run preview        # 本地预览构建产物
 | Chrome MV2 | `airferry-sender-chrome-mv2-v{VER}.crx` + `.zip` | 同上，旧版兼容 |
 | Firefox MV3 | `airferry-sender-firefox-mv3-v{VER}.xpi` | Firefox 109+；`.xpi` 本质是 zip 改名 |
 | Firefox MV2 | `airferry-sender-firefox-mv2-v{VER}.xpi` | Firefox 91+ |
+| 网页端 | `airferry-web-v{VER}.zip` | 纯静态站点（`index.html` + `assets/` + 根目录 `wasm-zstd.wasm`）；Vite `base:"./"` 相对路径，可部署到任意静态托管的任意子路径。`pack_dist` 自动打包（须先跑 `build-all.sh web` 产出 `apps/web/dist/`，缺失时 warn 跳过） |
 
 **扩展产物内部结构**（每个 `*-prod/` 目录）：
 - `manifest.json`——由 `scripts/fix-manifest.cjs` 后处理：复制真实 RGBA 图标覆盖 Plasmo 占位图、MV2 删 `action` 留 `browser_action` 并把 CSP 改为 `wasm-eval`、Firefox 补 `browser_specific_settings.gecko.id = airferry@airferry.app`、修补 HTML `<title>`
@@ -369,6 +373,7 @@ npm run preview        # 本地预览构建产物
 | 压缩总是走 raw（100%） | `compress.ts:163 initZstdFromBytes` | worker 内 zstd WASM 未加载成功 |
 | **网页端压缩走 raw（100%）** | `apps/web/public/wasm-zstd.wasm` + `prepare-wasm.cjs` | `public/wasm-zstd.wasm` 缺失（未跑 `prebuild`），worker fetch 404 → 回退 raw。重新跑 `npm run build`（会触发 `prebuild`→prepare-wasm） |
 | **网页端启动报 transfer_engine.js 找不到** | `apps/sender/wasm-pkg/` | web 复用 sender 的 Rust WASM，首次构建前需 `cd apps/sender && npm run wasm`。`prepare-wasm.cjs` 会校验并报清晰错误 |
+| **`release`/`dist` 产物缺 web zip** | `apps/web/dist/` | `pack_dist` 用 warn 模式（非中断）：`apps/web/dist/` 缺失时跳过 web zip。先跑 `./scripts/build-all.sh web` 再 `dist`/`release` |
 | 扩展构建缺 WASM | `apps/sender/wasm-pkg-legacy/` 或 `wasm-pkg-simd/` | 单独跑 `npm run build:chrome-mv3` 等单目标脚本前忘了先 `npm run wasm`（双产物缺失） |
 | APK 缺 native 库 | `jniLibs/arm64-v8a/libtransfer_engine.so` | 手动跑 `./gradlew` 而未经 `build-all.sh`（后者已自动先跑 cargo-ndk） |
 | Windows 端 DllNotFoundException | `apps/windows/AirFerry.Windows/runtime/transfer_engine.dll` | 手动跑 `dotnet build` 而未经 `build-windows.ps1`（后者已自动先跑 cargo --features cffi） |

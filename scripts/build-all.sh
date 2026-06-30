@@ -121,6 +121,17 @@ build_windows() {
   info "Windows 端构建完成 → apps/windows/AirFerry.Windows/bin/x64/Release/"
 }
 
+build_web() {
+  info "构建网页端 (apps/web → dist/) ..."
+  # npm run build 已内嵌 prebuild（prepare-wasm.cjs）：校验 apps/sender/wasm-pkg/
+  # 存在 + 拷贝 wasm-zstd.wasm 到 public/。web 不单独编译 Rust，复用 sender 的
+  # wasm-pkg（首次构建前须 cd apps/sender && npm run wasm）。wasm-pkg 缺失时
+  # prepare-wasm.cjs 非零退出，npm run build 失败，set -e 中断。
+  cd "$ROOT/apps/web"
+  npm run build 2>&1 | grep -E 'built in|error|✖' | while read -r line; do info "$line"; done
+  info "网页端构建完成 → apps/web/dist/"
+}
+
 # 打包 Chrome MV2/MV3 为已签名 .crx。
 #
 # Chrome --pack-extension 在「未给 --pack-extension-key」时会新生成一个
@@ -171,7 +182,8 @@ pack_dist() {
         "$ROOT/dist"/airferry-sender-*.xpi \
         "$ROOT/dist"/airferry-chrome-*.crx \
         "$ROOT/dist"/airferry-chrome-*.zip \
-        "$ROOT/dist"/airferry-firefox-*.xpi
+        "$ROOT/dist"/airferry-firefox-*.xpi \
+        "$ROOT/dist"/airferry-web-*.zip
 
   # 扫码端 APK
   local apk_src="$ROOT/apps/scanner/app/build/outputs/apk/release/app-release.apk"
@@ -186,6 +198,16 @@ pack_dist() {
     info "Windows 端 → dist/airferry-windows-x64-v${VER}.zip"
   else
     warn "未找到 Windows 端构建产物（${win_publish}）。如需打包 Windows 端，先在 Windows 上运行: ./scripts/build-windows.ps1 release"
+  fi
+
+  # 网页端 zip（纯静态站点，解压即可托管到任意静态服务器）。与 Windows 同样用
+  # warn 而非 error：用户可能只想发扩展+APK 而不发网页端（web 是可选的发送入口）。
+  local web_dist="$ROOT/apps/web/dist"
+  if [[ -d "$web_dist" ]]; then
+    ( cd "$web_dist" && zip -r -q -X "$ROOT/dist/airferry-web-v${VER}.zip" . )
+    info "网页端 → dist/airferry-web-v${VER}.zip"
+  else
+    warn "未找到网页端构建产物（${web_dist}）。如需打包，先运行: ./scripts/build-all.sh web"
   fi
 
   # 发送端：Chrome crx + zip，Firefox xpi（即 zip 改名）
@@ -213,6 +235,7 @@ pack_dist() {
 build_release() {
   info "构建全部 + 打包到 dist/ ..."
   build_sender
+  build_web
   build_scanner
   pack_dist
 }
@@ -231,6 +254,9 @@ case "$TARGET" in
   windows)
     build_windows
     ;;
+  web)
+    build_web
+    ;;
   wasm)
     build_wasm
     ;;
@@ -241,7 +267,7 @@ case "$TARGET" in
     build_release
     ;;
   *)
-    echo "用法: $0 [all|sender|scanner|windows|wasm|dist|release]"
+    echo "用法: $0 [all|sender|scanner|windows|web|wasm|dist|release]"
     echo "  windows 子命令须在 Windows + .NET 8 SDK 下运行（或用 scripts/build-windows.ps1）"
     exit 1
     ;;
