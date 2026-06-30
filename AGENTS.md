@@ -162,6 +162,7 @@ npm install            # 首次（含 postinstall: 提取 lzma-wasm）
 
 npm run dev            # Vite HMR 开发（http://localhost:5180）
 npm run build          # 产出静态站点 dist/（可部署到任意静态托管）
+npm run build:standalone  # 产出自包含单文件 dist-standalone/index.html（双击即用，file:// 可运行）
 npm run preview        # 本地预览构建产物
 ```
 
@@ -172,6 +173,8 @@ npm run preview        # 本地预览构建产物
 > **环境自适应**：sender 的 `options.tsx` 用 `typeof chrome` 判断 —— 扩展走 `chrome.runtime.getURL`，网页走 `new URL(..., document.baseURI)`。`compress.ts` 的 worker 内 zstd 加载同样有网页 fallback。两端共用同一份 `options.tsx`，扩展行为不变。
 >
 > **部署**：`dist/` 是纯静态文件，资源用相对路径（`base: "./"`），可放 GitHub Pages / Netlify / 任意静态服务器的任意子路径。`wasm-zstd.wasm` 在产物根目录供 worker 运行时 fetch。核心传输**不需要** COOP/COEP 头（不依赖 SharedArrayBuffer）。详见 [`docs/build-web.md`](docs/build-web.md)。
+>
+> **单文件版（`npm run build:standalone`）**：产出**单个 `dist-standalone/index.html`**（约 2MB），所有 JS/CSS/Worker/WASM 内联（WASM 转 base64），**双击即可在 `file://` 下运行**，无需服务器。原理：① Vite IIFE bundle（去 ES module 标记，绕过 file:// 的 module 限制）；② worker 源码字符串化后用 Blob URL 加载（绕过 file:// 的 Worker 限制）；③ 三个 WASM base64 内联 + 复用现成 buffer 接口（`init(buffer)` / `initZstdFromBytes` / lzma 自带 base64，绕过 file:// 的 fetch 限制）。`build-standalone.cjs` 后处理脚本完成内联，并处理 `</script>` 转义、`import.meta.url` 替换、`process` polyfill 三个细节。sender 源码（`options.tsx`/`loader.ts`）通过 `globalThis.__AIRFERRY_STANDALONE__` 标志做环境自适应，扩展/web 普通版不受影响。
 
 ### 2.6 一键脚本 `scripts/build-all.sh`
 
@@ -351,8 +354,11 @@ npm run preview        # 本地预览构建产物
 | Vite 配置（跨工程 alias） | `apps/web/vite.config.ts` | `resolve.alias: { "@/": "../sender/src/" }` —— sender 源码内部所有 `@/` 引用全部重定向到真实文件；worker 的 `new URL("./workers/...", import.meta.url)` 跨工程解析 |
 | WASM 前置校验 + zstd 拷贝 | `apps/web/scripts/prepare-wasm.cjs` | `predev`/`prebuild` 跑：①校验 `apps/sender/wasm-pkg/transfer_engine.js` 存在（缺失报错指向 `cd apps/sender && npm run wasm`）；②拷 `@foxglove/wasm-zstd/dist/wasm-zstd.wasm` → `public/wasm-zstd.wasm`（worker 运行时 fetch） |
 | lzma-wasm 提取 | `apps/web/scripts/extract-lzma-wasm.cjs` | 同 sender 版（base64 → 物理 .wasm，解 Rollup 静态分析）。`postinstall` 跑 |
-| **环境自适应接入点** | `apps/sender/src/options.tsx:42` | zstd 预加载 IIFE 用 `typeof chrome !== "undefined" && chrome.runtime?.getURL` 判断：扩展走 `chrome.runtime.getURL`，**网页走 `new URL("wasm-zstd.wasm", document.baseURI)`**。两端共用同一份 options.tsx，扩展行为不变（见 §5.8） |
+| **环境自适应接入点** | `apps/sender/src/options.tsx` | 三环境共用同一份源码，按运行环境分流：① 扩展（`chrome.runtime.getURL`）② 网页普通版（`document.baseURI` fetch）③ **单文件版**（`globalThis.__AIRFERRY_STANDALONE__` 标志 → Blob URL worker + base64 WASM）。worker 初始化、zstd 预加载两处都做三路判断，扩展/普通版行为不变 |
+| **base64 工具（单文件专用）** | `apps/sender/src/wasm/base64.ts` | `base64ToBuffer(b64)`：`atob` + Uint8Array，主线程/worker 共用。单文件版运行时把内联 base64 WASM 解码成 buffer，喂给 `init(buffer)`/`initZstdFromBytes` |
 | 相对路径部署 | `apps/web/vite.config.ts` `base:"./"` | 产物 `dist/` 资源用 `./assets/...`，可部署到任意子路径（GitHub Pages 的 `user.github.io/repo/` 等） |
+| **单文件构建配置** | `apps/web/vite.standalone.config.ts` + `apps/web/src/standalone.tsx` | IIFE bundle + worker 单独 ES chunk。`standalone.tsx` mount 前设 `__AIRFERRY_STANDALONE__=true` 触发单文件路径 |
+| **单文件后处理** | `apps/web/scripts/build-standalone.cjs` | 把 Vite 多文件产物内联成单个 `dist-standalone/index.html`：注入 worker 源码（`__WORKER_CODE__`）+ zstd base64（`__WASM_ZSTD__`）+ process polyfill；处理 `</script>` 转义 + `import.meta.url` 替换 |
 
 ---
 

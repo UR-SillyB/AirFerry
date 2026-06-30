@@ -75,6 +75,63 @@ apps/web/dist/
 
 两端共用同一份 `apps/sender/src/options.tsx`——其中的 zstd 预加载 IIFE 用 `typeof chrome !== "undefined"` 做环境自适应，扩展走 `chrome.runtime.getURL`，网页走 `new URL("wasm-zstd.wasm", document.baseURI)`，行为各自正确（见 `AGENTS.md` §5.8）。
 
+## 单文件版（双击运行，无需服务器）
+
+普通 `dist/` 需要静态服务器（因为 ES module 脚本在 `file://` 下被浏览器禁止）。**单文件版**把所有资源内联进一个 `index.html`，**双击即可在 `file://` 下运行**，无需任何服务器。
+
+### 构建
+
+```bash
+cd apps/web
+npm run build:standalone    # 产出自包含单文件 dist-standalone/index.html（约 2MB）
+```
+
+构建过程（两阶段）：
+1. `vite build --config vite.standalone.config.ts` —— IIFE bundle（去 ES module 标记）+ worker 单独 ES chunk + WASM 资源
+2. `node scripts/build-standalone.cjs` —— 后处理：把 JS/CSS/worker/2 个 WASM（zstd + transfer_engine；lzma 已自内联）全部内联进单个 HTML
+
+### 使用
+
+直接双击 `dist-standalone/index.html`，或在 Finder/资源管理器里打开。无需 `python -m http.server`、无需部署。
+
+### file:// 下的三大障碍及解法
+
+| 障碍 | 解法 |
+|------|------|
+| `<script type="module">` 在 file:// 被禁 | IIFE bundle（无 module 标记），内联为普通 `<script>` |
+| `new Worker(url)` 在 file:// 加载失败 | worker 源码字符串化 → `URL.createObjectURL(new Blob([code]))` 生成 blob: URL → `new Worker(blobUrl)` |
+| WASM `fetch(import.meta.url)` 在 file:// 失败 | 三个 WASM 全部 base64 内联，运行时 `atob` 解码喂给 buffer 接口 |
+
+### 三个 WASM 的加载方式（复用现成 buffer 接口，零源码改动）
+
+| WASM | 加载方式 |
+|------|---------|
+| transfer_engine (304KB) | base64 内联 → `init(buffer)`（wasm-bindgen 非字符串输入走 `WebAssembly.instantiate(buffer)`） |
+| lzma-wasm | **已自带 base64 内联**（默认 `atob` 自解码，file:// 直接可用） |
+| wasm-zstd (412KB) | base64 内联 → 主线程 `initZstdFromBytes(bytes)` → postMessage 传 worker |
+
+### 后处理脚本的关键细节（`build-standalone.cjs`）
+
+1. **`</script>` 转义**：内联 JS 里可能含 `</script>` 字符串，会破坏 HTML 解析。替换成 `<\/script>`（JS 字符串等价，HTML 解析器看不见）
+2. **`import.meta.url` 替换**：worker chunk 是 ES 格式含 `import.meta`（lzma wasm-bindgen 胶水），但 Blob worker 是 classic。替换成字符串字面量（该 fetch fallback 路径在单文件版永不执行）
+3. **`process` polyfill**：prop-types 等依赖引用 `process.env.NODE_ENV`，file:// 下 `process` 未定义。prelude 注入 `globalThis.process={env:{NODE_ENV:"production"}}`
+
+### 浏览器兼容性
+
+- ✅ **Chrome / Edge / Firefox**（现代版本，1-2 年内）：file:// 双击运行正常
+- ⚠️ 单文件版用 Blob URL worker + base64 WASM，依赖较新的浏览器特性
+- 大文件压缩（xz level 9）时主线程不冻结（worker 仍在后台跑），体验与扩展版一致
+
+### 与普通版的区别
+
+| 维度 | 普通版（`npm run build`） | 单文件版（`npm run build:standalone`） |
+|------|--------------------------|---------------------------------------|
+| 产物 | `dist/` 多文件（HTML + assets/ + wasm） | 单个 `dist-standalone/index.html`（约 2MB） |
+| 运行 | 需静态服务器（ES module 限制） | **file:// 双击即用** |
+| WASM | 外部文件，运行时 fetch | base64 内联 |
+| Worker | ES module worker（`new Worker(url, {type:"module"})`） | Blob URL classic worker |
+| 体积 | 总和约 1.2MB（可 gzip） | 约 2MB（单文件，无 gzip） |
+
 ## 调试
 
 | 症状 | 原因 | 解决 |

@@ -17,6 +17,8 @@ build/
 # Build output / release artifacts (published as GitHub Release assets,
 # never checked into git). See docs/build-browser.md.
 dist/
+# Standalone single-file web build output (apps/web/dist-standalone/).
+dist-standalone/
 
 # Plasmo extension build output + generated typings/cache (both repo-root and
 # per-package). These are regenerable build artifacts, never source.

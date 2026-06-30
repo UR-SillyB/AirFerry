@@ -18,17 +18,37 @@ import { PlayPage } from "@/pages/PlayPage"
 import { StatsPage } from "@/pages/StatsPage"
 import { CompressProgress, type CompressPhase } from "@/components/CompressProgress"
 import { loadConfig, saveConfig, type Page, type TransferConfig, type TransferKind } from "@/types"
+import { base64ToBuffer } from "@/wasm/base64"
 
 /**
  * The compress worker. Built by Parcel 2 into a separate bundle per target
  * (chrome-mv2/mv3, firefox-mv2/mv3). It runs the heavy, synchronous-WASM file
  * prep (bundle → compress → crc → fingerprint → session id) off the main thread
  * so the UI stays responsive — without this the compressors freeze the page.
+ *
+ * Standalone (single-file) build: under `file://`, `new Worker(url)` cannot
+ * load a separate script file, so the standalone build inlines the worker
+ * source as a string on `globalThis.__WORKER_CODE__`. When present we wrap it in
+ * a Blob URL and spawn the worker from that (modern browsers permit blob:-
+ * origin workers under file://). The worker source itself uses the same base64
+ * WASM constants the main thread does (see zstd pre-load below).
  */
-const compressWorker = new Worker(
-  new URL("./workers/compress.worker.ts", import.meta.url),
-  { type: "module" }
-)
+const standaloneGlobals = globalThis as {
+  __AIRFERRY_STANDALONE__?: boolean
+  __WORKER_CODE__?: string
+  __WASM_ZSTD__?: string
+}
+
+const compressWorker = standaloneGlobals.__AIRFERRY_STANDALONE__ && standaloneGlobals.__WORKER_CODE__
+  ? new Worker(
+      URL.createObjectURL(
+        new Blob([standaloneGlobals.__WORKER_CODE__], { type: "text/javascript" })
+      )
+    )
+  : new Worker(
+      new URL("./workers/compress.worker.ts", import.meta.url),
+      { type: "module" }
+    )
 
 /**
  * Pre-load zstd WASM bytes on the main thread and transfer them to the worker.
@@ -37,24 +57,31 @@ const compressWorker = new Worker(
  * bytes here and passing them as a transferable, we guarantee the worker always
  * has the WASM binary available regardless of its execution context.
  *
- * Environment-detection: in a browser extension `chrome.runtime.getURL` resolves
- * the asset packed alongside the page; on a plain web page (apps/web) that API
- * is unavailable, so we resolve relative to the document. If the pre-load fails
- * for any reason the worker still has its own fetch fallback (see compress.ts),
- * so this is an optimization, not a hard dependency.
+ * Three environments, three ways to get the bytes:
+ *  - **Standalone (single-file) build**: the wasm is inlined as base64 on
+ *    `globalThis.__WASM_ZSTD__` (file:// can't fetch it). Decode directly.
+ *  - **Browser extension**: `chrome.runtime.getURL` resolves the packed asset.
+ *  - **Plain web page**: resolve relative to the document.
+ * If the pre-load fails for any reason the worker still has its own fetch
+ * fallback (see compress.ts), so this is an optimization, not a hard dependency.
  */
 ;(async () => {
   try {
-    const wasmUrl =
-      typeof chrome !== "undefined" && chrome.runtime?.getURL
-        ? chrome.runtime.getURL("wasm-zstd.wasm")
-        : new URL("wasm-zstd.wasm", document.baseURI).href
-    const resp = await fetch(wasmUrl, { credentials: "same-origin" })
-    if (resp.ok) {
-      const bytes = await resp.arrayBuffer()
-      compressWorker.postMessage({ type: "wasm-init", zstd: bytes }, [bytes])
+    let bytes: ArrayBuffer | undefined
+    if (standaloneGlobals.__AIRFERRY_STANDALONE__ && standaloneGlobals.__WASM_ZSTD__) {
+      // Standalone build: decode the inlined base64 (file:// can't fetch).
+      bytes = base64ToBuffer(standaloneGlobals.__WASM_ZSTD__)
     } else {
-      console.warn("Failed to pre-load wasm-zstd.wasm:", resp.status)
+      const wasmUrl =
+        typeof chrome !== "undefined" && chrome.runtime?.getURL
+          ? chrome.runtime.getURL("wasm-zstd.wasm")
+          : new URL("wasm-zstd.wasm", document.baseURI).href
+      const resp = await fetch(wasmUrl, { credentials: "same-origin" })
+      if (resp.ok) bytes = await resp.arrayBuffer()
+      else console.warn("Failed to pre-load wasm-zstd.wasm:", resp.status)
+    }
+    if (bytes) {
+      compressWorker.postMessage({ type: "wasm-init", zstd: bytes }, [bytes])
     }
   } catch (e) {
     console.warn("Failed to pre-load wasm-zstd.wasm:", e)

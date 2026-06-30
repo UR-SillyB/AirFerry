@@ -12,6 +12,7 @@
     "prebuild": "node scripts/prepare-wasm.cjs",
     "dev": "vite",
     "build": "vite build",
+    "build:standalone": "vite build --config vite.standalone.config.ts && node scripts/build-standalone.cjs",
     "preview": "vite preview"
   },
   "dependencies": {
