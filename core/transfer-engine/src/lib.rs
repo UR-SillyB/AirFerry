@@ -8,7 +8,8 @@
 //!   redundancy ratio, and loops forever so a receiver can rejoin at any time.
 //! - [`ReceiverSession`] ingests decoded QR payloads as frames, feeds the
 //!   RaptorQ decoder, tracks per-block progress, and reassembles the file once
-//!   complete. It can serialize its state for resume after a crash/restart.
+//!   complete. Checkpoint via [`ReceiverSession::save_state`] /
+//!   [`ReceiverSession::restore`] and [`ResumeState`] (JSON when `serde` is on).
 //!
 //! Compression is intentionally **outside** this engine: the caller compresses
 //! with Zstd (native/Android via `qr-protocol`, or JS-side on the browser) and

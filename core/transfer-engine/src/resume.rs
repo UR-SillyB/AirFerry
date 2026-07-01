@@ -3,7 +3,8 @@
 //! The receiver can serialize its progress so that, after an app restart, it
 //! can recognise the same session id (from incoming frames) and reload the
 //! per-block received-symbol sets. RaptorQ state itself is rebuilt by feeding
-//! the saved symbols back into a fresh decoder.
+//! the saved symbols back into a fresh decoder via
+//! [`crate::ReceiverSession::save_state`] / [`crate::ReceiverSession::restore`].
 //!
 //! Format: serde JSON (feature-gated). When the `serde` feature is off, the
 //! structs still exist but `[de]serialize` are unavailable.

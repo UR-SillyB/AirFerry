@@ -95,7 +95,7 @@ fn run_android_path(size: usize, redundancy: u8, label: &str) {
         }
     }
 
-    let rx = rx.expect("receiver never created");
+    let mut rx = rx.expect("receiver never created");
     let p = rx.progress();
     println!(
         "[{label}] size={size} K={total_k} ingested={ingested} rejected={rejected} \

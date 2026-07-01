@@ -167,7 +167,7 @@ pub extern "C" fn airferry_receiver_assemble(
         return 0;
     }
     // SAFETY: shared borrow; caller guarantees the handle is valid.
-    let session = unsafe { &*handle };
+    let session = unsafe { &mut *(handle as *mut ReceiverSession) };
     let data = match session.assemble_result() {
         Ok(Some(d)) => d,
         Ok(None) => return 0,

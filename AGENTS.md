@@ -284,8 +284,8 @@ npm run preview        # 本地预览构建产物
 | **接收端摄入入口** | `core/transfer-engine/src/receiver.rs:147` | `ingest`：缓存引导→描述符确认 OTI→喂解码器 |
 | 描述符载荷解析 | `core/transfer-engine/src/descriptor.rs:178` | `parse_payload`：v1/v2/v3 + v2/v3 消歧 |
 | 进度快照 | `core/transfer-engine/src/progress.rs` | `Progress` / `Stats` |
-| 断点状态序列化 | `core/transfer-engine/src/resume.rs` | `ResumeState`（serde-gated） |
-| **JNI 绑定（Android）** | `core/transfer-engine/src/jni.rs:68` | `receiverIngest` 返回**packed jlong**（非 JSON，见 SPEC） |
+| 断点状态序列化 | `core/transfer-engine/src/resume.rs` + `receiver.rs` | `ResumeState`（serde-gated JSON）；`ReceiverSession::save_state` / `restore` |
+| **JNI 绑定（Android）** | `core/transfer-engine/src/jni.rs:68` | `receiverIngest` 返回**packed jlong**（非 JSON，见 SPEC）；`receiverLastAssembleError` 暴露组装/解压失败原因 |
 | **C ABI 绑定（Windows/.NET P/Invoke）** | `core/transfer-engine/src/cffi.rs:78` | `airferry_receiver_ingest` 返回**packed u64**（位布局与 jni.rs 完全一致）；assemble 用「Rust 分配+free」单次调用 |
 | **WASM 绑定（浏览器）** | `core/transfer-engine/src/wasm.rs:86` | `next_qr`：帧+QR 编码一次调用；`next_qr_multi`（wasm.rs:113）多码版；`next_qr_into`（wasm.rs:158）零拷贝变体（热路径用）；`next_qr_multi_into`（wasm.rs:193）多码零拷贝 |
 

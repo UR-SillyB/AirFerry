@@ -5,6 +5,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.hardware.camera2.CaptureRequest
 import android.os.Bundle
+import android.widget.Toast
 import android.util.Log
 import android.util.Range
 import android.util.Size
@@ -829,7 +830,16 @@ class ScanActivity : ComponentActivity() {
      */
     private fun recoverAndStage(displayName: String): Intent? {
         updateRecoveryStage("正在组装数据…")
-        val fileBytes = session.assemble() ?: run { clearRecoveryStage(); return null }
+        val fileBytes = session.assemble() ?: run {
+            clearRecoveryStage()
+            if (session.isComplete()) {
+                val detail = session.lastAssembleError().ifEmpty { "数据组装或解压失败" }
+                runOnUiThread {
+                    Toast.makeText(this, "恢复失败: $detail", Toast.LENGTH_LONG).show()
+                }
+            }
+            return null
+        }
         val originalSize = session.fileSize()
         // Truncate RaptorQ zero-padding back to the original size. originalSize
         // is a Long (up to 2^63); clamp to the bytes we actually recovered and
@@ -875,11 +885,11 @@ class ScanActivity : ComponentActivity() {
                     putExtra("TEXT", text)
                     putExtra("FILE_PATH", tmp.absolutePath)
                     putExtra("FILE_NAME", archiveName)
-                    putExtra("CRC32", expectedCrc)
-                    putExtra("CRC32_RECEIVED", receivedCrc)
-                    // Use the authoritative known-flag, NOT `expectedCrc == 0L`:
-                    // CRC32 can legitimately be 0.
-                    putExtra("CRC32_UNKNOWN", !crcKnown)
+                    // Match history re-open: CRC is over plain UTF-8 bytes, not the
+                    // ET-text wire payload (see archiveText / FileListActivity).
+                    putExtra("CRC32", contentCrc)
+                    putExtra("CRC32_RECEIVED", contentCrc)
+                    putExtra("CRC32_UNKNOWN", false)
                 }
             }
             // If parsing failed, fall through and treat as a single file so the
@@ -959,7 +969,9 @@ class ScanActivity : ComponentActivity() {
                 val size = sizes.getOrElse(i) { "0" }
                 java.io.File(bundleDir, "${target.name}.meta").writeText("$name\n$size\nunknown\ntrue")
             }
-        } catch (_: Exception) {}
+        } catch (e: Exception) {
+            android.util.Log.w("ScanActivity", "bundle archive failed", e)
+        }
     }
 
     /**
@@ -994,7 +1006,8 @@ class ScanActivity : ComponentActivity() {
                 "$TEXT_RECEIVED_NAME\n$size\n$crcStr\nfalse\nkind=text"
             )
             target.name
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            android.util.Log.w("ScanActivity", "text archive failed", e)
             TEXT_RECEIVED_NAME
         }
     }

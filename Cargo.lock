@@ -196,7 +196,7 @@ dependencies = [
 
 [[package]]
 name = "qr-protocol"
-version = "1.0.0"
+version = "1.1.0-beta.1"
 dependencies = [
  "crc32fast",
  "qrcode",
@@ -239,7 +239,7 @@ dependencies = [
 
 [[package]]
 name = "raptorq-core"
-version = "1.0.0"
+version = "1.1.0-beta.1"
 dependencies = [
  "raptorq",
  "serde",
@@ -337,7 +337,7 @@ dependencies = [
 
 [[package]]
 name = "transfer-engine"
-version = "1.0.0"
+version = "1.1.0-beta.1"
 dependencies = [
  "crc32fast",
  "jni",

@@ -220,7 +220,7 @@ pub extern "system" fn Java_com_airferry_app_nativelib_NativeBridge_receiverAsse
     if handle == 0 {
         return null_byte_array(&mut env);
     }
-    let session = unsafe { &*(handle as *const ReceiverSession) };
+    let session = unsafe { &mut *(handle as *mut ReceiverSession) };
     let data = match session.assemble_result() {
         Ok(Some(d)) => d,
         Ok(None) => return null_byte_array(&mut env),
@@ -338,6 +338,24 @@ pub extern "system" fn Java_com_airferry_app_nativelib_NativeBridge_receiverCrc3
     }
     let session = unsafe { &*(handle as *const ReceiverSession) };
     session.file_meta().crc32_known as jint
+}
+
+/// Last [`ReceiverSession::assemble_result`] error message, or empty if none.
+#[no_mangle]
+pub extern "system" fn Java_com_airferry_app_nativelib_NativeBridge_receiverLastAssembleError(
+    env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+) -> jni::sys::jstring {
+    if handle == 0 {
+        return std::ptr::null_mut();
+    }
+    let session = unsafe { &*(handle as *const ReceiverSession) };
+    let msg = session.last_assemble_error().unwrap_or("");
+    match env.new_string(msg) {
+        Ok(s) => s.into_raw(),
+        Err(_) => std::ptr::null_mut(),
+    }
 }
 
 fn progress_json(p: &Progress) -> String {

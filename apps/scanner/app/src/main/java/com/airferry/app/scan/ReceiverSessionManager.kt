@@ -25,9 +25,10 @@ class ReceiverSessionManager {
         val sessionIdHi: Long,
         val sbn: Int,
         val esi: Int,
-        val totalBlocks: Int,
-        val totalSymbols: Int,
-        val symbolSize: Int
+        /** Advisory until descriptor confirms; u32 on wire as unsigned Long. */
+        val totalBlocks: Long,
+        val totalSymbols: Long,
+        val symbolSize: Long
     )
 
     data class Progress(
@@ -115,7 +116,7 @@ class ReceiverSessionManager {
         val symbolSize = u32beLong(bytes, 36)
         return FrameHeader(
             magic, version, flags, sessionIdLo, sessionIdHi,
-            sbn, esi, totalBlocks.toInt(), totalSymbols.toInt(), symbolSize.toInt()
+            sbn, esi, totalBlocks, totalSymbols, symbolSize
         )
     }
 
@@ -140,8 +141,8 @@ class ReceiverSessionManager {
         val header = parseHeader(frameBytes) ?: return null
 
         // Cache estimated total symbols from first frame for approximate progress
-        if (estimatedTotalSymbols == 0 && header.totalSymbols > 0) {
-            estimatedTotalSymbols = header.totalSymbols
+        if (estimatedTotalSymbols == 0 && header.totalSymbols > 0L) {
+            estimatedTotalSymbols = header.totalSymbols.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
         }
 
         val isDescriptor = (header.flags and FLAG_DESCRIPTOR) != 0
@@ -201,10 +202,15 @@ class ReceiverSessionManager {
     private fun createReceiver(header: FrameHeader) {
         sessionIdLo = header.sessionIdLo
         sessionIdHi = header.sessionIdHi
-        symbolSize = if (header.symbolSize > 0) header.symbolSize else 1024
+        symbolSize = when {
+            header.symbolSize > 0L && header.symbolSize <= Int.MAX_VALUE -> header.symbolSize.toInt()
+            else -> 1024
+        }
+        val totalBlocks = header.totalBlocks.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+        val totalSymbols = header.totalSymbols.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
         handle = NativeBridge.receiverCreate(
             sessionIdLo, sessionIdHi,
-            header.totalBlocks, header.totalSymbols, symbolSize
+            totalBlocks, totalSymbols, symbolSize
         )
         initialized = handle != 0L
         mismatchStreak = 0
@@ -234,14 +240,16 @@ class ReceiverSessionManager {
     fun crc32Known(): Boolean =
         if (initialized) NativeBridge.receiverCrc32Known(handle) == 1 else false
 
-    /** Recover the assembled file bytes, or null if not complete. */
+    /** Recover the assembled file bytes, or null if not complete / on failure. */
     fun assemble(): ByteArray? {
         if (!initialized) return null
         val bytes = NativeBridge.receiverAssembleBytes(handle) ?: return null
-        // NativeBridge returns an empty array (not null) for the "not complete"
-        // sentinel, so treat an empty result as "nothing yet".
         return bytes.takeIf { it.isNotEmpty() }
     }
+
+    /** Rust-side reason when [assemble] returns null but [isComplete] is true. */
+    fun lastAssembleError(): String =
+        if (initialized) NativeBridge.receiverLastAssembleError(handle) else ""
 
     fun sessionIdHex(): String {
         val lo = java.lang.Long.toUnsignedString(sessionIdLo, 16).padStart(16, '0')

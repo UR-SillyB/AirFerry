@@ -45,6 +45,10 @@ object NativeBridge {
      * length/fill race).
      */
     external fun receiverAssembleBytes(handle: Long): ByteArray?
+
+    /** Non-empty when the last assemble failed after decode completed (e.g. decompress). */
+    external fun receiverLastAssembleError(handle: Long): String
+
     external fun receiverDestroy(handle: Long)
 
     // ---- File metadata (populated from descriptor frames) ----

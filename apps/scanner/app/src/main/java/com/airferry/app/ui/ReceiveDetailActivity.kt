@@ -270,7 +270,9 @@ class ReceiveDetailActivity : ComponentActivity() {
             val onDiskCrc = ScanActivity.crc32OfBytes(src.readBytes())
             val crcStr = java.lang.Long.toHexString(onDiskCrc)
             File(dir, "${target.name}.meta").writeText("$fileName\n$fileSize\n$crcStr\nfalse")
-        } catch (_: Exception) {}
+        } catch (e: Exception) {
+            android.util.Log.w("ReceiveDetailActivity", "copyToReceivedDir failed", e)
+        }
     }
 
     /**

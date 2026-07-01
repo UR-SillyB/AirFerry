@@ -61,7 +61,7 @@ fn zstd_pipeline_recovers_original_bytes() {
             break;
         }
     }
-    let rx = rx.unwrap();
+    let mut rx = rx.unwrap();
     assert!(rx.is_complete(), "receiver should recover all symbols");
     assert_eq!(
         rx.file_meta().compression,
@@ -117,6 +117,7 @@ fn uncompressed_pipeline_still_works() {
             break;
         }
     }
-    let recovered = rx.unwrap().assemble().unwrap();
+    let mut rx = rx.unwrap();
+    let recovered = rx.assemble().unwrap();
     assert_eq!(recovered, original);
 }

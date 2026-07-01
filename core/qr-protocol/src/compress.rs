@@ -29,6 +29,15 @@ pub const COMPRESSION_NONE: u8 = 0;
 pub const COMPRESSION_ZSTD: u8 = 1;
 pub const COMPRESSION_XZ: u8 = 2;
 
+/// True for on-wire algorithm tags the stack implements end-to-end.
+#[inline]
+pub fn is_known_compression_tag(tag: u8) -> bool {
+    matches!(
+        tag,
+        COMPRESSION_NONE | COMPRESSION_ZSTD | COMPRESSION_XZ
+    )
+}
+
 /// XZ/LZMA2 preset. The low 5 bits are the compression level (0..=9); bit 31
 /// is `LZMA_PRESET_EXTREME` (0x8000_0000), which enables a much slower but
 /// higher-ratio search at the given level.
@@ -92,7 +101,9 @@ pub fn decompress_with(data: &[u8], compression: u8) -> Result<Vec<u8>> {
 /// tiny zstd/xz payload can legitimately expand 1000×+ (a "decompression bomb"),
 /// so without an output cap a crafted transfer would OOM the Android receiver at
 /// assemble time. The caller passes the descriptor's expected original size as
-/// the cap; if the stream produces more than that, it's rejected.
+/// the cap; if the stream produces more than that, it's rejected. Unknown
+/// algorithm tags with non-empty payload return an error (see
+/// [`is_known_compression_tag`]).
 #[cfg(not(target_arch = "wasm32"))]
 pub fn decompress_with_limit(data: &[u8], compression: u8, max_output: usize) -> Result<Vec<u8>> {
     match compression {
@@ -103,6 +114,11 @@ pub fn decompress_with_limit(data: &[u8], compression: u8, max_output: usize) ->
         }
         COMPRESSION_XZ => read_capped(xz2::read::XzDecoder::new(data), max_output),
         _ => {
+            if !is_known_compression_tag(compression) && !data.is_empty() {
+                return Err(Error::Compress(format!(
+                    "unknown compression algorithm tag {compression}"
+                )));
+            }
             if data.len() > max_output {
                 return Err(Error::Compress("payload exceeds size limit".into()));
             }
@@ -224,6 +240,13 @@ mod tests {
         let data = vec![1u8, 2, 3, 4];
         assert_eq!(compress_with(&data, 99).unwrap(), data);
         assert_eq!(decompress_with(&data, 99).unwrap(), data);
+    }
+
+    #[test]
+    fn unknown_compression_tag_rejected_on_limited_decompress() {
+        let data = vec![1u8, 2, 3, 4];
+        assert!(decompress_with_limit(&data, 99, 1024).is_err());
+        assert_eq!(decompress_with_limit(&[], 99, 1024).unwrap(), Vec::<u8>::new());
     }
 
     #[test]

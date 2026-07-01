@@ -93,7 +93,7 @@ fn cycle(data: &[u8], redundancy: u8, drop_every: u32, dup_some: bool, shuffle: 
         }
     }
 
-    let rx = rx.expect("receiver never created");
+    let mut rx = rx.expect("receiver never created");
     assert!(rx.is_complete(), "failed to recover object");
     let out = rx.assemble().unwrap();
     assert!(out.len() >= data.len());

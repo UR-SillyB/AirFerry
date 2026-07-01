@@ -18,7 +18,9 @@ use std::vec::Vec;
 /// descriptor frame rebuilds a *correct* decoder and replays all buffered
 /// symbols into it.
 ///
-/// For resume, use [`ReceiverSession::save_state`] / [`ReceiverSession::restore`].
+/// For checkpoint persistence, build a [`crate::ResumeState`] via
+/// [`ReceiverSession::save_state`] and reload with [`ReceiverSession::restore`]
+/// (requires the `serde` feature for JSON helpers on `ResumeState`).
 pub struct ReceiverSession {
     session_id: SessionIdRaw,
     /// Authoritative object metadata. `None` until a descriptor frame arrives.
@@ -42,6 +44,8 @@ pub struct ReceiverSession {
     /// Cached symbol_size from the frame header for approximate progress while
     /// `meta` is still `None`. Harmless to keep; only read before confirmation.
     pending_symbol_size: u32,
+    /// Last [`assemble_result`] failure message (cleared on successful assemble).
+    last_assemble_error: Option<String>,
 }
 
 impl ReceiverSession {
@@ -96,7 +100,13 @@ impl ReceiverSession {
             progress,
             pending_symbol_size: symbol_size,
             session_mismatch_streak: 0,
+            last_assemble_error: None,
         }
+    }
+
+    /// Human-readable reason the last [`assemble_result`] failed, if any.
+    pub fn last_assemble_error(&self) -> Option<&str> {
+        self.last_assemble_error.as_deref()
     }
 
     /// Bootstrap a receiver from the first observed frame.
@@ -185,6 +195,11 @@ impl ReceiverSession {
                 self.symbol_cache.clear();
                 // Always update file metadata.
                 self.file_meta = info.file_meta;
+            } else {
+                // Descriptor flag set but payload is not a parseable descriptor
+                // (truncated extension, bad magic inside payload, etc.). Count as
+                // corrupt so the UI can surface "waiting for descriptor" vs silence.
+                self.progress.frames_corrupt += 1;
             }
             return Ok(self.is_complete());
         }
@@ -331,7 +346,7 @@ impl ReceiverSession {
     /// payload length and — when the descriptor advertised a compression
     /// algorithm — runs the matching decompressor to recover the original file
     /// bytes. Returns `None` if decoding is incomplete or decompression fails.
-    pub fn assemble(&self) -> Option<Vec<u8>> {
+    pub fn assemble(&mut self) -> Option<Vec<u8>> {
         // `assemble_result` is `Result<Option<Vec<u8>>>`: `Ok(Some)` on success,
         // `Ok(None)` when decoding isn't complete yet, `Err` on a recoverable
         // decompression failure. Collapse both non-success cases to `None` —
@@ -346,13 +361,17 @@ impl ReceiverSession {
     /// not yet complete (no bytes to assemble), `Ok(Some(bytes))` on success,
     /// and `Err(_)` if the bytes were recovered but the payload could not be
     /// decompressed (e.g. compressed_size was wrong or the stream is corrupt).
-    pub fn assemble_result(&self) -> Result<Option<Vec<u8>>> {
+    pub fn assemble_result(&mut self) -> Result<Option<Vec<u8>>> {
         let Some(dec) = self.decoder.as_ref() else {
+            self.last_assemble_error = None;
             return Ok(None);
         };
         let mut raw = match dec.assemble() {
             Some(b) => b,
-            None => return Ok(None),
+            None => {
+                self.last_assemble_error = None;
+                return Ok(None);
+            }
         };
         // Trim zero padding back to the true payload length. For compressed
         // payloads that is `compressed_size`; for uncompressed payloads the
@@ -370,13 +389,16 @@ impl ReceiverSession {
                 // The sender claimed a larger payload than RaptorQ recovered —
                 // the object cannot be valid. Treat as a decompression failure
                 // so the caller surfaces it instead of silently truncating.
-                return Err(Error::Compress(format!(
+                let msg = format!(
                     "descriptor compressed_size ({len}) exceeds recovered payload ({})",
                     raw.len()
-                )));
+                );
+                self.last_assemble_error = Some(msg.clone());
+                return Err(Error::Compress(msg));
             }
         }
         if self.file_meta.compression == qr_protocol::compress::COMPRESSION_NONE {
+            self.last_assemble_error = None;
             Ok(Some(raw))
         } else {
             // Bound the decompressed output against a decompression bomb in the
@@ -387,9 +409,21 @@ impl ReceiverSession {
             } else {
                 256 * 1024 * 1024
             };
-            qr_protocol::compress::decompress_with_limit(&raw, self.file_meta.compression, cap)
-                .map(Some)
-                .map_err(|e| Error::Compress(e.to_string()))
+            match qr_protocol::compress::decompress_with_limit(
+                &raw,
+                self.file_meta.compression,
+                cap,
+            ) {
+                Ok(v) => {
+                    self.last_assemble_error = None;
+                    Ok(Some(v))
+                }
+                Err(e) => {
+                    let msg = e.to_string();
+                    self.last_assemble_error = Some(msg.clone());
+                    Err(Error::Compress(msg))
+                }
+            }
         }
     }
 
@@ -402,6 +436,64 @@ impl ReceiverSession {
     /// Snapshot progress (clone).
     pub fn progress_snapshot(&self) -> Progress {
         self.progress()
+    }
+
+    /// Serialize checkpoint state for resume after a restart.
+    ///
+    /// Returns `None` until authoritative [`ObjectMeta`] is known (descriptor
+    /// confirmed). Persisted symbols are taken from the replay cache and from
+    /// in-flight storage only — symbols already fed to the decoder are not
+    /// re-exported as bytes, so a mid-transfer snapshot after long progress may
+    /// require the sender to retransmit repair symbols (fountain code).
+    pub fn save_state(&self) -> Option<crate::ResumeState> {
+        let meta = self.meta.as_ref()?.clone();
+        let symbols: Vec<(u32, u32, Vec<u8>)> = self
+            .symbol_cache
+            .iter()
+            .map(|((sbn, esi), data)| (*sbn, *esi, data.clone()))
+            .collect();
+        Some(crate::ResumeState {
+            session_id: self.session_id,
+            meta,
+            received: self.received.iter().map(|s| s.clone()).collect(),
+            symbols,
+        })
+    }
+
+    /// Restore a receiver from a [`crate::ResumeState`] snapshot.
+    ///
+    /// Rebuilds the decoder from stored metadata and replays any persisted symbol
+    /// payloads. Received ESI sets from the snapshot are merged as symbols are
+    /// replayed.
+    pub fn restore(state: crate::ResumeState) -> Self {
+        let mut rx = Self::new_confirmed(state.session_id, state.meta);
+        for (sbn, esi, data) in state.symbols {
+            let bi = sbn as usize;
+            if bi < rx.received.len() {
+                if rx.received[bi].insert(esi) {
+                    if let Some(meta) = &rx.meta {
+                        if esi < meta.blocks[bi].num_source_symbols {
+                            rx.source_recv[bi] += 1;
+                        }
+                    }
+                    let symbol = Symbol::new(sbn, esi, data);
+                    if let Some(dec) = rx.decoder.as_mut() {
+                        let _ = dec.add_symbol(&symbol);
+                    }
+                }
+            }
+        }
+        // Merge stored received sets (ESIs we knew about but may lack payloads).
+        for (i, set) in state.received.into_iter().enumerate() {
+            if i < rx.received.len() {
+                for esi in set {
+                    rx.received[i].insert(esi);
+                }
+            }
+        }
+        rx.progress.received_symbols = rx.received.iter().map(|s| s.len() as u32).sum();
+        rx.refresh_decoded_counts();
+        rx
     }
 }
 
@@ -613,6 +705,18 @@ mod tests {
 
     /// A descriptor frame decoded off a hostile screen must be rejected (not
     /// confirmed) without panicking, even though it passed magic/CRC.
+    #[test]
+    fn rejects_unparseable_descriptor_payload() {
+        use qr_protocol::FLAG_DESCRIPTOR;
+        let sid = SessionId::derive("bad-desc", 100, 0, &[]).into();
+        let mut rx = ReceiverSession::new_pending(sid);
+        let payload = vec![0u8; 1024]; // no DESC_MAGIC at payload[0]
+        let f = Frame::build(sid, FLAG_DESCRIPTOR, 0, 0, 1, 1, 1024, 0, 0, &payload);
+        let _ = rx.ingest(f).unwrap();
+        assert!(!rx.is_meta_confirmed());
+        assert!(rx.progress().frames_corrupt >= 1);
+    }
+
     #[test]
     fn rejects_tampered_descriptor_without_panic() {
         let data = payload(20_000);

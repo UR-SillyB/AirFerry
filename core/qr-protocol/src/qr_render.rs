@@ -188,14 +188,26 @@ mod tests {
         let desc_m_new = encode(&desc_bytes).unwrap();
         let desc_m_old = encode_old(&desc_bytes);
         
-        println!("Descriptor frame - Old size: {}, New size: {}", desc_m_old.size, desc_m_new.size);
-        
-        panic!("Show sizes");
+        // New encoder must pick a valid QR at least as compact as the legacy scan.
+        assert!(m_new.size > 0);
+        assert!(desc_m_new.size > 0);
+        assert!(
+            m_new.size <= m_old.size,
+            "data frame: new QR version {} should be <= old {}",
+            m_new.size,
+            m_old.size
+        );
+        assert!(
+            desc_m_new.size <= desc_m_old.size,
+            "descriptor frame: new QR version {} should be <= old {}",
+            desc_m_new.size,
+            desc_m_old.size
+        );
     }
 
     #[test]
     fn compare_with_version_and_with_bits() {
-        use crate::{Frame, FLAG_DESCRIPTOR};
+        use crate::Frame;
         
         let symbol_sizes = [512, 896, 1008, 1024, 1400];
         
