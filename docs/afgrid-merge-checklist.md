@@ -27,7 +27,7 @@ dotnet test (AirFerry.Windows.Tests)   → 33 passed, 0 failed
 cargo test (workspace)                 → OK（含 afgrid_e2e）
 ```
 
-**Android JNI**：仓库内 `libtransfer_engine.so` 可能为旧构建；合并前须 CI `android-jni-ndk` 绿或本地：
+**Android JNI**（本机 2026-07-02：`ANDROID_NDK_HOME=/opt/homebrew/share/android-commandlinetools/ndk/27.0.12077973`，`nm` 含 `afgridDecodeY` / `afgridSideForSymbolSize`，`.so` ~1.17MB）：仓库内 `libtransfer_engine.so` 可能为旧构建；合并前须 CI `android-jni-ndk` 绿或本地：
 
 ```bash
 export ANDROID_NDK_HOME=...

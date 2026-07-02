@@ -3,6 +3,10 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
+if [[ -z "${ANDROID_NDK_HOME:-}" ]] && [[ -f "$ROOT/scripts/env-android-ndk.sh" ]]; then
+  # shellcheck source=/dev/null
+  source "$ROOT/scripts/env-android-ndk.sh" || true
+fi
 echo "== cargo test (workspace) =="
 cargo test --quiet 2>&1 | tail -3
 echo "== qr-protocol afgrid =="

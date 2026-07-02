@@ -89,3 +89,16 @@ cd apps/windows && dotnet test
 | 真机 E2E 5600 | ⏳ 待人工 | 见 `docs/afgrid-merge-checklist.md` |
 
 合并前清单：**[afgrid-merge-checklist.md](./afgrid-merge-checklist.md)**
+
+## 本机 Android NDK（Homebrew commandlinetools）
+
+```bash
+# 已在 ~/.zshrc 写入（或每次构建前）：
+export ANDROID_SDK_ROOT=/opt/homebrew/share/android-commandlinetools
+export ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/27.0.12077973
+
+# 或：
+source scripts/env-android-ndk.sh
+cargo ndk -t arm64-v8a -o apps/scanner/app/src/main/jniLibs \
+  build -p transfer-engine --features jni,afgrid --release
+```
