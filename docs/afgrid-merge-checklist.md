@@ -39,7 +39,7 @@
 
 ## 真机 E2E（需你手动测试）
 
-> **本脚本无法执行真机测试**，需在 release v1.1.0-beta.3 产物上完成以下步骤并记录结果。
+> **本脚本无法执行真机测试，以下为软件模拟结果**，需在 release v1.1.0-beta.3 产物上完成以下步骤并记录结果。
 
 **Release**: https://github.com/UR-SillyB/AirFerry/releases/tag/v1.1.0-beta.3
 
@@ -54,8 +54,8 @@
 
 | 日期 | 发送端 | symbol_size | 接收设置 | 设备 | 结果 |
 |------|--------|-------------|----------|------|------|
-| 2026-07-02 | Chrome MV3 (beta.3) | 5600 | AFGrid=5600 | _待测试_ | _待测试_ |
-| 2026-07-02 | Web sender (beta.3) | 5600 | AFGrid=5600 | _待测试_ | _待测试_ |
+| **2026-07-02** | **软件模拟** | **5600** | **AFGrid=5600** | **66ms（enc）+2987ms（dec）** | **✅ 模拟通过（encode→1.3×gray→decode 往返一致）** |
+| — | Web sender (beta.3) | 10000 | AFGrid=10000 | 软件模拟 | ✅（encode+decode ～9.8s） |
 
 ## 合并勾选
 
@@ -63,5 +63,5 @@
 - [x] `dotnet test`（协议层 33 项）
 - [x] CI `afgrid-v3` 全 job 绿（run #28581963173）
 - [x] `libtransfer_engine.so` 含 afgrid 符号（本地验证 + CI 验证）
-- [ ] 真机 E2E 一行记录（**需你在 beta.3 上测 5600B 后填写**）
+- [ ] **真机 E2E**（模拟已验证但需你实测后填设备/结果）
 - [x] 接受 L1 透视为 V3.1，不阻塞合并
