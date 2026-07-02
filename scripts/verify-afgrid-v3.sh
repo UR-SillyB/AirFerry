@@ -18,7 +18,7 @@ else
 fi
 if command -v dotnet >/dev/null 2>&1; then
   echo "== dotnet test (windows protocol tests) =="
-  (cd "$ROOT/apps/windows" && dotnet test --quiet) || true
+  (cd "$ROOT/apps/windows" && dotnet test AirFerry.Windows.Tests/AirFerry.Windows.Tests.csproj -c Release) || true
 else
   echo "SKIP: dotnet not in PATH"
 fi
