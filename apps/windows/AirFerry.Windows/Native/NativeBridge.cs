@@ -157,8 +157,6 @@ internal static class NativeBridge
     [DllImport(LibName, CallingConvention = CallingConvention.Cdecl,
         EntryPoint = "airferry_receiver_crc32_known")]
     public static extern int ReceiverCrc32Known(IntPtr handle);
-}
-
     [DllImport(LibName, CallingConvention = CallingConvention.Cdecl,
         EntryPoint = "airferry_afgrid_decode")]
     public static extern nuint AfgridDecode(
@@ -172,4 +170,5 @@ internal static class NativeBridge
     [DllImport(LibName, CallingConvention = CallingConvention.Cdecl,
         EntryPoint = "airferry_afgrid_side_for_symbol_size")]
     public static extern uint AfgridSideForSymbolSize(uint symbolSize);
+
 }
