@@ -278,6 +278,7 @@ npm run preview        # 本地预览构建产物
 | 帧封装 | `core/qr-protocol/src/frame.rs:71,109` | `build` / `to_bytes` |
 | 会话 ID 派生（FNV-1a 128） | `core/qr-protocol/src/session.rs:23` | `derive`——必须与 TS 端位一致 |
 | 压缩分发 + 解压炸弹防护 | `core/qr-protocol/src/compress.rs:68,97` | `compress_with` / `decompress_with_limit` |
+| **AFGrid 自定义码** | `core/qr-protocol/src/afgrid/mod.rs` | 单大码；`symbol_size` 连续可调；默认取代 4 码 QR（feature `afgrid`） |
 | QR 矩阵（动态最小版本） | `core/qr-protocol/src/qr_render.rs:74` | `encode`：576B帧→V16，1088B帧→V23 |
 | **发送端帧流入口** | `core/transfer-engine/src/sender.rs:164` | `next_frame`：每16帧插描述符，首帧即描述符 |
 | 无限新鲜修复符号 | `core/transfer-engine/src/sender.rs:235` | `next_symbol_id`：源一遍→无限新修复 |

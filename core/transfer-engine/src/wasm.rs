@@ -89,7 +89,7 @@ impl SenderSessionWasm {
         }
         let frame = self.inner.next_frame().map_err(err_to_js)?;
         let bytes = frame.to_bytes();
-        let matrix = qr_protocol::qr_render::encode(&bytes).map_err(|e| {
+        let matrix = crate::matrix_encode::encode_frame_matrix(&bytes).map_err(|e| {
             JsValue::from_str(&format!("qr encode failed: {e:?}"))
         })?;
         out_side[0] = matrix.size as u32;
@@ -127,7 +127,7 @@ impl SenderSessionWasm {
                 }
             };
             let bytes = frame.to_bytes();
-            let matrix = match qr_protocol::qr_render::encode(&bytes) {
+            let matrix = match crate::matrix_encode::encode_frame_matrix(&bytes) {
                 Ok(m) => m,
                 Err(e) => {
                     android_log_wasm(&format!("next_qr_multi qr err: {e:?}"));
@@ -165,7 +165,7 @@ impl SenderSessionWasm {
         }
         let frame = self.inner.next_frame().map_err(err_to_js)?;
         let bytes = frame.to_bytes();
-        let matrix = qr_protocol::qr_render::encode(&bytes)
+        let matrix = crate::matrix_encode::encode_frame_matrix(&bytes)
             .map_err(|e| JsValue::from_str(&format!("qr encode failed: {e:?}")))?;
         let n = matrix.modules.len();
         if n > out_modules.len() {
@@ -209,7 +209,7 @@ impl SenderSessionWasm {
                 }
             };
             let bytes = frame.to_bytes();
-            let matrix = match qr_protocol::qr_render::encode(&bytes) {
+            let matrix = match crate::matrix_encode::encode_frame_matrix(&bytes) {
                 Ok(m) => m,
                 Err(e) => {
                     android_log_wasm(&format!("next_qr_multi_into qr err: {e:?}"));
@@ -288,7 +288,7 @@ pub fn encode_qr(frame_bytes: &[u8], out_side: &mut [u32]) -> Result<Vec<u8>, Js
     if out_side.is_empty() {
         return Err(JsValue::from_str("out_side buffer empty"));
     }
-    let matrix = qr_protocol::qr_render::encode(frame_bytes).map_err(|e| {
+    let matrix = crate::matrix_encode::encode_frame_matrix(frame_bytes).map_err(|e| {
         JsValue::from_str(&format!("qr encode failed: {e:?}"))
     })?;
     out_side[0] = matrix.size as u32;
@@ -298,3 +298,9 @@ pub fn encode_qr(frame_bytes: &[u8], out_side: &mut [u32]) -> Result<Vec<u8>, Js
 // serde_json is required by stats_json (serde_json::json!) and by the
 // serde-derived ObjectMeta re-exported here. The `wasm` feature implies
 // `serde` (see Cargo.toml), so no compile_error! guard is needed.
+
+/// AFGrid side length for a symbol size (UI preview).
+#[wasm_bindgen]
+pub fn afgrid_side_for_symbol_size(symbol_size: u32) -> u32 {
+    qr_protocol::afgrid::side_for_symbol_size(symbol_size) as u32
+}

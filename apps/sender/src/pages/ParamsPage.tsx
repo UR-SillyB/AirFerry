@@ -1,6 +1,12 @@
 /** Page 2: transfer parameters (redundancy, fps, symbol size, brightness). */
 import type { TransferConfig, TransferKind } from "@/types"
-import { SPEED_PRESETS, presetForSymbolSize } from "@/types"
+import {
+  AFGRID_PRESETS,
+  SYMBOL_SIZE_MAX,
+  SYMBOL_SIZE_MIN,
+  presetForSymbolSize,
+} from "@/types"
+import { afgridSideForSymbolSize, clampSymbolSize } from "@/wasm/afgrid"
 
 interface Props {
   /** Transfer kind — only affects the first KV row's label/list rendering. */
@@ -136,7 +142,7 @@ export function ParamsPage({
         <select
           value={presetForSymbolSize(config.symbolSize)?.id ?? "custom"}
           onChange={(e) => {
-            const preset = SPEED_PRESETS.find((p) => p.id === e.target.value)
+            const preset = AFGRID_PRESETS.find((p) => p.id === e.target.value)
             if (preset) {
               // Apply both the symbol size and the preset's recommended fps.
               // The user can still nudge fps independently afterwards.
@@ -144,7 +150,7 @@ export function ParamsPage({
             }
           }}
         >
-          {SPEED_PRESETS.map((p) => (
+          {AFGRID_PRESETS.map((p) => (
             <option key={p.id} value={p.id}>
               {p.label}
             </option>
@@ -195,7 +201,7 @@ export function ParamsPage({
       </div>
 
       <div className="field">
-        <label>同屏二维码数（多码加速）</label>
+        <label>同屏码数（QR 多码；AFGrid 默认单大码）</label>
         <select
           value={config.multiQr > 1 ? 4 : 1}
           onChange={(e) => onChange({ multiQr: Number(e.target.value) > 1 ? 4 : 1 })}

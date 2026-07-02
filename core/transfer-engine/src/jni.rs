@@ -396,3 +396,45 @@ fn android_log(msg: &str) {
 fn android_log(msg: &str) {
     eprintln!("[airferry] {msg}");
 }
+
+/// Decode AFGrid from grayscale Y plane. Returns frame wire bytes or null.
+#[no_mangle]
+pub extern "system" fn Java_com_airferry_app_nativelib_NativeBridge_afgridDecodeY(
+    mut env: JNIEnv,
+    _class: JClass,
+    y_plane: JByteArray,
+    width: jint,
+    height: jint,
+    row_stride: jint,
+    expected_side: jint,
+) -> jni::sys::jbyteArray {
+    let frame_vec: Vec<u8> = match env.convert_byte_array(&y_plane) {
+        Ok(v) => v,
+        Err(_) => return null_byte_array(&mut env),
+    };
+    let w = width.max(0) as usize;
+    let h = height.max(0) as usize;
+    let rs = row_stride.max(0) as usize;
+    let side = expected_side.max(0) as usize;
+    if w == 0 || h == 0 || side < 8 {
+        return null_byte_array(&mut env);
+    }
+    let gray = compact_luma(&frame_vec, w, h, rs);
+    let decoded = qr_protocol::afgrid::decode_from_gray(&gray, w, h, side);
+    match decoded {
+        Some(bytes) => fill_array(&mut env, &bytes),
+        None => null_byte_array(&mut env),
+    }
+}
+
+fn compact_luma(y: &[u8], w: usize, h: usize, rs: usize) -> Vec<u8> {
+    let mut out = vec![0u8; w * h];
+    for row in 0..h {
+        let src = row * rs;
+        let dst = row * w;
+        if src + w <= y.len() && dst + w <= out.len() {
+            out[dst..dst + w].copy_from_slice(&y[src..src + w]);
+        }
+    }
+    out
+}

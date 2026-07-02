@@ -24,6 +24,7 @@ pub mod receiver;
 pub mod progress;
 pub mod resume;
 pub mod descriptor;
+pub mod matrix_encode;
 pub mod time;
 
 // Platform bindings are gated on BOTH their feature flag AND their target, so

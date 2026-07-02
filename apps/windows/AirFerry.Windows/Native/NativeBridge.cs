@@ -158,3 +158,13 @@ internal static class NativeBridge
         EntryPoint = "airferry_receiver_crc32_known")]
     public static extern int ReceiverCrc32Known(IntPtr handle);
 }
+
+    [DllImport(LibName, CallingConvention = CallingConvention.Cdecl,
+        EntryPoint = "airferry_afgrid_decode")]
+    public static extern nuint AfgridDecode(
+        byte[] gray,
+        nuint width,
+        nuint height,
+        nuint expectedSide,
+        byte[] outBuf,
+        nuint outCap);

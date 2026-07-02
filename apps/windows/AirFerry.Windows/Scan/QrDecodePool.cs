@@ -51,6 +51,9 @@ public sealed class QrDecodePool : IDisposable
     /// </summary>
     private const int IngestBatch = 4;
 
+    /// <summary>AFGrid side length (0 = QR only). 226 ≈ symbol_size 5600.</summary>
+    public int AfgridExpectedSide { get; set; } = 226;
+
     /// <summary>
     /// Maximum frames buffered between producer and workers. Drop-newest when full.
     /// Mirrors Android's <c>ArrayBlockingQueue(workerCount + 2)</c>.
@@ -190,6 +193,12 @@ public sealed class QrDecodePool : IDisposable
                 // Build a luminance source straight over the extracted pixels —
                 // no need to reconstruct a Mat (the producer already extracted a
                 // compact width*height byte[] via Mat.GetArray).
+                byte[]? af = ZxingDecoder.DecodeAfgrid(frame.Pixels, frame.Width, frame.Height, AfgridExpectedSide);
+                if (af is not null)
+                {
+                    Interlocked.Increment(ref _decodedSymbols);
+                    pending.Add(af);
+                }
                 var source = new MatLuminanceSource(frame.Pixels, frame.Width, frame.Height);
                 List<byte[]> results = ZxingDecoder.DecodeMultiple(reader, source);
                 if (results.Count > 0)

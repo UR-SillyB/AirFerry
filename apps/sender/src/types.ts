@@ -73,6 +73,18 @@ export interface SpeedPresetDef {
   blurb: string
 }
 
+
+export const AFGRID_PRESETS: SpeedPresetDef[] = [
+  { id: "stable", label: "紧凑（1000B）", symbolSize: 1000, fps: 45, blurb: "AFGrid ~102 边" },
+  { id: "fast", label: "标准（2800B）", symbolSize: 2800, fps: 60, blurb: "AFGrid ~164 边" },
+  { id: "extreme", label: "大码（5600B）← 默认", symbolSize: 5600, fps: 60, blurb: "等价原 4×1400" },
+  { id: "aggressive", label: "超大（10000B）", symbolSize: 10000, fps: 60, blurb: "需好相机" },
+]
+
+export const SYMBOL_SIZE_MIN = 256
+export const SYMBOL_SIZE_MAX = 16384
+
+/** @deprecated QR 档位；AFGrid 请用 AFGRID_PRESETS */
 export const SPEED_PRESETS: SpeedPresetDef[] = [
   {
     id: "stable",
@@ -98,7 +110,7 @@ export const SPEED_PRESETS: SpeedPresetDef[] = [
   {
     id: "aggressive",
     label: "激进（1400B）← 默认",
-    symbolSize: 1400,
+    symbolSize: 5600,
     fps: 60,
     blurb: "V25，实测最快",
   },
@@ -106,20 +118,24 @@ export const SPEED_PRESETS: SpeedPresetDef[] = [
 
 /** Find the preset whose symbolSize matches, or null for a custom value. */
 export function presetForSymbolSize(symbolSize: number): SpeedPresetDef | null {
-  return SPEED_PRESETS.find((p) => p.symbolSize === symbolSize) ?? null
+  return (
+    AFGRID_PRESETS.find((p) => p.symbolSize === symbolSize) ??
+    SPEED_PRESETS.find((p) => p.symbolSize === symbolSize) ??
+    null
+  )
 }
 
 export const DEFAULT_CONFIG: TransferConfig = {
   redundancyPct: 5,
   fps: 60,
-  symbolSize: 1400,
+  symbolSize: 5600,
   brightness: 1.0,
   autoOptimize: true,
   // 4 = four codes tiled per frame (default). Multi-QR tiles N distinct symbols
   // on screen per tick for ~N× throughput, at the cost of each code being
   // smaller/harder to scan; the receiver has multi-QR decoding on by default.
   // The UI exposes this as an on/off switch (on → 4, off → 1).
-  multiQr: 4,
+  multiQr: 1,
   // Sub-pixel dithering for moiré — off by default (can cause flicker on
   // remote desktop / certain camera setups).
   ditherJitter: false

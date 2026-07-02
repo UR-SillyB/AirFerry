@@ -34,6 +34,8 @@ class QrDecodePool(
      * (`decode`) is retained for completeness but no longer selected by the UI.
      */
     private val multiMode: Boolean = true,
+    /** AFGrid matrix side (0 = try QR only). Default 226 ≈ symbol_size 5600. */
+    private val afgridExpectedSide: Int = 226,
 ) {
     /** A captured luminance frame; [y] is a pooled buffer (recycled after use). */
     private class YFrame(
@@ -193,7 +195,22 @@ class QrDecodePool(
                 break
             } ?: continue
             try {
-                if (multiMode) {
+                var afgridHit = false
+                if (afgridExpectedSide > 0) {
+                    val af = try {
+                        ZxingDecoder.decodeAfgridY(
+                            frame.y, frame.width, frame.height, frame.rowStride, afgridExpectedSide
+                        )
+                    } catch (e: Throwable) {
+                        null
+                    }
+                    if (af != null) {
+                        decodedFrames.incrementAndGet()
+                        pending.add(PendingSym(af, null))
+                        afgridHit = true
+                    }
+                }
+                if (!afgridHit && multiMode) {
                     // Multi-QR tracked pipeline:
                     //  1. Hot path: if we have per-code bboxes from the last lock,
                     //     decode each in a tight expanded window (ReadBarcode singular
@@ -209,7 +226,7 @@ class QrDecodePool(
                             pending.add(PendingSym(r.payload, r.bbox))
                         }
                     }
-                } else {
+                } else if (!afgridHit) {
                     val payload = decode(frame, bboxOut)
                     if (payload != null) {
                         // Single-code path: one decoded symbol per frame.
