@@ -49,4 +49,4 @@ jobs:
         run: |
           cargo ndk -t arm64-v8a -o apps/scanner/app/src/main/jniLibs \
             build -p transfer-engine --features jni,afgrid --release
-          nm apps/scanner/app/src/main/jniLibs/arm64-v8a/libtransfer_engine.so | grep -i afgrid || (echo "missing afgrid JNI symbols" && exit 1)
+          nm apps/scanner/app/src/main/jniLibs/arm64-v8a/libtransfer_engine.so | grep -E "afgridDecodeY|afgridSideForSymbolSize" || (echo "missing afgrid JNI symbols" && exit 1)
