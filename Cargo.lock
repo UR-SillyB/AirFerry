@@ -196,11 +196,12 @@ dependencies = [
 
 [[package]]
 name = "qr-protocol"
-version = "1.1.0-beta.1"
+version = "1.1.0-beta.3"
 dependencies = [
  "crc32fast",
  "qrcode",
  "raptorq-core",
+ "reed-solomon",
  "serde",
  "thiserror",
  "xz2",
@@ -239,12 +240,18 @@ dependencies = [
 
 [[package]]
 name = "raptorq-core"
-version = "1.1.0-beta.1"
+version = "1.1.0-beta.3"
 dependencies = [
  "raptorq",
  "serde",
  "thiserror",
 ]
+
+[[package]]
+name = "reed-solomon"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "13de68c877a77f35885442ac72c8beb7c2f0b09380c43b734b9d63d1db69ee54"
 
 [[package]]
 name = "same-file"
@@ -337,7 +344,7 @@ dependencies = [
 
 [[package]]
 name = "transfer-engine"
-version = "1.1.0-beta.1"
+version = "1.1.0-beta.3"
 dependencies = [
  "crc32fast",
  "jni",

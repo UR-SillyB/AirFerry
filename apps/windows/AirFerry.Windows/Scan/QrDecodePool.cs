@@ -1,6 +1,5 @@
 using System.Collections.Concurrent;
 using OpenCvSharp;
-using ZXing;
 
 namespace AirFerry.Windows.Scan;
 
@@ -50,6 +49,9 @@ public sealed class QrDecodePool : IDisposable
     /// cuts lock contention by this factor. Matches Android's <c>INGEST_BATCH</c>.
     /// </summary>
     private const int IngestBatch = 4;
+
+    /// <summary>AFGrid side length (0 = QR only). 226 ≈ symbol_size 5600.</summary>
+    public int AfgridExpectedSide { get; set; } = (int)Native.NativeBridge.AfgridSideForSymbolSize(5600);
 
     /// <summary>
     /// Maximum frames buffered between producer and workers. Drop-newest when full.
@@ -175,8 +177,7 @@ public sealed class QrDecodePool : IDisposable
 
     private void WorkerLoop(CancellationToken ct)
     {
-        // Per-worker reader (ZXing BarcodeReader is not thread-safe).
-        BarcodeReader<LuminanceSource> reader = ZxingDecoder.CreateReader();
+        // AFGrid only path: no ZXing reader needed (decode is via P/Invoke Rust).
         var pending = new List<byte[]>(IngestBatch);
 
         while (_running && !ct.IsCancellationRequested)
@@ -187,15 +188,12 @@ public sealed class QrDecodePool : IDisposable
             }
             try
             {
-                // Build a luminance source straight over the extracted pixels —
-                // no need to reconstruct a Mat (the producer already extracted a
-                // compact width*height byte[] via Mat.GetArray).
-                var source = new MatLuminanceSource(frame.Pixels, frame.Width, frame.Height);
-                List<byte[]> results = ZxingDecoder.DecodeMultiple(reader, source);
-                if (results.Count > 0)
+                // AFGrid only — 不回退 QR。解码失败 = 丢帧，由 RaptorQ 喷泉码兜底。
+                byte[]? af = ZxingDecoder.DecodeAfgrid(frame.Pixels, frame.Width, frame.Height, AfgridExpectedSide);
+                if (af is not null)
                 {
-                    Interlocked.Add(ref _decodedSymbols, results.Count);
-                    pending.AddRange(results);
+                    Interlocked.Increment(ref _decodedSymbols);
+                    pending.Add(af);
                 }
                 // Flush the batch under one lock acquire when it fills, or when
                 // the queue has run dry (drain eagerly so latency stays low).

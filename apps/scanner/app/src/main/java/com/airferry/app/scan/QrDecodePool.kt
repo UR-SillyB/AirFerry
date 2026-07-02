@@ -34,6 +34,8 @@ class QrDecodePool(
      * (`decode`) is retained for completeness but no longer selected by the UI.
      */
     private val multiMode: Boolean = true,
+    /** AFGrid matrix side (0 = try QR only). Default 226 ≈ symbol_size 5600. */
+    private val afgridExpectedSide: Int = 226,
 ) {
     /** A captured luminance frame; [y] is a pooled buffer (recycled after use). */
     private class YFrame(
@@ -165,10 +167,6 @@ class QrDecodePool(
     }
 
     private fun workerLoop() {
-        // Per-worker scratch for the native bbox write-back (decodeYRegionTracked
-        // fills [0..3]). Avoids allocating per frame and avoids cross-worker
-        // contention on a shared array.
-        val bboxOut = IntArray(4)
         // Per-worker batch of decoded symbols awaiting ingest. Decoded payloads
         // are accumulated here and flushed under a SINGLE acquire of [ingestLock]
         // once [INGEST_BATCH] symbols pile up. This cuts the lock acquire count
@@ -193,29 +191,18 @@ class QrDecodePool(
                 break
             } ?: continue
             try {
-                if (multiMode) {
-                    // Multi-QR tracked pipeline:
-                    //  1. Hot path: if we have per-code bboxes from the last lock,
-                    //     decode each in a tight expanded window (ReadBarcode singular
-                    //     per window) — avoids the full-frame finder scan entirely.
-                    //  2. Cold path: a periodic full-frame ReadBarcodes re-locks all
-                    //     code positions (every MULTI_FULL_DECODE_EVERY misses, or on
-                    //     the very first frame). This is the only place that pays for
-                    //     a whole-frame scan.
-                    val results = decodeMultiTracked(frame)
-                    if (results.isNotEmpty()) {
-                        decodedFrames.addAndGet(results.size.toLong())
-                        for (r in results) {
-                            pending.add(PendingSym(r.payload, r.bbox))
-                        }
+                // AFGrid only — 不回退 QR。解码失败 = 丢帧，由 RaptorQ 喷泉码兜底。
+                if (afgridExpectedSide > 0) {
+                    val af = try {
+                        ZxingDecoder.decodeAfgridY(
+                            frame.y, frame.width, frame.height, frame.rowStride, afgridExpectedSide
+                        )
+                    } catch (e: Throwable) {
+                        null
                     }
-                } else {
-                    val payload = decode(frame, bboxOut)
-                    if (payload != null) {
-                        // Single-code path: one decoded symbol per frame.
+                    if (af != null) {
                         decodedFrames.incrementAndGet()
-                        // bboxOut is reused next iteration, so snapshot it.
-                        pending.add(PendingSym(payload, bboxOut.copyOf()))
+                        pending.add(PendingSym(af, null))
                     }
                 }
                 // Flush the batch under one lock acquire when it fills, or when the

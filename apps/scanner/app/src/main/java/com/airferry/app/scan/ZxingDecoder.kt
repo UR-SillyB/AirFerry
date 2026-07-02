@@ -131,6 +131,25 @@ object ZxingDecoder {
             (b[o + 2].toInt() shl 16) or
             (b[o + 3].toInt() shl 24)
 
+
+    fun decodeAfgridY(
+        yPlane: ByteArray,
+        width: Int,
+        height: Int,
+        rowStride: Int,
+        expectedSide: Int,
+    ): ByteArray? {
+        return try {
+            com.airferry.app.nativelib.NativeBridge.afgridDecodeY(
+                yPlane, width, height, rowStride, expectedSide
+            )
+        } catch (_: UnsatisfiedLinkError) {
+            null
+        } catch (_: Exception) {
+            null
+        }
+    }
+
     private fun u32le(b: ByteArray, o: Int): Int =
         (b[o].toInt() and 0xFF) or
             ((b[o + 1].toInt() and 0xFF) shl 8) or

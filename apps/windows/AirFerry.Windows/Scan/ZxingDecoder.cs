@@ -129,4 +129,22 @@ public static class ZxingDecoder
         }
         return null;
     }
+
+    public static byte[]? DecodeAfgrid(byte[] gray, int width, int height, int expectedSide)
+    {
+        if (gray.Length < width * height || expectedSide < 8)
+        {
+            return null;
+        }
+        var outBuf = new byte[65536];
+        nuint n = Native.NativeBridge.AfgridDecode(
+            gray, (nuint)width, (nuint)height, (nuint)expectedSide, outBuf, (nuint)outBuf.Length);
+        if (n == 0 || n > (nuint)outBuf.Length)
+        {
+            return null;
+        }
+        var result = new byte[(int)n];
+        Array.Copy(outBuf, result, (int)n);
+        return result;
+    }
 }

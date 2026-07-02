@@ -1,6 +1,13 @@
 /** Page 2: transfer parameters (redundancy, fps, symbol size, brightness). */
 import type { TransferConfig, TransferKind } from "@/types"
-import { SPEED_PRESETS, presetForSymbolSize } from "@/types"
+import {
+  AFGRID_PRESETS,
+  SYMBOL_SIZE_MAX,
+  SYMBOL_SIZE_MIN,
+  presetForSymbolSize,
+} from "@/types"
+import { afgridSideForSymbolSize, clampSymbolSize, warmupAfgridSide } from "@/wasm/afgrid"
+import { useEffect, useState } from "react"
 
 interface Props {
   /** Transfer kind — only affects the first KV row's label/list rendering. */
@@ -51,6 +58,12 @@ export function ParamsPage({
   initializing
 }: Props) {
   const ratio = originalSize > 0 ? compressedSize / originalSize : 1
+
+  // 预热 AFGrid 边长公式（WASM），滑块预览依赖它。
+  const [, setSideReady] = useState(false)
+  useEffect(() => {
+    warmupAfgridSide().then(() => setSideReady(true))
+  }, [])
 
   // Pre-transfer ETA estimate (before encoder init).
   // Total frames ≈ source symbols × (1 + redundancy) + descriptor overhead.
@@ -136,7 +149,7 @@ export function ParamsPage({
         <select
           value={presetForSymbolSize(config.symbolSize)?.id ?? "custom"}
           onChange={(e) => {
-            const preset = SPEED_PRESETS.find((p) => p.id === e.target.value)
+            const preset = AFGRID_PRESETS.find((p) => p.id === e.target.value)
             if (preset) {
               // Apply both the symbol size and the preset's recommended fps.
               // The user can still nudge fps independently afterwards.
@@ -144,7 +157,7 @@ export function ParamsPage({
             }
           }}
         >
-          {SPEED_PRESETS.map((p) => (
+          {AFGRID_PRESETS.map((p) => (
             <option key={p.id} value={p.id}>
               {p.label}
             </option>
@@ -154,6 +167,45 @@ export function ParamsPage({
             <option value="custom">自定义（{config.symbolSize}B）</option>
           )}
         </select>
+      </div>
+
+      <div className="field">
+        <label>
+          每码数据量 (symbol_size): <strong>{config.symbolSize} B</strong>
+          {(() => {
+            const side = afgridSideForSymbolSize(config.symbolSize)
+            return (
+              <span className="muted">
+                {" "}→ AFGrid 边长约 {side || "…"} 模块
+                {side > 250 && <span className="warn"> （建议高分辨率摄像头）</span>}
+              </span>
+            )
+          })()}
+        </label>
+        <input
+          type="range"
+          min={SYMBOL_SIZE_MIN}
+          max={SYMBOL_SIZE_MAX}
+          step={64}
+          value={config.symbolSize}
+          onChange={(e) =>
+            onChange({ symbolSize: clampSymbolSize(Number(e.target.value)) })
+          }
+        />
+        <input
+          type="number"
+          min={SYMBOL_SIZE_MIN}
+          max={SYMBOL_SIZE_MAX}
+          step={64}
+          value={config.symbolSize}
+          onChange={(e) =>
+            onChange({ symbolSize: clampSymbolSize(Number(e.target.value)) })
+          }
+          style={{ width: 120, marginTop: 4 }}
+        />
+        <span className="muted">
+          {" "}吞吐约 {(config.symbolSize * config.fps / 1024).toFixed(0)} KiB/s（理论）
+        </span>
       </div>
 
       <div className="field">
@@ -195,7 +247,7 @@ export function ParamsPage({
       </div>
 
       <div className="field">
-        <label>同屏二维码数（多码加速）</label>
+        <label>同屏码数（QR 多码；AFGrid 默认单大码）</label>
         <select
           value={config.multiQr > 1 ? 4 : 1}
           onChange={(e) => onChange({ multiQr: Number(e.target.value) > 1 ? 4 : 1 })}

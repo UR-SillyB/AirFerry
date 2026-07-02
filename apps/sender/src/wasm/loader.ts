@@ -13,7 +13,11 @@
  * any non-string/URL/Request input straight to `WebAssembly.instantiate(buffer)`,
  * bypassing fetch entirely.
  */
-import init, { SenderSessionWasm, encode_qr } from "../../wasm-pkg/transfer_engine.js"
+import init, {
+  SenderSessionWasm,
+  encode_qr,
+  afgrid_side_for_symbol_size as afgridSideForSymbolSizeWasm,
+} from "../../wasm-pkg/transfer_engine.js"
 import { base64ToBuffer } from "./base64"
 
 let initPromise: Promise<void> | null = null
@@ -31,4 +35,4 @@ export function ensureWasm(): Promise<void> {
   return initPromise
 }
 
-export { SenderSessionWasm, encode_qr }
+export { SenderSessionWasm, encode_qr, afgridSideForSymbolSizeWasm }

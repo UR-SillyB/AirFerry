@@ -31,6 +31,8 @@ class SettingsActivity : ComponentActivity() {
     private fun SettingsScreen() {
         val prefs = remember { getSharedPreferences("airferry", MODE_PRIVATE) }
         var redundancy by remember { mutableFloatStateOf(prefs.getInt("default_redundancy", 5).toFloat()) }
+        var afgridSym by remember { mutableFloatStateOf(prefs.getInt("afgrid_symbol_size", 5600).toFloat()) }
+        val afgridSide = remember(afgridSym) { com.airferry.app.nativelib.NativeBridge.afgridSideForSymbolSize(afgridSym.toInt()) }
 
         Column(modifier = Modifier.fillMaxSize().background(BgDark)) {
             Text(
@@ -57,6 +59,28 @@ class SettingsActivity : ComponentActivity() {
                         },
                         valueRange = 5f..50f,
                         steps = 8,
+                        colors = SliderDefaults.colors(thumbColor = Accent, activeTrackColor = Accent)
+                    )
+                }
+            }
+
+
+            Card(
+                modifier = Modifier.fillMaxWidth().padding(16.dp),
+                shape = RoundedCornerShape(12.dp),
+                colors = CardDefaults.cardColors(containerColor = CardBg)
+            ) {
+                Column(modifier = Modifier.padding(20.dp)) {
+                    Text("AFGrid 每码数据量（与发送端一致）", color = TextSecondary, fontSize = 14.sp)
+                    Text("${afgridSym.toInt()} B → 边长 $afgridSide", color = TextPrimary, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                    Slider(
+                        value = afgridSym,
+                        onValueChange = { afgridSym = it },
+                        onValueChangeFinished = {
+                            prefs.edit().putInt("afgrid_symbol_size", afgridSym.toInt()).apply()
+                        },
+                        valueRange = 256f..16384f,
+                        steps = 20,
                         colors = SliderDefaults.colors(thumbColor = Accent, activeTrackColor = Accent)
                     )
                 }

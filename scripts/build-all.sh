@@ -73,13 +73,20 @@ build_scanner() {
   # 重命名为 AirFerry 后，旧 .so 的 JNI 符号还是 com.easytransfer.*，
   # 运行时 receiverCreate 抛 UnsatisfiedLinkError 直接闪退）。
   # 详见 docs/build-android.md。
-  info "编译 Rust JNI 库 (core/transfer-engine --features jni → jniLibs/arm64-v8a/) ..."
+  info "编译 Rust JNI 库 (core/transfer-engine --features jni,afgrid → jniLibs/arm64-v8a/) ..."
   cargo ndk -t arm64-v8a -o "$ROOT/apps/scanner/app/src/main/jniLibs" \
-    build -p transfer-engine --features jni --release 2>&1 | tail -3
+    build -p transfer-engine --features jni,afgrid --release 2>&1 | tail -3
   info "JNI 库编译完成 → apps/scanner/app/src/main/jniLibs/arm64-v8a/libtransfer_engine.so"
 
   cd "$ROOT/apps/scanner"
-  ANDROID_HOME="${ANDROID_HOME:-$HOME/Library/Android/sdk}"
+  # 与 apps/scanner/local.properties 对齐（Homebrew commandlinetools）
+  if [[ -f "$ROOT/apps/scanner/local.properties" ]]; then
+    SDK_DIR=$(grep '^sdk.dir=' "$ROOT/apps/scanner/local.properties" | cut -d= -f2-)
+    export ANDROID_HOME="${ANDROID_HOME:-$SDK_DIR}"
+  else
+    export ANDROID_HOME="${ANDROID_HOME:-$HOME/Library/Android/sdk}"
+  fi
+  source "$ROOT/scripts/env-android-ndk.sh" 2>/dev/null || true
   ./gradlew assembleRelease 2>&1 | tail -3 | while read -r line; do info "$line"; done
   info "扫码端构建完成 → apps/scanner/app/build/outputs/apk/release/app-release.apk"
 }

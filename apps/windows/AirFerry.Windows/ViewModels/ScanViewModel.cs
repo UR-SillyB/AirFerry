@@ -100,7 +100,7 @@ public partial class ScanViewModel : ObservableObject, IDisposable
 
         // The onDecoded callback runs under the pool's IngestLock. Returns true
         // when this symbol completes recovery so the pool stops ingesting.
-        _pool = new QrDecodePool(payload => OnDecoded(payload));
+        _pool = new QrDecodePool(payload => OnDecoded(payload)) { AfgridExpectedSide = AfgridSettings.ExpectedSide() };
         _pool.Start();
 
         // Producer thread: pull frames and enqueue them. The pool handles the

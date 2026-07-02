@@ -37,6 +37,7 @@ pub mod compress;
 pub mod chunker;
 pub mod session;
 pub mod qr_render;
+pub mod afgrid;
 
 pub use frame::{Frame, FrameHeader, FLAG_DESCRIPTOR, FRAME_FOOTER_SIZE, FRAME_HEADER_SIZE, MAGIC};
 pub use session::SessionId;

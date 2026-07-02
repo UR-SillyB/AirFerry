@@ -75,4 +75,15 @@ object NativeBridge {
      * files as "unverified".
      */
     external fun receiverCrc32Known(handle: Long): Int
+
+    /** AFGrid decode from Y plane (expected_side from sender symbol_size). */
+    external fun afgridDecodeY(
+        yPlane: ByteArray,
+        width: Int,
+        height: Int,
+        rowStride: Int,
+        expectedSide: Int,
+    ): ByteArray?
+
+    external fun afgridSideForSymbolSize(symbolSize: Int): Int
 }

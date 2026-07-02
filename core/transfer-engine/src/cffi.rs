@@ -423,3 +423,35 @@ mod tests {
         airferry_buffer_free(std::ptr::null_mut(), 0);
     }
 }
+
+/// Decode AFGrid from compact grayscale buffer. Returns bytes written to `out`, or 0 on miss.
+#[no_mangle]
+pub extern "C" fn airferry_afgrid_decode(
+    gray: *const u8,
+    width: usize,
+    height: usize,
+    expected_side: usize,
+    out: *mut u8,
+    out_cap: usize,
+) -> usize {
+    if gray.is_null() || out.is_null() || width == 0 || height == 0 || expected_side < 8 {
+        return 0;
+    }
+    let len = width * height;
+    let slice = unsafe { std::slice::from_raw_parts(gray, len) };
+    let Some(decoded) = qr_protocol::afgrid::decode_from_gray(slice, width, height, expected_side) else {
+        return 0;
+    };
+    if decoded.len() > out_cap {
+        return 0;
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(decoded.as_ptr(), out, decoded.len());
+    }
+    decoded.len()
+}
+
+#[no_mangle]
+pub extern "C" fn airferry_afgrid_side_for_symbol_size(symbol_size: u32) -> u32 {
+    qr_protocol::afgrid::side_for_symbol_size(symbol_size) as u32
+}

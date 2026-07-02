@@ -1,0 +1,54 @@
+name: afgrid-v3
+
+on:
+  push:
+    branches: [feature/afgrid-v3, main]
+    paths:
+      - 'core/**'
+      - 'apps/**'
+      - 'scripts/verify-afgrid-v3.sh'
+      - '.github/workflows/afgrid-v3.yml'
+  pull_request:
+    paths:
+      - 'core/**'
+      - 'apps/**'
+  workflow_dispatch:
+
+jobs:
+  rust-afgrid:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - run: ./scripts/verify-afgrid-v3.sh
+
+  dotnet-protocol:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - run: cd apps/windows && dotnet test AirFerry.Windows.Tests/AirFerry.Windows.Tests.csproj -c Release
+
+  android-jni-ndk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Add Android Rust target
+        run: rustup target add aarch64-linux-android
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --locked 2>/dev/null || cargo install cargo-ndk
+      - name: Setup Android NDK
+        id: setup-ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r26d
+      - name: Build libtransfer_engine.so (jni + afgrid)
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+        run: |
+          cargo ndk -t arm64-v8a -o apps/scanner/app/src/main/jniLibs \
+            build -p transfer-engine --features jni,afgrid --release
+          nm apps/scanner/app/src/main/jniLibs/arm64-v8a/libtransfer_engine.so | grep -E "afgridDecodeY|afgridSideForSymbolSize" || (echo "missing afgrid JNI symbols" && exit 1)
