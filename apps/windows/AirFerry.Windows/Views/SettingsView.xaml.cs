@@ -2,6 +2,7 @@ using System.IO;
 using System.Reflection;
 using System.Windows;
 using System.Windows.Controls;
+using AirFerry.Windows.Scan;
 
 namespace AirFerry.Windows.Views;
 
@@ -33,6 +34,9 @@ public partial class SettingsView : Page
         // Read version from the assembly (the csproj <Version>).
         Version? ver = Assembly.GetExecutingAssembly().GetName().Version;
         VersionText.Text = ver is not null ? $"版本 {ver.Major}.{ver.Minor}.{ver.Build}" : "版本 ?";
+        int sym = AfgridSettings.LoadSymbolSize();
+        AfgridSymbolSlider.Value = sym;
+        AfgridSymbolText.Text = $"{sym} B → 边长 {AfgridSettings.ExpectedSide()}";
     }
 
     private void Redundancy_Changed(object sender, RoutedPropertyChangedEventArgs<double> e)
@@ -81,9 +85,17 @@ public partial class SettingsView : Page
             {
                 Directory.CreateDirectory(dir);
             }
-            File.WriteAllText(SettingsPath, $"{{\"default_redundancy\":{value}}}");
+            int sym = AfgridSettings.LoadSymbolSize();
+            File.WriteAllText(SettingsPath, $"{{\"default_redundancy\":{value},\"afgrid_symbol_size\":{sym}}}");
         }
         catch { /* settings are best-effort; never block the UI */ }
+    }
+
+    private void AfgridSymbol_Changed(object sender, RoutedPropertyChangedEventArgs<double> e)
+    {
+        int value = (int)Math.Round(e.NewValue);
+        AfgridSettings.SaveSymbolSize(value);
+        AfgridSymbolText.Text = $"{value} B → 边长 {AfgridSettings.ExpectedSide()}";
     }
 
     private void Back_Click(object sender, RoutedEventArgs e) => NavigationService?.GoBack();

@@ -9,6 +9,7 @@
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />
             <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
@@ -42,7 +43,30 @@
             </StackPanel>
         </Border>
 
+
         <Border Grid.Row="2"
+                Background="{StaticResource CardBg}"
+                CornerRadius="12"
+                Padding="20"
+                Margin="0,0,0,16">
+            <StackPanel>
+                <TextBlock Text="AFGrid 每码数据量（与发送端一致）"
+                           FontSize="14"
+                           Foreground="{StaticResource TextSecondary}" />
+                <TextBlock x:Name="AfgridSymbolText"
+                           Text="5600 B"
+                           FontSize="20" FontWeight="Bold"
+                           Foreground="{StaticResource TextPrimary}"
+                           Margin="0,4,0,8" />
+                <Slider x:Name="AfgridSymbolSlider"
+                        Minimum="256" Maximum="16384"
+                        TickFrequency="1024" TickPlacement="BottomRight"
+                        Value="5600"
+                        ValueChanged="AfgridSymbol_Changed" />
+            </StackPanel>
+        </Border>
+
+        <Border Grid.Row="3"
                 Background="{StaticResource CardBg}"
                 CornerRadius="12"
                 Padding="20">
@@ -58,7 +82,7 @@
             </StackPanel>
         </Border>
 
-        <Button Grid.Row="4"
+        <Button Grid.Row="5"
                 Style="{StaticResource OutlinedButton}"
                 Content="‹ 返回"
                 Click="Back_Click" />

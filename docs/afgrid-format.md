@@ -77,3 +77,15 @@ cd apps/windows && dotnet test
 | Rust | `qr_protocol::afgrid::side_for_symbol_size` 单一公式 |
 
 解码时 `decode_from_gray` 在 expected_side ±12 模块内搜索，容忍轻微缩放误差。
+
+## 验证记录（开发机）
+
+| 检查项 | 结果 | 日期/说明 |
+|--------|------|-----------|
+| `./scripts/verify-afgrid-v3.sh` | ✅ 通过 | cargo afgrid + e2e + smoke |
+| `npm run wasm` | ✅ 曾通过 | 需发版前重跑 |
+| `libtransfer_engine.so` | ⚠️ 仓库内存在旧产物 | **须** `cargo ndk ... jni,afgrid` 后 `nm` 含 `afgrid` |
+| `dotnet test` | ⏳ 本机无 dotnet | Windows CI/本机执行 |
+| 真机 E2E 5600 | ⏳ 待人工 | 见 `docs/afgrid-merge-checklist.md` |
+
+合并前清单：**[afgrid-merge-checklist.md](./afgrid-merge-checklist.md)**
