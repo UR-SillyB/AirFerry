@@ -5,6 +5,7 @@ use crate::Frame;
 
 use super::ecc;
 use super::layout::{self, BORDER, MODE_WORD_LEN};
+use super::l1_gray;
 use super::mode_word::ModeWord;
 
 fn bits_to_bytes(modules: &[u8], side: usize) -> Vec<u8> {
@@ -34,7 +35,21 @@ pub fn decode_from_modules(modules: &[u8], side: usize) -> Result<Vec<u8>> {
         });
     }
     let raw = bits_to_bytes(modules, side);
-    let recovered = ecc::unprotect(&raw).ok_or(Error::FrameCrcMismatch)?;
+    let max_plen = raw.len().min(side * side / 8);
+    let mut recovered = None;
+    for plen in (MODE_WORD_LEN + 64)..=max_plen {
+        let need = ecc::protected_len(plen);
+        if need > raw.len() {
+            break;
+        }
+        if let Some(r) = ecc::unprotect(&raw[..need]) {
+            if r.len() == plen {
+                recovered = Some(r);
+                break;
+            }
+        }
+    }
+    let recovered = recovered.ok_or(Error::FrameCrcMismatch)?;
     if recovered.len() < MODE_WORD_LEN + 64 {
         return Err(Error::BufferTooShort {
             need: MODE_WORD_LEN + 64,
@@ -50,6 +65,7 @@ pub fn decode_from_modules(modules: &[u8], side: usize) -> Result<Vec<u8>> {
     Ok(frame_bytes.to_vec())
 }
 
+/// Try decode with side hint; searches ±12 modules (sender/receiver size drift).
 pub fn decode_from_gray(
     gray: &[u8],
     width: usize,
@@ -59,21 +75,15 @@ pub fn decode_from_gray(
     if gray.len() < width * height || expected_side < 8 {
         return None;
     }
-    let mut sum: u64 = 0;
-    for &p in gray.iter().take(width * height) {
-        sum += p as u64;
-    }
-    let thresh = (sum / (width * height) as u64) as u8;
-    let mut modules = vec![0u8; expected_side * expected_side];
-    for y in 0..expected_side {
-        for x in 0..expected_side {
-            let sx = x * width / expected_side;
-            let sy = y * height / expected_side;
-            let idx = sy * width + sx;
-            modules[y * expected_side + x] = if gray[idx] < thresh { 1 } else { 0 };
+    let lo = expected_side.saturating_sub(12).max(16);
+    let hi = expected_side + 12;
+    for side in lo..=hi {
+        let modules = l1_gray::sample_modules(gray, width, height, side);
+        if let Ok(frame) = decode_from_modules(&modules, side) {
+            return Some(frame);
         }
     }
-    decode_from_modules(&modules, expected_side).ok()
+    None
 }
 
 pub fn expected_side_for_symbol_size(symbol_size: u32) -> usize {

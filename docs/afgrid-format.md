@@ -35,3 +35,45 @@ cargo test -- --ignored bench_afgrid_vs_qr_5600   # 性能对比（可选）
 
 - 导航：`AGENTS.md` §3（afgrid 模块）
 - 帧格式不变：`docs/qr-frame-format.md`
+
+## V3 实现状态（feature/afgrid-v3）
+
+| 项 | 状态 |
+|----|------|
+| 发送端 AFGrid 编码 + 连续 symbol_size UI | ✅ |
+| 接收端 Rust 解码（L1 Otsu/中心裁剪 + ±12 side 搜索） | ✅ 软件/合成图 E2E |
+| 接收端 expected_side ↔ symbol_size（JNI/C ABI + 设置页） | ✅ |
+| 真机透视/反光鲁棒 L1（imageproc 单应性） | ⏳ 未实现，依赖后续迭代 |
+| WASM / Android .so 本机构建 | 需在目标机执行下方命令 |
+
+### 构建与验证
+
+```bash
+# Rust 测试（含 AFGrid 合成灰度往返）
+cargo test -p qr-protocol afgrid
+cargo test -p transfer-engine afgrid_encode_smoke
+
+# 发送端 WASM（须 Node + sender 依赖）
+cd apps/sender && npm run wasm
+
+# Android JNI（须 NDK）
+cargo ndk -t arm64-v8a -o apps/scanner/app/src/main/jniLibs \
+  build -p transfer-engine --features jni,afgrid --release
+
+# Windows（须在 Windows + .NET 8）
+./scripts/build-windows.ps1
+cd apps/windows && dotnet test
+```
+
+真机 E2E：发送端 symbol_size=5600、接收端设置同步后扫码；边长由 `afgridSideForSymbolSize` 与发送端公式一致。
+
+## symbol_size 联动
+
+| 端 | 机制 |
+|----|------|
+| 发送 | `TransferConfig.symbolSize` + `afgridSideForSymbolSize()` 预览 |
+| Android 接收 | 设置 → `afgrid_symbol_size` → `NativeBridge.afgridSideForSymbolSize` → `QrDecodePool.afgridExpectedSide` |
+| Windows 接收 | `QrDecodePool.AfgridExpectedSide` 默认 `AfgridSideForSymbolSize(5600)`（可改属性） |
+| Rust | `qr_protocol::afgrid::side_for_symbol_size` 单一公式 |
+
+解码时 `decode_from_gray` 在 expected_side ±12 模块内搜索，容忍轻微缩放误差。

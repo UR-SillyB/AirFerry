@@ -84,4 +84,6 @@ object NativeBridge {
         rowStride: Int,
         expectedSide: Int,
     ): ByteArray?
+
+    external fun afgridSideForSymbolSize(symbolSize: Int): Int
 }

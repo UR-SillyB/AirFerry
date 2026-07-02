@@ -168,3 +168,8 @@ internal static class NativeBridge
         nuint expectedSide,
         byte[] outBuf,
         nuint outCap);
+
+    [DllImport(LibName, CallingConvention = CallingConvention.Cdecl,
+        EntryPoint = "airferry_afgrid_side_for_symbol_size")]
+    public static extern uint AfgridSideForSymbolSize(uint symbolSize);
+}

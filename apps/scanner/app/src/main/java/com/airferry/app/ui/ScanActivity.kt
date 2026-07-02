@@ -499,9 +499,13 @@ class ScanActivity : ComponentActivity() {
             // throughput. Single-code senders decode just as well (the multi path
             // returns one result), so there's no need for a user-facing toggle — it
             // worked regardless of the switch position, and only added confusion.
+            val prefs = getSharedPreferences("airferry", MODE_PRIVATE)
+            val sym = prefs.getInt("afgrid_symbol_size", 5600)
+            val side = com.airferry.app.nativelib.NativeBridge.afgridSideForSymbolSize(sym)
             p = QrDecodePool(
                 onDecoded = { payload, bbox -> handleFrameAsync(payload, bbox) },
                 multiMode = true,
+                afgridExpectedSide = side,
             ).also { it.start() }
             decodePool = p
         }

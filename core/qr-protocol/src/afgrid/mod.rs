@@ -6,6 +6,7 @@ mod decode;
 mod ecc;
 mod encode;
 mod layout;
+mod l1_gray;
 mod matrix;
 mod mode_word;
 
@@ -46,6 +47,25 @@ mod tests {
         )
         .unwrap();
         assert_eq!(back, bytes);
+    }
+
+    #[test]
+    fn gray_roundtrip_synthetic() {
+        let sym = 512u32;
+        let frame = Frame::build(1u128, 0, 0, 0, 1, 10, sym, 1, 0, &vec![0x42; sym as usize]);
+        let bytes = frame.to_bytes();
+        let m = encode(&bytes).unwrap();
+        let side = m.size;
+        let mut gray = vec![255u8; side * side];
+        for y in 0..side {
+            for x in 0..side {
+                if m.modules[y * side + x] {
+                    gray[y * side + x] = 0;
+                }
+            }
+        }
+        let decoded = decode_from_gray(&gray, side, side, side).expect("gray decode");
+        assert_eq!(decoded, bytes);
     }
 
     #[test]

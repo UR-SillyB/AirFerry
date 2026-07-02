@@ -52,7 +52,7 @@ public sealed class QrDecodePool : IDisposable
     private const int IngestBatch = 4;
 
     /// <summary>AFGrid side length (0 = QR only). 226 ≈ symbol_size 5600.</summary>
-    public int AfgridExpectedSide { get; set; } = 226;
+    public int AfgridExpectedSide { get; set; } = (int)Native.NativeBridge.AfgridSideForSymbolSize(5600);
 
     /// <summary>
     /// Maximum frames buffered between producer and workers. Drop-newest when full.

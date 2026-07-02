@@ -450,3 +450,8 @@ pub extern "C" fn airferry_afgrid_decode(
     }
     decoded.len()
 }
+
+#[no_mangle]
+pub extern "C" fn airferry_afgrid_side_for_symbol_size(symbol_size: u32) -> u32 {
+    qr_protocol::afgrid::side_for_symbol_size(symbol_size) as u32
+}

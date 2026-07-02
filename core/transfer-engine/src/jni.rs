@@ -438,3 +438,12 @@ fn compact_luma(y: &[u8], w: usize, h: usize, rs: usize) -> Vec<u8> {
     }
     out
 }
+
+#[no_mangle]
+pub extern "system" fn Java_com_airferry_app_nativelib_NativeBridge_afgridSideForSymbolSize(
+    _env: JNIEnv,
+    _class: JClass,
+    symbol_size: jint,
+) -> jint {
+    qr_protocol::afgrid::side_for_symbol_size(symbol_size.max(0) as u32) as jint
+}

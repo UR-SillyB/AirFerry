@@ -95,11 +95,13 @@ pub fn unprotect(blob: &[u8]) -> Option<Vec<u8>> {
         pos += 2;
         let npar = rs_parity_len(data_len);
         let total = data_len + npar;
-        if pos + total > blob.len() {
+        let pad = (INTERLEAVE - (total % INTERLEAVE)) % INTERLEAVE;
+        let ilen = total + pad;
+        if pos + ilen > blob.len() {
             return None;
         }
-        let mut codeword = deinterleave(&blob[pos..pos + total], INTERLEAVE, total);
-        pos += total;
+        let mut codeword = deinterleave(&blob[pos..pos + ilen], INTERLEAVE, total);
+        pos += ilen;
         if !decode_chunk(&mut codeword, data_len) {
             return None;
         }
@@ -114,7 +116,8 @@ pub fn protected_len(payload_len: usize) -> usize {
     while off < payload_len {
         let data_len = (off + MAX_RS_DATA).min(payload_len) - off;
         let npar = rs_parity_len(data_len);
-        total += 2 + data_len + npar;
+        let pad = (INTERLEAVE - ((data_len + npar) % INTERLEAVE)) % INTERLEAVE;
+        total += 2 + data_len + npar + pad;
         off += data_len;
     }
     total
