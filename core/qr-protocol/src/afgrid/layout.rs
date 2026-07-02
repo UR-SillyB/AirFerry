@@ -1,7 +1,6 @@
 //! Matrix layout: border + data region.
 
 use super::ecc;
-use super::mode_word::ModeWord;
 
 pub const BORDER: usize = 1;
 pub const MODE_WORD_LEN: usize = 2;

@@ -65,7 +65,8 @@ pub fn decode_from_modules(modules: &[u8], side: usize) -> Result<Vec<u8>> {
     Ok(frame_bytes.to_vec())
 }
 
-/// Try decode with side hint; searches ±12 modules (sender/receiver size drift).
+/// Try decode with side hint. 先试 expected_side（最可能正确），再向外搜索
+/// ±12 模块容忍 sender/receiver 大小漂移。失败 = 丢帧，由 RaptorQ 兜底。
 pub fn decode_from_gray(
     gray: &[u8],
     width: usize,
@@ -75,12 +76,21 @@ pub fn decode_from_gray(
     if gray.len() < width * height || expected_side < 8 {
         return None;
     }
-    let lo = expected_side.saturating_sub(12).max(16);
-    let hi = expected_side + 12;
-    for side in lo..=hi {
-        let modules = l1_gray::sample_modules(gray, width, height, side);
-        if let Ok(frame) = decode_from_modules(&modules, side) {
-            return Some(frame);
+    // 先试精确 side（常见情况，避免无谓搜索开销）
+    let modules = l1_gray::sample_modules(gray, width, height, expected_side);
+    if let Ok(frame) = decode_from_modules(&modules, expected_side) {
+        return Some(frame);
+    }
+    // 再向外搜索 ±12 模块
+    for delta in 1..=12 {
+        for side in [expected_side + delta, expected_side.saturating_sub(delta)] {
+            if side < 16 {
+                continue;
+            }
+            let modules = l1_gray::sample_modules(gray, width, height, side);
+            if let Ok(frame) = decode_from_modules(&modules, side) {
+                return Some(frame);
+            }
         }
     }
     None

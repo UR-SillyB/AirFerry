@@ -52,25 +52,24 @@ export function QrStream({
   const [fullscreen, setFullscreen] = useState(false)
 
   // Pre-allocated, reused-across-frames WASM scratch buffers. The hot path
-  // runs at up to 60fps×4 codes = 240 encodes/s; allocating fresh TypedArrays
-  // each tick heaps up GC pressure that shows up as rAF jitter. These buffers
-  // live for the component's whole lifetime and are fed to the zero-copy
-  // `next_qr_into` / `next_qr_multi_into` exports, which write directly into
-  // them and return only the byte count.
+  // runs at up to 60fps; allocating fresh TypedArrays each tick heaps up GC
+  // pressure that shows up as rAF jitter. These buffers live for the
+  // component's whole lifetime and are fed to the zero-copy `next_qr_into`
+  // export, which writes directly into them and returns only the byte count.
   //
-  // Sizing: the largest QR is Version 40 = 177×177 = 31329 modules. The single
-  // buffer holds one matrix; the multi buffer holds the flat [u32 count][per
-  // matrix: u32 side + side² bytes] layout for up to 4 matrices.
-  // ⚠ The subarray views handed to drawMatrix are only valid for the current
+  // Sizing: AFGrid side grows with symbol_size. symbol_size_max=16384 →
+  // side≈378 → 378²=142884 modules. We size for the absolute ceiling with
+  // headroom so any legal symbol_size never overflows. (QR V40=177²=31329 is
+  // now a strict subset.) Rounding up to 160000 keeps alignment simple.
+  //
+  // ⚠ The subarray view handed to drawMatrix is only valid for the current
   // tick — the next tick overwrites the backing buffer. The render path reads
-  // them to the Canvas within the same tick (putImageData is synchronous), so
-  // this is safe; never store these views across frames.
-  const MAX_QR_SIDE = 177
-  const MAX_QR_MODULES = MAX_QR_SIDE * MAX_QR_SIDE
-  const matrixBufRef = useRef(new Uint8Array(MAX_QR_MODULES))
+  // it to the Canvas within the same tick (putImageData is synchronous), so
+  // this is safe; never store the view across frames.
+  const MAX_MATRIX_SIDE = 400           // > 378 (symbol_size=16384 ceiling)
+  const MAX_MATRIX_MODULES = MAX_MATRIX_SIDE * MAX_MATRIX_SIDE // 160000
+  const matrixBufRef = useRef(new Uint8Array(MAX_MATRIX_MODULES))
   const sideBufRef = useRef(new Uint32Array(1))
-  // Multi buffer: u32 count + (u32 side + side²) per matrix, up to 4 matrices.
-  const multiBufRef = useRef(new Uint8Array(4 + 4 * (4 + MAX_QR_MODULES)))
 
   // Refs for callback props so the render function's useCallback identity stays
   // stable across parent re-renders. Without this, an inline arrow function
@@ -90,51 +89,24 @@ export function QrStream({
     const ctx = canvas.getContext("2d", { alpha: false })
     if (!ctx) return
 
-    // Decide single vs multi-QR mode. multiQr<=1 keeps the proven single-code
-    // path (one next_qr call, fills the whole canvas). multiQr>=2 requests N
-    // distinct symbols in one WASM call and tiles them in a grid.
-    const wantMulti = multiQr >= 2
-
-    // Collect the matrices to render this tick. Each entry: [side, modules].
-    // Uses the zero-copy `*_into` exports: the WASM side writes directly into
-    // our reused scratch buffers (matrixBufRef / multiBufRef), and we slice
-    // views into them — no per-tick allocation.
+    // AFGrid: always single large code (fills the whole canvas). multiQr is
+    // ignored — the single-code path is the only path under AFGrid.
     type Matrix = { side: number; modules: Uint8Array }
-    let matrices: Matrix[]
+    let matrix: Matrix
     try {
-      if (!wantMulti) {
-        const n = session.next_qr_into(matrixBufRef.current, sideBufRef.current)
-        const side = sideBufRef.current[0]
-        // subarray is a zero-copy view; valid only until the next tick.
-        matrices = [{ side, modules: matrixBufRef.current.subarray(0, n) }]
-      } else {
-        const written = session.next_qr_multi_into(
-          multiQr,
-          multiBufRef.current
-        )
-        matrices = parseMultiQrBuf(multiBufRef.current, written)
-        if (matrices.length === 0) {
-          // Nothing produced this tick; skip the redraw.
-          return
-        }
-      }
+      const n = session.next_qr_into(matrixBufRef.current, sideBufRef.current)
+      const side = sideBufRef.current[0]
+      // subarray is a zero-copy view; valid only until the next tick.
+      matrix = { side, modules: matrixBufRef.current.subarray(0, n) }
     } catch (e) {
       onErrorRef.current?.(e as Error)
       return
     }
 
-    // Layout: single → fills canvas; multi → grid (2 → 1×2, 4 → 2×2, else row).
-    const n = matrices.length
-    const cols = n === 2 ? 2 : n === 4 ? 2 : n
-    const rows = Math.ceil(n / cols)
     const cssSize = canvas.clientWidth || 480 // Fallback to 480 if clientWidth is 0
     const dpr = window.devicePixelRatio || 1
     const px = Math.max(cssSize * dpr, 256)
     // Only resize the backing store when the target size actually changes.
-    // Reassigning canvas.width/height every frame clears the surface and
-    // forces the compositor to re-allocate its buffer — under sustained 60fps
-    // load this degrades into periodic stalls (observed FPS sliding 60→40 as
-    // the session runs longer). Caching the size keeps the GPU buffer stable.
     if (px !== lastPxRef.current) {
       lastPxRef.current = px
       canvas.width = px
@@ -145,25 +117,10 @@ export function QrStream({
     ctx.fillStyle = "#ffffff"
     ctx.fillRect(0, 0, px, px)
 
-    // Each code occupies an equal square cell, packed edge-to-edge. No inter-cell
-    // gap is needed: drawMatrix() already renders a quiet zone inside every cell,
-    // so two adjacent codes already have 2 modules of white between their data.
-    const sep = wantMulti ? 1 : 0
-    const cellW = Math.floor((px - sep * (cols - 1)) / cols)
-    const cellH = Math.floor((px - sep * (rows - 1)) / rows)
-    const cell = Math.min(cellW, cellH)
-    for (let i = 0; i < n; i++) {
-      const c = i % cols
-      const r = Math.floor(i / cols)
-      const ox = c * (cell + sep)
-      const oy = r * (cell + sep)
-      // Sub-pixel dithering: shift each code by ±1px per frame to break
-      // moiré patterns.  ±1px is kept as a whole integer so Canvas2D stays
-      // on the GPU-accelerated integer path (sub-pixel fillRect is ~5× slower).
-      const djx = ditherJitter ? Math.round((Math.random() - 0.5) * 2) : 0
-      const djy = ditherJitter ? Math.round((Math.random() - 0.5) * 2) : 0
-      drawMatrix(ctx, matrices[i].modules, matrices[i].side, ox + djx, oy + djy, cell, 4)
-    }
+    // Single code fills the entire canvas.
+    const djx = ditherJitter ? Math.round((Math.random() - 0.5) * 2) : 0
+    const djy = ditherJitter ? Math.round((Math.random() - 0.5) * 2) : 0
+    drawMatrix(ctx, matrix.modules, matrix.side, djx, djy, px, 4)
 
     // Stats throttle: ~4 Hz.
     const now = performance.now()
@@ -182,7 +139,7 @@ export function QrStream({
         /* ignore */
       }
     }
-  }, [session, multiQr])
+  }, [session])
 
   // Apply brightness/contrast optimization at the canvas element level. This is
   // a constant for a given (brightness, autoOptimize) combination, so set it
@@ -332,22 +289,3 @@ function drawMatrix(
  * over the same buffer the WASM call returned (the caller's scratch buffer),
  * so no extra copy is made beyond the slice views into modules.
  */
-function parseMultiQrBuf(
-  buf: Uint8Array,
-  len: number = buf.length
-): { side: number; modules: Uint8Array }[] {
-  if (len < 4) return []
-  const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength)
-  const count = dv.getUint32(0, true) // little-endian
-  const out: { side: number; modules: Uint8Array }[] = []
-  let pos = 4
-  for (let i = 0; i < count && pos + 4 <= len; i++) {
-    const side = dv.getUint32(pos, true)
-    pos += 4
-    const n = side * side
-    if (pos + n > len) break // truncated; stop
-    out.push({ side, modules: buf.subarray(pos, pos + n) })
-    pos += n
-  }
-  return out
-}

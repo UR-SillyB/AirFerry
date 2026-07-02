@@ -23,7 +23,7 @@ android {
         minSdk = 29          // Android 10+
         targetSdk = 34
         versionCode = 2
-        versionName = "1.1.0-beta.2"
+        versionName = "1.1.0-beta.3"
 
         // Native build: ZXing-C++ via CMake + JNI bridge.
         externalNativeBuild {

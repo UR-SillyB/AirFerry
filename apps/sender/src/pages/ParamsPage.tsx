@@ -6,7 +6,8 @@ import {
   SYMBOL_SIZE_MIN,
   presetForSymbolSize,
 } from "@/types"
-import { afgridSideForSymbolSize, clampSymbolSize } from "@/wasm/afgrid"
+import { afgridSideForSymbolSize, clampSymbolSize, warmupAfgridSide } from "@/wasm/afgrid"
+import { useEffect, useState } from "react"
 
 interface Props {
   /** Transfer kind — only affects the first KV row's label/list rendering. */
@@ -57,6 +58,12 @@ export function ParamsPage({
   initializing
 }: Props) {
   const ratio = originalSize > 0 ? compressedSize / originalSize : 1
+
+  // 预热 AFGrid 边长公式（WASM），滑块预览依赖它。
+  const [, setSideReady] = useState(false)
+  useEffect(() => {
+    warmupAfgridSide().then(() => setSideReady(true))
+  }, [])
 
   // Pre-transfer ETA estimate (before encoder init).
   // Total frames ≈ source symbols × (1 + redundancy) + descriptor overhead.
@@ -160,6 +167,45 @@ export function ParamsPage({
             <option value="custom">自定义（{config.symbolSize}B）</option>
           )}
         </select>
+      </div>
+
+      <div className="field">
+        <label>
+          每码数据量 (symbol_size): <strong>{config.symbolSize} B</strong>
+          {(() => {
+            const side = afgridSideForSymbolSize(config.symbolSize)
+            return (
+              <span className="muted">
+                {" "}→ AFGrid 边长约 {side || "…"} 模块
+                {side > 250 && <span className="warn"> （建议高分辨率摄像头）</span>}
+              </span>
+            )
+          })()}
+        </label>
+        <input
+          type="range"
+          min={SYMBOL_SIZE_MIN}
+          max={SYMBOL_SIZE_MAX}
+          step={64}
+          value={config.symbolSize}
+          onChange={(e) =>
+            onChange({ symbolSize: clampSymbolSize(Number(e.target.value)) })
+          }
+        />
+        <input
+          type="number"
+          min={SYMBOL_SIZE_MIN}
+          max={SYMBOL_SIZE_MAX}
+          step={64}
+          value={config.symbolSize}
+          onChange={(e) =>
+            onChange({ symbolSize: clampSymbolSize(Number(e.target.value)) })
+          }
+          style={{ width: 120, marginTop: 4 }}
+        />
+        <span className="muted">
+          {" "}吞吐约 {(config.symbolSize * config.fps / 1024).toFixed(0)} KiB/s（理论）
+        </span>
       </div>
 
       <div className="field">

@@ -1,28 +1,29 @@
-/** AFGrid side length for symbol_size (matches Rust layout formula). */
+/**
+ * AFGrid 辅助：symbol_size 边界 + 边长预览（Rust WASM 单一事实源）。
+ */
+import { ensureWasm, afgridSideForSymbolSizeWasm } from "./loader"
 
-const MIN = 256
-const MAX = 16384
+export const AFGRID_SYMBOL_MIN = 256
+export const AFGRID_SYMBOL_MAX = 16384
 
 export function clampSymbolSize(n: number): number {
-  return Math.max(MIN, Math.min(MAX, Math.round(n)))
+  return Math.max(
+    AFGRID_SYMBOL_MIN,
+    Math.min(AFGRID_SYMBOL_MAX, Math.round(n))
+  )
 }
 
-/** Approximate matrix side (modules per edge) for AFGrid single code. */
+let sideFn: ((symbolSize: number) => number) | null = null
+let warmupPromise: Promise<void> | null = null
+
 export function afgridSideForSymbolSize(symbolSize: number): number {
-  const frameLen = 64 + symbolSize
-  const payloadLen = 2 + frameLen
-  const chunks = Math.ceil(payloadLen / 200)
-  let prot = 2
-  let off = 0
-  while off < payloadLen) {
-    const dataLen = Math.min(200, payloadLen - off)
-    const npar = Math.max(2, Math.ceil(dataLen * 0.1))
-    prot += 2 + dataLen + npar
-    off += dataLen
-  }
-  const bits = prot * 8
-  const d = Math.max(8, Math.ceil(Math.sqrt(bits)))
-  return d + 2
+  return sideFn ? sideFn(symbolSize) : 0
 }
 
-export { MIN as AFGRID_SYMBOL_MIN, MAX as AFGRID_SYMBOL_MAX }
+export function warmupAfgridSide(): Promise<void> {
+  if (warmupPromise) return warmupPromise
+  warmupPromise = ensureWasm().then(() => {
+    sideFn = (s: number) => afgridSideForSymbolSizeWasm(s) >>> 0
+  })
+  return warmupPromise
+}

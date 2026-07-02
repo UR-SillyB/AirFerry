@@ -1,6 +1,5 @@
 using System.Collections.Concurrent;
 using OpenCvSharp;
-using ZXing;
 
 namespace AirFerry.Windows.Scan;
 
@@ -178,8 +177,7 @@ public sealed class QrDecodePool : IDisposable
 
     private void WorkerLoop(CancellationToken ct)
     {
-        // Per-worker reader (ZXing BarcodeReader is not thread-safe).
-        BarcodeReader<LuminanceSource> reader = ZxingDecoder.CreateReader();
+        // AFGrid only path: no ZXing reader needed (decode is via P/Invoke Rust).
         var pending = new List<byte[]>(IngestBatch);
 
         while (_running && !ct.IsCancellationRequested)
@@ -190,21 +188,12 @@ public sealed class QrDecodePool : IDisposable
             }
             try
             {
-                // Build a luminance source straight over the extracted pixels —
-                // no need to reconstruct a Mat (the producer already extracted a
-                // compact width*height byte[] via Mat.GetArray).
+                // AFGrid only — 不回退 QR。解码失败 = 丢帧，由 RaptorQ 喷泉码兜底。
                 byte[]? af = ZxingDecoder.DecodeAfgrid(frame.Pixels, frame.Width, frame.Height, AfgridExpectedSide);
                 if (af is not null)
                 {
                     Interlocked.Increment(ref _decodedSymbols);
                     pending.Add(af);
-                }
-                var source = new MatLuminanceSource(frame.Pixels, frame.Width, frame.Height);
-                List<byte[]> results = ZxingDecoder.DecodeMultiple(reader, source);
-                if (results.Count > 0)
-                {
-                    Interlocked.Add(ref _decodedSymbols, results.Count);
-                    pending.AddRange(results);
                 }
                 // Flush the batch under one lock acquire when it fills, or when
                 // the queue has run dry (drain eagerly so latency stays low).
