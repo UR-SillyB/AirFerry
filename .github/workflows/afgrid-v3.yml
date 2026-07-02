@@ -36,6 +36,8 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
+      - name: Add Android Rust target
+        run: rustup target add aarch64-linux-android
       - name: Install cargo-ndk
         run: cargo install cargo-ndk --locked 2>/dev/null || cargo install cargo-ndk
       - name: Setup Android NDK
