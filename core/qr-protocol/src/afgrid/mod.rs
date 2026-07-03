@@ -64,7 +64,7 @@ mod tests {
                 }
             }
         }
-        let decoded = decode_from_gray(&gray, side, side, side).expect("gray decode");
+        let decoded = decode_from_gray(&gray, side, side, side, side).expect("gray decode");
         assert_eq!(decoded, bytes);
     }
 
@@ -94,7 +94,7 @@ mod tests {
                 }
             }
         }
-        let decoded = decode_from_gray(&gray, canvas_side, canvas_side, code_side)
+        let decoded = decode_from_gray(&gray, canvas_side, canvas_side, canvas_side, code_side)
             .expect("投影法应能定位嵌入背景的 AFGrid");
         assert_eq!(decoded, bytes);
     }
