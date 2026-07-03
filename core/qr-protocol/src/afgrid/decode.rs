@@ -1,11 +1,12 @@
-//! Decode: module grid or gray buffer → frame bytes.
+//! Decode: 灰度 → 帧字节。
+//! 性能：只试精确 expected_side 一次（不搜索），中心 ROI 单次扫描。
 
 use crate::{Error, Result};
 use crate::Frame;
 
 use super::ecc;
-use super::layout::{self, BORDER, MODE_WORD_LEN};
 use super::l1_gray;
+use super::layout::{self, BORDER, MODE_WORD_LEN};
 use super::mode_word::ModeWord;
 
 fn bits_to_bytes(modules: &[u8], side: usize) -> Vec<u8> {
@@ -65,35 +66,22 @@ pub fn decode_from_modules(modules: &[u8], side: usize) -> Result<Vec<u8>> {
     Ok(frame_bytes.to_vec())
 }
 
-/// Try decode with side hint. 先试 expected_side（最可能正确），再向外搜索
-/// ±12 模块容忍 sender/receiver 大小漂移。失败 = 丢帧，由 RaptorQ 兜底。
+/// 只试精确 expected_side 一次（真机性能：不搜索 ±12，失败 = 丢帧由 RaptorQ 兜底）。
 pub fn decode_from_gray(
     gray: &[u8],
     width: usize,
     height: usize,
+    stride: usize,
     expected_side: usize,
 ) -> Option<Vec<u8>> {
     if gray.len() < width * height || expected_side < 8 {
         return None;
     }
-    // 先试精确 side（常见情况，避免无谓搜索开销）
-    let modules = l1_gray::sample_modules(gray, width, height, expected_side);
-    if let Ok(frame) = decode_from_modules(&modules, expected_side) {
-        return Some(frame);
+    let mut modules = vec![0u8; expected_side * expected_side];
+    if !l1_gray::sample_center_roi(gray, width, height, stride, expected_side, &mut modules) {
+        return None;
     }
-    // 再向外搜索 ±12 模块
-    for delta in 1..=12 {
-        for side in [expected_side + delta, expected_side.saturating_sub(delta)] {
-            if side < 16 {
-                continue;
-            }
-            let modules = l1_gray::sample_modules(gray, width, height, side);
-            if let Ok(frame) = decode_from_modules(&modules, side) {
-                return Some(frame);
-            }
-        }
-    }
-    None
+    decode_from_modules(&modules, expected_side).ok()
 }
 
 pub fn expected_side_for_symbol_size(symbol_size: u32) -> usize {
