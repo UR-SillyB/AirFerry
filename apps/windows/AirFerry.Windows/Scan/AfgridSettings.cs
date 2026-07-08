@@ -4,7 +4,7 @@ namespace AirFerry.Windows.Scan;
 
 public static class AfgridSettings
 {
-    private const int DefaultSymbolSize = 5600;
+    private const int DefaultSymbolSize = 1000;
     private static readonly string SettingsPath = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
         "AirFerry", "settings.json");

@@ -500,7 +500,7 @@ class ScanActivity : ComponentActivity() {
             // returns one result), so there's no need for a user-facing toggle — it
             // worked regardless of the switch position, and only added confusion.
             val prefs = getSharedPreferences("airferry", MODE_PRIVATE)
-            val sym = prefs.getInt("afgrid_symbol_size", 5600)
+            val sym = prefs.getInt("afgrid_symbol_size", 1000)
             val side = com.airferry.app.nativelib.NativeBridge.afgridSideForSymbolSize(sym)
             p = QrDecodePool(
                 onDecoded = { payload, bbox -> handleFrameAsync(payload, bbox) },
@@ -636,6 +636,7 @@ class ScanActivity : ComponentActivity() {
     }
 
     private var lastUiUpdate = 0L
+    @Volatile private var handleCount: Long = 0L
     private var completedHandled = false
     /** Once recovery completes, stop feeding the native receiver so the
      *  main-thread assemble() (a `&` borrow) can't race a worker ingest (`&mut`). */
@@ -661,6 +662,10 @@ class ScanActivity : ComponentActivity() {
      *  *accepts* the symbol as new (RaptorQ dedup passed), the code's activity
      *  timestamp is recorded for the per-code status indicator. */
     private fun handleFrameAsync(payload: ByteArray, bbox: IntArray?) {
+        val _hn = synchronized(this) { handleCount++; handleCount }
+        if (_hn % 30 == 0L) {
+            android.util.Log.e("airferry", "DIAG handleFrame #" + _hn + " len=" + payload.size + " stopped=" + ingestStopped.get())
+        }
         // After completion, drop further frames: the main thread is (or will be)
         // calling assemble() on the receiver, which must not run concurrently
         // with another ingest. This runs under the pool's ingest lock, so the

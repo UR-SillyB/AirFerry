@@ -415,12 +415,12 @@ pub extern "system" fn Java_com_airferry_app_nativelib_NativeBridge_afgridDecode
     let w = width.max(0) as usize;
     let h = height.max(0) as usize;
     let side = expected_side.max(0) as usize;
-    if w == 0 || h == 0 || side < 8 || frame_vec.len() < w * h {
+    let rs = row_stride.max(0) as usize;
+    let rs2 = if rs > 0 { rs } else { w };
+    if w == 0 || h == 0 || side < 8 || frame_vec.len() < rs2 * h {
         return null_byte_array(&mut env);
     }
-    // 直接用 Y 平面前 w*h 字节（忽略 rowStride padding，sample_center_roi 只读
-    // 中心 ROI 且按 width 步进——padding 行会被越界检查跳过）。
-    let rs = row_stride.max(0) as usize;
+    // 直接传 Y 平面（含 rowStride padding），sample_center_roi 按 stride 步进。
     let decoded = qr_protocol::afgrid::decode_from_gray(&frame_vec, w, h, rs, side);
     match decoded {
         Some(bytes) => fill_array(&mut env, &bytes),

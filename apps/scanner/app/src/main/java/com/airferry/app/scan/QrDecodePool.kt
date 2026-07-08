@@ -200,6 +200,10 @@ class QrDecodePool(
                     } catch (e: Throwable) {
                         null
                     }
+                    val _dn = decodedFrames.get()
+                    if (_dn % 60 == 0L) {
+                        android.util.Log.e("airferry", "DECODE side=" + afgridExpectedSide + " ok=" + (af != null) + " f#" + _dn)
+                    }
                     if (af != null) {
                         decodedFrames.incrementAndGet()
                         pending.add(PendingSym(af, null))

@@ -77,7 +77,7 @@ export interface SpeedPresetDef {
 export const AFGRID_PRESETS: SpeedPresetDef[] = [
   { id: "stable", label: "紧凑（1000B）", symbolSize: 1000, fps: 45, blurb: "AFGrid ~102 边" },
   { id: "fast", label: "标准（2800B）", symbolSize: 2800, fps: 60, blurb: "AFGrid ~164 边" },
-  { id: "extreme", label: "大码（5600B）← 默认", symbolSize: 5600, fps: 60, blurb: "等价原 4×1400" },
+  { id: "extreme", label: "大码（5600B）← 默认", symbolSize: 1000, fps: 60, blurb: "等价原 4×1400" },
   { id: "aggressive", label: "超大（10000B）", symbolSize: 10000, fps: 60, blurb: "需好相机" },
 ]
 
@@ -110,7 +110,7 @@ export const SPEED_PRESETS: SpeedPresetDef[] = [
   {
     id: "aggressive",
     label: "激进（1400B）← 默认",
-    symbolSize: 5600,
+    symbolSize: 1000,
     fps: 60,
     blurb: "V25，实测最快",
   },
@@ -128,7 +128,7 @@ export function presetForSymbolSize(symbolSize: number): SpeedPresetDef | null {
 export const DEFAULT_CONFIG: TransferConfig = {
   redundancyPct: 5,
   fps: 60,
-  symbolSize: 5600,
+  symbolSize: 1000,
   brightness: 1.0,
   autoOptimize: true,
   // 4 = four codes tiled per frame (default). Multi-QR tiles N distinct symbols

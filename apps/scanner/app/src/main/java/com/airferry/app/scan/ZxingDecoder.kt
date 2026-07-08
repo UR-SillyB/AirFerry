@@ -143,9 +143,11 @@ object ZxingDecoder {
             com.airferry.app.nativelib.NativeBridge.afgridDecodeY(
                 yPlane, width, height, rowStride, expectedSide
             )
-        } catch (_: UnsatisfiedLinkError) {
+        } catch (e: UnsatisfiedLinkError) {
+            android.util.Log.e("airferry", "AFGRID UnsatisfiedLinkError: " + e.message)
             null
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            android.util.Log.e("airferry", "AFGRID exception: " + e.message)
             null
         }
     }

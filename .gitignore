@@ -66,3 +66,6 @@ release/
 
 # Local agent working directories (session memory, scratch)
 .workbuddy/
+
+# ZCode agent tool artifacts
+.zcode/

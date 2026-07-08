@@ -93,8 +93,16 @@ pub fn unprotect(blob: &[u8]) -> Option<Vec<u8>> {
         }
         let data_len = u16::from_be_bytes([blob[pos], blob[pos + 1]]) as usize;
         pos += 2;
+        // 防御：垃圾输入的 data_len 可能超大。GF(256) codeword 上限 255，
+        // data_len ≤ MAX_RS_DATA(200) + npar ≤ 222 < 255。超限直接判失败。
+        if data_len == 0 || data_len > MAX_RS_DATA {
+            return None;
+        }
         let npar = rs_parity_len(data_len);
         let total = data_len + npar;
+        if total > 255 {
+            return None;
+        }
         let pad = (INTERLEAVE - (total % INTERLEAVE)) % INTERLEAVE;
         let ilen = total + pad;
         if pos + ilen > blob.len() {

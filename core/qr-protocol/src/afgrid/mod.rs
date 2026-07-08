@@ -68,6 +68,24 @@ mod tests {
         assert_eq!(decoded, bytes);
     }
 
+    /// 真机噪声：raw 全随机字节，绝不能 panic（只能返回 Err/None）。
+    #[test]
+    fn garbage_no_panic() {
+        // 各种长度的垃圾 raw
+        for len in [100, 256, 500, 1000, 5000, 50000] {
+            let garbage: Vec<u8> = (0..len).map(|i| (i * 37 + 13) as u8).collect();
+            // decode_from_modules 不应 panic
+            let _ = decode_from_modules(&garbage, ((len as f64).sqrt() as usize).max(10));
+        }
+        // 全随机灰度图 + 合理 side，decode_from_gray 不应 panic
+        let mut gray = vec![0u8; 1080 * 1920];
+        for (i, b) in gray.iter_mut().enumerate() {
+            *b = (i as u8).wrapping_mul(7);
+        }
+        let _ = decode_from_gray(&gray, 1080, 1920, 1080, 227);
+        let _ = decode_from_gray(&gray, 1080, 1920, 1920, 227);
+    }
+
     #[test]
     fn side_for_5600() {
         let s = side_for_symbol_size(5600);

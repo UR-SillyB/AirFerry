@@ -90,6 +90,7 @@ class ReceiverSessionManager {
     private var mismatchStreak: Int = 0
     /// True once at least one symbol has been accepted (no re-init after that).
     private var everAccepted: Boolean = false
+    @Volatile private var ingestCount: Long = 0L
 
     val isInitialized: Boolean get() = initialized
 
@@ -138,7 +139,15 @@ class ReceiverSessionManager {
      * refresh cadence for the full snapshot.
      */
     fun ingest(frameBytes: ByteArray): IngestStatus? {
-        val header = parseHeader(frameBytes) ?: return null
+        val header = parseHeader(frameBytes)
+        if (header == null) {
+            android.util.Log.e("airferry", "DIAG ingest: parseHeader null len=" + frameBytes.size)
+            return null
+        }
+        val _dn = synchronized(this) { ingestCount++; ingestCount }
+        if (_dn % 30 == 0L) {
+            android.util.Log.e("airferry", "DIAG ingest: desc=" + ((header.flags and 1) != 0) + " init=" + initialized + " sessionLo=0x" + java.lang.Long.toHexString(header.sessionIdLo) + " #" + _dn)
+        }
 
         // Cache estimated total symbols from first frame for approximate progress
         if (estimatedTotalSymbols == 0 && header.totalSymbols > 0L) {

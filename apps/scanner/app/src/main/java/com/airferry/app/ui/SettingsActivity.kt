@@ -31,7 +31,7 @@ class SettingsActivity : ComponentActivity() {
     private fun SettingsScreen() {
         val prefs = remember { getSharedPreferences("airferry", MODE_PRIVATE) }
         var redundancy by remember { mutableFloatStateOf(prefs.getInt("default_redundancy", 5).toFloat()) }
-        var afgridSym by remember { mutableFloatStateOf(prefs.getInt("afgrid_symbol_size", 5600).toFloat()) }
+        var afgridSym by remember { mutableFloatStateOf(prefs.getInt("afgrid_symbol_size", 1000).toFloat()) }
         val afgridSide = remember(afgridSym) { com.airferry.app.nativelib.NativeBridge.afgridSideForSymbolSize(afgridSym.toInt()) }
 
         Column(modifier = Modifier.fillMaxSize().background(BgDark)) {

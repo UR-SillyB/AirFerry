@@ -38,6 +38,10 @@ class QrStreamAnalyzer(
             // camera bind (a portrait phone is almost always 90°), so writing it
             // every frame is cheap and race-free (last-write-wins, all equal).
             pool.setAnalysisRotation(image.imageInfo.rotationDegrees)
+            val _n = submittedCount.incrementAndGet()
+            if (_n % 30 == 0L) {
+                android.util.Log.e("airferry", "DIAG analyze: " + image.width + "x" + image.height + " rs=" + plane.rowStride + " #" + _n)
+            }
             pool.submit(plane.buffer, image.width, image.height, plane.rowStride)
         } catch (e: Exception) {
             // Narrowed from Throwable: an OutOfMemoryError from a large frame
@@ -55,5 +59,6 @@ class QrStreamAnalyzer(
         private const val TAG = "QrStreamAnalyzer"
         /** Set true after the first frame logs the real delivered resolution. */
         private var loggedActualResolution = false
+        private val submittedCount = java.util.concurrent.atomic.AtomicLong(0)
     }
 }
