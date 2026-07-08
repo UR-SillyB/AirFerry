@@ -217,3 +217,65 @@ code { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 11px; 
 .compress-step.skipped .compress-step-icon { color: var(--color-text-muted); opacity: 0.5; }
 .compress-step.skipped .compress-step-label { color: var(--color-text-muted); text-decoration: line-through; opacity: 0.6; }
 @keyframes compress-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+
+/* Text tab: saved drafts + save dialog */
+.text-drafts-panel { margin-top: 24px; padding-top: 16px; border-top: 1px solid var(--color-border); }
+.text-drafts-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 8px; }
+.text-draft-load { flex: 1; min-width: 0; border: none; background: transparent; cursor: pointer; text-align: left; padding: 0; font: inherit; color: inherit; }
+.text-draft-load:hover .file-list-text strong { color: var(--color-primary); }
+.text-draft-filename-input {
+  display: block; width: 100%; margin-top: 0; padding: 10px 12px;
+  border: none; border-radius: 0;
+  font-size: 14px; background: transparent; color: var(--color-text);
+}
+.modal-backdrop {
+  position: fixed; inset: 0; z-index: 1000;
+  background: rgba(0, 0, 0, 0.45); display: flex; align-items: center; justify-content: center; padding: 16px;
+}
+.modal-card {
+  width: 100%; max-width: 400px; padding: 20px;
+  background: var(--color-surface, #fff); border-radius: var(--radius-md, 12px);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.2);
+}
+.btn-link {
+  border: none; background: transparent; padding: 0; font: inherit; font-size: inherit;
+  color: var(--color-primary); cursor: pointer; text-decoration: underline;
+}
+.file-list-item.text-draft-active { border-color: var(--color-primary); background: var(--color-primary-light); }
+.modal-card-save .modal-save-title { margin: 0 0 12px; font-size: 16px; font-weight: 600; }
+.modal-actions-row {
+  display: flex; flex-direction: row; gap: 10px; margin-top: 16px;
+}
+.modal-actions-row .btn { flex: 1; margin: 0; }
+.text-draft-filename-field {
+  display: flex; align-items: stretch; margin-top: 0;
+  border: 1px solid var(--color-border); border-radius: var(--radius-sm);
+  overflow: hidden; background: var(--color-bg);
+}
+.text-draft-filename-field .text-draft-filename-input {
+  flex: 1; margin: 0; border: none; border-radius: 0;
+}
+.text-draft-filename-suffix {
+  display: flex; align-items: center; padding: 0 12px;
+  font-size: 14px; color: var(--color-text-muted);
+  background: var(--color-bg);
+  border-left: 1px solid var(--color-border);
+  user-select: none;
+}
+/* No default blue focus ring on click (keyboard users: subtle focus-visible on primary actions). */
+.text-draft-actions .btn:focus,
+.text-draft-actions .btn:focus-visible,
+.modal-actions-row .btn:focus,
+.modal-actions-row .btn:focus-visible {
+  outline: none;
+  box-shadow: none;
+}
+.text-draft-filename-field .text-draft-filename-input:focus {
+  outline: none;
+  box-shadow: none;
+}
+.text-draft-filename-field:focus-within {
+  border-color: var(--color-border);
+  box-shadow: none;
+}
+

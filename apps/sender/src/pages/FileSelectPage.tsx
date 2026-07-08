@@ -4,14 +4,22 @@
  * A top-level Tab switches between "发送文件" (file) and "发送文字" (text):
  *  - file Tab: drag-drop / folder-walk / browse (unchanged, supports multiple
  *    files and folders; ≥2 are bundled downstream).
- *  - text Tab: a textarea; the typed string is wrapped in the `ETTEXTv1` magic
- *    (`text.ts`) downstream and sent exactly like a file.
+ *  - text Tab: textarea + IndexedDB named drafts; batch send → plain .txt bundle;
+ *    single send → `ETTEXTv1` (`text.ts`).
  *
  * Both kinds converge into one `PreparedPayload` after the compress worker
  * runs, so params/play/stats are shared.
  */
-import { useCallback, useRef, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import type { TransferKind } from "@/types"
+import {
+  deleteDraft,
+  draftsToFiles,
+  listDrafts,
+  normalizeDraftFilename,
+  saveDraft,
+  type TextDraft,
+} from "@/storage/textDrafts"
 
 interface Props {
   /** Current transfer kind (which Tab is active). */
@@ -24,8 +32,10 @@ interface Props {
   onKindChange: (kind: TransferKind) => void
   /** File Tab: a discrete file selection (replace or clear) → triggers the worker. */
   onSelected: (files: File[]) => void
-  /** Text Tab: a submitted text (the "下一步" button) → triggers the worker. */
+  /** Text Tab: a submitted text (ETTEXTv1 single message) → triggers the worker. */
   onTextEntered: (text: string) => void
+  /** Text Tab: saved drafts as plain .txt files (bundle when ≥2). */
+  onSendDraftsAsFiles: (files: File[]) => void
 }
 
 function formatBytes(n: number): string {
@@ -43,6 +53,23 @@ function totalSize(files: File[]): number {
 function utf8Bytes(s: string): number {
   return new TextEncoder().encode(s).length
 }
+
+/** Default save name: first 10 chars of content + local timestamp. */
+function suggestDraftFilename(content: string): string {
+  const t = content.trim()
+  const prefix =
+    [...t]
+      .slice(0, 10)
+      .join("")
+      .replace(/[\\/:*?"<>|]/g, "_")
+      .replace(/\s+/g, " ")
+      .trim() || "草稿"
+  const now = new Date()
+  const pad = (n: number) => String(n).padStart(2, "0")
+  const time = `${pad(now.getMonth() + 1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`
+  return `${prefix}_${time}`
+}
+
 
 /**
  * Recursively walk a dropped DataTransferItem (file or directory entry) and
@@ -80,6 +107,7 @@ export function FileSelectPage({
   onKindChange,
   onSelected,
   onTextEntered,
+  onSendDraftsAsFiles,
 }: Props) {
   const fileInputRef = useRef<HTMLInputElement | null>(null)
   const [dragging, setDragging] = useState(false)
@@ -278,38 +306,161 @@ export function FileSelectPage({
           )}
         </>
       ) : (
-        <TextTab initialText={text} onSubmit={onTextEntered} />
+        <TextTab
+          initialText={text}
+          onSubmit={onTextEntered}
+          onSendDraftsAsFiles={onSendDraftsAsFiles}
+        />
       )}
     </div>
   )
 }
 
 /**
- * The text input surface: a textarea with a live byte estimate and a submit
- * button.
- *
- * Editing is kept LOCAL (component state) so we don't re-run the compressor on
- * every keystroke; the parent's `text` is only the *submitted* value. The
- * "下一步" button is the discrete trigger that fires `onSubmit`, mirroring how a
- * file selection is a discrete action that fires the file pipeline.
+ * Text input + IndexedDB drafts. Single-message send uses ETTEXTv1; batch send
+ * uses saved drafts as plain .txt files (bundle when ≥2).
  */
 function TextTab({
   initialText,
   onSubmit,
+  onSendDraftsAsFiles,
 }: {
   initialText: string
   onSubmit: (text: string) => void
+  onSendDraftsAsFiles: (files: File[]) => void
 }) {
   const [text, setText] = useState(initialText)
-  // +8 for the ETTEXTv1 magic prepended downstream.
+  const [drafts, setDrafts] = useState<TextDraft[]>([])
+  const [draftError, setDraftError] = useState<string | null>(null)
+  const [saveOpen, setSaveOpen] = useState(false)
+  const [saveName, setSaveName] = useState("")
+  const [saving, setSaving] = useState(false)
+  /** When set, save overwrites this draft instead of creating a new row. */
+  const [loadedDraftId, setLoadedDraftId] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (!loadedDraftId) setText(initialText)
+  }, [initialText, loadedDraftId])
+
+  const refreshDrafts = useCallback(async () => {
+    try {
+      setDrafts(await listDrafts())
+      setDraftError(null)
+    } catch (e) {
+      setDraftError((e as Error).message || "无法读取草稿（可能已禁用存储）")
+      setDrafts([])
+    }
+  }, [])
+
+  useEffect(() => {
+    void refreshDrafts()
+  }, [refreshDrafts])
+
+  useEffect(() => {
+    if (!saveOpen) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && !saving) setSaveOpen(false)
+    }
+    document.addEventListener("keydown", onKey)
+    return () => document.removeEventListener("keydown", onKey)
+  }, [saveOpen, saving])
+
   const payloadBytes = text.length === 0 ? 0 : utf8Bytes(text) + 8
   const charCount = [...text].length
   const canSubmit = text.trim().length > 0
+  const normalizedSaveName = normalizeDraftFilename(saveName)
+  const canOpenSave = canSubmit
+  const canConfirmSave = canSubmit && normalizedSaveName.length > 0
+
+  const openSave = () => {
+    const loaded = loadedDraftId ? drafts.find((d) => d.id === loadedDraftId) : undefined
+    setSaveName(loaded ? loaded.name.replace(/\.txt$/i, "") : suggestDraftFilename(text))
+    setSaveOpen(true)
+    setDraftError(null)
+    ;(document.activeElement as HTMLElement | null)?.blur()
+  }
+
+  const handleSaveConfirm = async () => {
+    if (!canConfirmSave) return
+    setSaving(true)
+    try {
+      const saved = await saveDraft(saveName, text, {
+        updateId: loadedDraftId ?? undefined,
+      })
+      await refreshDrafts()
+      setText("")
+      setLoadedDraftId(null)
+      setSaveOpen(false)
+      setSaveName("")
+    } catch (e) {
+      setDraftError((e as Error).message || String(e))
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const handleRemoveDraft = async (id: string) => {
+    try {
+      await deleteDraft(id)
+      if (loadedDraftId === id) setLoadedDraftId(null)
+      await refreshDrafts()
+    } catch (e) {
+      setDraftError((e as Error).message || String(e))
+    }
+  }
+
+  const loadDraftIntoEditor = (d: TextDraft) => {
+    setText(d.content)
+    setLoadedDraftId(d.id)
+    setDraftError(null)
+  }
+
+  const startNewDraft = () => {
+    setText("")
+    setLoadedDraftId(null)
+    setDraftError(null)
+  }
+
+  /**
+   * Unified send:
+   *  - no drafts + typed text → ETTEXTv1 single message (receiver can copy)
+   *  - any draft → bundle all drafts as .txt (current typed text is folded in
+   *    as a temp entry so unsaved input isn't lost on Send)
+   */
+  const handleSend = () => {
+    const hasText = canSubmit
+    const hasDrafts = drafts.length > 0
+    if (!hasText && !hasDrafts) return
+
+    if (hasText && !hasDrafts) {
+      onSubmit(text)
+      return
+    }
+
+    const all = hasText
+      ? [
+          ...drafts,
+          {
+            id: "__current__",
+            name: "当前文字.txt",
+            content: text,
+            savedAt: Date.now(),
+          } as TextDraft,
+        ]
+      : drafts
+    onSendDraftsAsFiles(draftsToFiles(all))
+  }
+
+  const hasAnyContent = canSubmit || drafts.length > 0
+  const sendCount = drafts.length + (canSubmit ? 1 : 0)
+
   return (
     <div className="text-input-wrap">
       <textarea
         className="text-input"
-        placeholder={"在此输入要发送的文字…\n\n扫码端接收后可直接复制。"}
+        placeholder={
+          "在此输入要发送的文字…\n\n可保存为命名草稿；点「发送」：仅编辑区有字且无草稿时为文字消息，否则打包为 .txt。"
+        }
         value={text}
         onChange={(e) => setText(e.target.value)}
         autoFocus
@@ -319,14 +470,117 @@ function TextTab({
         <span>{charCount} 字</span>
         <span className="muted">· 约 {formatBytes(payloadBytes)}</span>
       </div>
+
+      {draftError && (
+        <p className="hint" style={{ color: "var(--color-error)", marginTop: 8 }}>
+          {draftError}
+        </p>
+      )}
+
+      {loadedDraftId && (
+        <p className="hint" style={{ marginTop: 8 }}>
+          正在编辑已保存草稿 ·{" "}
+          <button type="button" className="btn-link" onClick={startNewDraft}>
+            新建一条
+          </button>
+        </p>
+      )}
+
+      <div className="text-draft-actions" style={{ marginTop: 12 }}>
+        <button type="button" className="btn secondary" style={{ width: "100%" }} disabled={!canOpenSave} onClick={openSave}>
+          {loadedDraftId ? "保存（覆盖当前草稿）" : "保存草稿"}
+        </button>
+      </div>
+
       <button
         className="btn primary"
-        style={{ marginTop: 16 }}
-        disabled={!canSubmit}
-        onClick={() => onSubmit(text)}
+        style={{ marginTop: 16, width: "100%" }}
+        disabled={!hasAnyContent}
+        onClick={handleSend}
+        title={
+          drafts.length > 0
+            ? `打包 ${sendCount} 条为 .txt`
+            : canSubmit
+              ? "单条文字消息，接收端可复制"
+              : undefined
+        }
       >
-        下一步：准备传输
+        发送
       </button>
+
+      {drafts.length > 0 && (
+        <div className="text-drafts-panel">
+          <div className="text-drafts-head">
+            <p className="hint" style={{ margin: 0 }}>
+              已保存 {drafts.length} 条 · 点击「发送」将打包为多个 .txt 文件
+            </p>
+          </div>
+          <ul className="file-list">
+            {drafts.map((d) => (
+              <li
+                key={d.id}
+                className={`file-list-item${loadedDraftId === d.id ? " text-draft-active" : ""}`}
+              >
+                <button
+                  type="button"
+                  className="file-list-name text-draft-load"
+                  onClick={() => loadDraftIntoEditor(d)}
+                  title="载入到编辑区"
+                >
+                  <span className="file-list-ico">📝</span>
+                  <span className="file-list-text">
+                    <strong>{d.name}</strong>
+                    <span className="muted"> {formatBytes(utf8Bytes(d.content))}</span>
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  className="file-list-remove"
+                  title="删除草稿"
+                  onClick={() => void handleRemoveDraft(d.id)}
+                >
+                  ✕
+                </button>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {saveOpen && (
+        <div className="modal-backdrop" role="presentation" onClick={() => !saving && setSaveOpen(false)}>
+          <div className="modal-card modal-card-save" role="dialog" aria-labelledby="save-draft-title" onClick={(e) => e.stopPropagation()}>
+            <h3 id="save-draft-title" className="modal-save-title">
+              保存为
+            </h3>
+            <div className="text-draft-filename-field">
+              <input
+                id="draft-filename"
+                className="text-draft-filename-input"
+                type="text"
+                value={saveName}
+                onChange={(e) => setSaveName(e.target.value)}
+                aria-label="文件名"
+                autoFocus
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && canConfirmSave && !saving) void handleSaveConfirm()
+                }}
+              />
+              <span className="text-draft-filename-suffix" aria-hidden>
+                .txt
+              </span>
+            </div>
+            <div className="modal-actions-row">
+              <button type="button" className="btn secondary" disabled={saving} onClick={() => setSaveOpen(false)}>
+                取消
+              </button>
+              <button type="button" className="btn primary" disabled={!canConfirmSave || saving} onClick={() => void handleSaveConfirm()}>
+                {saving ? "保存中…" : "保存"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

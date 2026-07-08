@@ -212,9 +212,8 @@ export default function App() {
    * while the UI shows a progress overlay. A single file skips bundling so the
    * old single-file flow is byte-identical for old receivers.
    */
-  const onFilesSelected = useCallback((files: File[]) => {
+  const stageFiles = useCallback((files: File[]) => {
     if (files.length === 0) {
-      // User removed the last file → reset back to the select screen.
       setState((s) => ({ ...s, files: [], prepared: null, page: "select" }))
       return
     }
@@ -223,11 +222,16 @@ export default function App() {
       ...s,
       kind: "file",
       files,
+      text: "",
       compressPhase: "reading",
       error: null,
     }))
     compressWorker.postMessage({ files })
   }, [])
+
+  const onFilesSelected = stageFiles
+
+  const onSendDraftsAsFiles = stageFiles
 
   /**
    * Stage 1 (text): submitted text → hand it to the compress worker, which
@@ -340,6 +344,7 @@ export default function App() {
             onKindChange={onKindChange}
             onSelected={onFilesSelected}
             onTextEntered={onTextEntered}
+            onSendDraftsAsFiles={onSendDraftsAsFiles}
           />
         )}
         {state.page === "params" && state.prepared && (

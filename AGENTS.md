@@ -305,6 +305,7 @@ npm run preview        # 本地预览构建产物
 | 会话 ID（TS 端，镜像 Rust） | `apps/sender/src/wasm/session.ts:17` | `deriveSessionId` |
 | 多文件容器 | `apps/sender/src/wasm/bundle.ts` | 打包格式（ETBUNDL1） |
 | 4 个页面 | `apps/sender/src/pages/*.tsx` | FileSelect / Params / Play / Stats。FileSelect 顶部有「文件/文字」Tab 切换 |
+| **文字草稿（IndexedDB）** | `apps/sender/src/storage/textDrafts.ts` + `FileSelectPage.tsx` TextTab | 命名保存（原文不 trim，与单条发送一致）；载入后可「更新草稿」；「一起发送」→ `draftsToFiles`（按保存时间正序 + `dedupeDraftFilenamesForBundle` 重名后缀）→ `processFiles`/ETBUNDL1。单条「发送当前这一条」仍走 `processText`/ETTEXTv1 |
 | manifest 后处理 | `apps/sender/scripts/fix-manifest.cjs` | 图标/MV2 CSP/Firefox id；**兜底删 `default_popup`**（保证 onClicked 生效） |
 
 ### 3.3 Android 扫码端
