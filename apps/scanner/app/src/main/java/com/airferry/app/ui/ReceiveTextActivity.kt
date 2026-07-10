@@ -224,15 +224,16 @@ class ReceiveTextActivity : ComponentActivity() {
     /** Copy the recovered text to the system clipboard. */
     private fun copyToClipboard() {
         val clipboard = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
-        clipboard.setPrimaryClip(ClipData.newPlainText("AirFerry 文字消息", text))
+        // Label is clip metadata only; keep it neutral so paste/share targets never
+        // prepend branding as a fake "first line" of the document.
+        clipboard.setPrimaryClip(ClipData.newPlainText("", text))
     }
 
-    /** Share the text via ACTION_SEND with type text/plain and EXTRA_TEXT. */
+    /** Share the text via ACTION_SEND with type text/plain and EXTRA_TEXT only. */
     private fun shareText() {
         val shareIntent = Intent(Intent.ACTION_SEND).apply {
             type = "text/plain"
             putExtra(Intent.EXTRA_TEXT, text)
-            putExtra(Intent.EXTRA_TITLE, "AirFerry 文字消息")
         }
         startActivity(Intent.createChooser(shareIntent, "分享文字"))
     }
