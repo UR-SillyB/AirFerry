@@ -128,9 +128,11 @@ jobs:
   # 镜像 build-windows.ps1 -Pack：
   # ① cargo build --features cffi → transfer_engine.dll → runtime/
   # ② dotnet publish -r win-x64 single-file self-contained=false → publish/
-  # ③ Compress publish/ → airferry-windows-x64-v1.0.0.zip
-  # ④ gh release upload 到 v1.0.0（tag 已存在，--clobber 覆盖同名 asset）
+  # ③ Compress publish/ → airferry-windows-x64-v${VER}.zip
+  # ④ gh release upload 到 v${VER}（tag 已存在，--clobber 覆盖同名 asset）
   # 只在 workflow_dispatch + 打包后手动触发上传（避免每次 push 都发 release）。
+  # 版本号与 apps/sender/package.json、build.gradle.kts、Cargo.toml、csproj 四处
+  # 手动保持同步（AGENTS.md §2.7 关键依赖顺序第 5 条）。发版时改这一处即可。
   windows-pack:
     name: Windows publish + upload to release
     needs: [rust-cffi, csharp-tests, windows-build]
@@ -140,7 +142,7 @@ jobs:
     permissions:
       contents: write   # gh release upload 需要
     env:
-      VER: '1.0.0'
+      VER: '1.0.1'
     steps:
       - uses: actions/checkout@v5
 

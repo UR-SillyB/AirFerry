@@ -67,6 +67,30 @@ build_sender() {
 build_scanner() {
   info "构建 Android 扫码端 ..."
 
+  # 设置 Android SDK / NDK 环境变量（cargo-ndk 需要 ANDROID_NDK_HOME）。
+  # 优先使用用户已设的值，否则按常见路径自动探测。
+  local sdk_candidates=(
+    "${ANDROID_HOME:-}"
+    "${ANDROID_SDK_ROOT:-}"
+    "$HOME/Android/Sdk"
+    "$HOME/Library/Android/sdk"
+    "/opt/homebrew/share/android-commandlinetools"
+  )
+  local android_home=""
+  for p in "${sdk_candidates[@]}"; do
+    if [ -n "$p" ] && [ -d "$p/ndk" ]; then
+      android_home="$p"
+      break
+    fi
+  done
+  if [ -z "$android_home" ]; then
+    error "找不到 Android SDK（需含 ndk/ 子目录）。请设置 ANDROID_HOME 或 ANDROID_NDK_HOME 环境变量。"
+    return 1
+  fi
+  ANDROID_HOME="$android_home"
+  ANDROID_NDK_HOME="${ANDROID_NDK_HOME:-$ANDROID_HOME/ndk}"
+  export ANDROID_HOME ANDROID_NDK_HOME
+
   # 先编译 Rust JNI 库 (libtransfer_engine.so) 到 jniLibs/。
   # 这一步必须在 gradlew 之前：APK 打包时直接拷贝 jniLibs/ 里的 .so，
   # 不会触发 cargo。若跳过这步，APK 里会带着过期的 .so（比如 EasyTransfer
@@ -79,7 +103,6 @@ build_scanner() {
   info "JNI 库编译完成 → apps/scanner/app/src/main/jniLibs/arm64-v8a/libtransfer_engine.so"
 
   cd "$ROOT/apps/scanner"
-  ANDROID_HOME="${ANDROID_HOME:-$HOME/Library/Android/sdk}"
   ./gradlew assembleRelease 2>&1 | tail -3 | while read -r line; do info "$line"; done
   info "扫码端构建完成 → apps/scanner/app/build/outputs/apk/release/app-release.apk"
 }
