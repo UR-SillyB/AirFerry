@@ -2,15 +2,9 @@
  * QR Video Stream Renderer.
  *
  * Drives a Canvas2D render loop. Each tick pulls the next frame from the Rust
- * `SenderSessionWasm`, encodes it to a QR matrix with fixed-mask fast path
- * (vendored fast_qr skips the 8-mask evaluation loop — ~10× speedup), and
- * rasterizes it to the canvas via putImageData.
- *
- * The module→pixel expansion runs in JS (drawMatrix). We tested a WASM-side
- * RGBA path (encode_rgba) but it transfers ~20× more data across the WASM↔JS
- * boundary (side_px² × 4 bytes vs side² bytes), which dominates cost on
- * low-end devices. The JS pixel loop on a 15 KB module buffer is faster than
- * transferring a 280 KB RGBA buffer + the extra memcpy.
+ * `SenderSessionWasm` via `next_qr_into` / `next_qr_multi_into` (fixed-mask
+ * QR matrix, vendored fast_qr), expands modules to pixels in JS (`drawMatrix`),
+ * and blits with one `putImageData` per code.
  *
  * Supports fps=0 (unlimited) via setTimeout(0) to bypass the display refresh
  * rate cap, and fps up to 240 for high-refresh displays.

@@ -30,10 +30,7 @@
 //! - [`session`] — deterministic session-id derivation (enables resume).
 //! - [`qr_render`] — turn a frame's bytes into a QR module matrix.
 
-// Note: was `#![forbid(unsafe_code)]`, relaxed to `allow` for the zero-copy
-// u32→u8 pixel reinterpretation in qr_render::encode_rgba (a standard, sound
-// pattern for RGBA pixel buffers on little-endian targets).
-#![allow(unsafe_code)]
+#![forbid(unsafe_code)]
 
 pub mod frame;
 pub mod compress;
