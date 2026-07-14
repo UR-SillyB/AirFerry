@@ -240,6 +240,101 @@ impl SenderSessionWasm {
         Ok(pos as u32)
     }
 
+    /// Fused: generate next frame + QR encode + RGBA rasterize in one WASM call.
+    ///
+    /// Writes packed RGBA pixels (4 bytes/pixel, little-endian `0xAABBGGRR`,
+    /// matching `Uint32Array` view over `ImageData.data.buffer`) directly into
+    /// `out_rgba`. The output includes a quiet zone of `margin` modules. This
+    /// eliminates the JS-side `drawMatrix` pixel expansion loop entirely — JS
+    /// only needs one `putImageData` per code.
+    ///
+    /// - `out_rgba` — caller-allocated buffer, must hold at least
+    ///   `(177 + margin*2)² * module_px² * 4` bytes (worst case V40).
+    /// - `out_side_px[0]` — set to the actual pixel side length.
+    /// - `module_px` — pixels per QR module (≥ 1).
+    /// - `margin` — quiet-zone width in modules (typically 4 for single-code, 1 for multi).
+    ///
+    /// Returns the number of RGBA bytes written (= side_px² × 4).
+    pub fn next_qr_rgba(
+        &mut self,
+        out_rgba: &mut [u8],
+        out_side_px: &mut [u32],
+        module_px: u32,
+        margin: u32,
+    ) -> Result<u32, JsValue> {
+        if out_side_px.is_empty() {
+            return Err(JsValue::from_str("out_side_px buffer empty"));
+        }
+        let frame = self.inner.next_frame().map_err(err_to_js)?;
+        let bytes = frame.to_bytes();
+        let (rgba, side_px) =
+            qr_protocol::qr_render::encode_rgba(&bytes, module_px as usize, margin as usize)
+                .map_err(|e| JsValue::from_str(&format!("qr rgba encode failed: {e:?}")))?;
+        if rgba.len() > out_rgba.len() {
+            return Err(JsValue::from_str(&format!(
+                "out_rgba too small: need {}, have {}",
+                rgba.len(),
+                out_rgba.len()
+            )));
+        }
+        out_rgba[..rgba.len()].copy_from_slice(&rgba);
+        out_side_px[0] = side_px as u32;
+        Ok(rgba.len() as u32)
+    }
+
+    /// Multi-QR RGBA variant: encodes `count` codes and writes them sequentially
+    /// into `out_buf`. Layout: `[u32 count_actual][per code: u32 side_px + side_px²*4 RGBA bytes]`.
+    /// All codes use the same `module_px` and `margin`.
+    pub fn next_qr_multi_rgba(
+        &mut self,
+        count: u32,
+        out_buf: &mut [u8],
+        module_px: u32,
+        margin: u32,
+    ) -> Result<u32, JsValue> {
+        let n = count.min(8) as usize;
+        if out_buf.len() < 4 {
+            return Err(JsValue::from_str("out_buf too small for count slot"));
+        }
+        let count_slot = 0usize;
+        let mut pos = 4usize;
+        let mut produced: u32 = 0;
+        for _ in 0..n {
+            let frame = match self.inner.next_frame() {
+                Ok(f) => f,
+                Err(e) => {
+                    android_log_wasm(&format!("next_qr_multi_rgba frame err: {e}"));
+                    break;
+                }
+            };
+            let bytes = frame.to_bytes();
+            let (rgba, side_px) =
+                match qr_protocol::qr_render::encode_rgba(&bytes, module_px as usize, margin as usize)
+                {
+                    Ok(r) => r,
+                    Err(e) => {
+                        android_log_wasm(&format!("next_qr_multi_rgba qr err: {e:?}"));
+                        break;
+                    }
+                };
+            let need = 4 + rgba.len();
+            if pos + need > out_buf.len() {
+                return Err(JsValue::from_str(&format!(
+                    "out_buf overflow at code {}: need {need} at pos {pos}, have {}",
+                    produced,
+                    out_buf.len()
+                )));
+            }
+            out_buf[pos..pos + 4].copy_from_slice(&(side_px as u32).to_le_bytes());
+            pos += 4;
+            out_buf[pos..pos + rgba.len()].copy_from_slice(&rgba);
+            pos += rgba.len();
+            produced += 1;
+        }
+        out_buf[count_slot..count_slot + 4].copy_from_slice(&produced.to_le_bytes());
+        Ok(pos as u32)
+    }
+
     /// Session id (low 64 bits).
     pub fn session_id_lo(&self) -> u64 {
         self.inner.session_id() as u64

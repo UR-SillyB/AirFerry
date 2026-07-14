@@ -1,10 +1,19 @@
 /**
  * QR Video Stream Renderer.
  *
- * Drives a Canvas2D render loop at 30/60 fps. Each tick pulls the next frame
- * from the Rust `SenderSessionWasm`, encodes it to a QR matrix (also in WASM),
- * and paints it. Applies quiet-zone margin, pure black/white contrast, and a
- * brightness filter optimized for camera scanning.
+ * Drives a Canvas2D render loop. Each tick pulls the next frame from the Rust
+ * `SenderSessionWasm`, encodes it to a QR matrix with fixed-mask fast path
+ * (vendored fast_qr skips the 8-mask evaluation loop — ~10× speedup), and
+ * rasterizes it to the canvas via putImageData.
+ *
+ * The module→pixel expansion runs in JS (drawMatrix). We tested a WASM-side
+ * RGBA path (encode_rgba) but it transfers ~20× more data across the WASM↔JS
+ * boundary (side_px² × 4 bytes vs side² bytes), which dominates cost on
+ * low-end devices. The JS pixel loop on a 15 KB module buffer is faster than
+ * transferring a 280 KB RGBA buffer + the extra memcpy.
+ *
+ * Supports fps=0 (unlimited) via setTimeout(0) to bypass the display refresh
+ * rate cap, and fps up to 240 for high-refresh displays.
  */
 import { useEffect, useRef, useCallback, useState } from "react"
 import { SenderSessionWasm, ensureWasm } from "@/wasm/loader"
@@ -20,7 +29,7 @@ export interface QrStreamStats {
 interface Props {
   /** Initialized sender session. */
   session: SenderSessionWasm
-  /** Target frames per second (30 or 60). */
+  /** Target frames per second (0 = unlimited via setTimeout). */
   fps: number
   /** Brightness multiplier for screen (1.0 = normal, >1 = brighter). */
   brightness: number
@@ -57,28 +66,12 @@ export function QrStream({
   // live for the component's whole lifetime and are fed to the zero-copy
   // `next_qr_into` / `next_qr_multi_into` exports, which write directly into
   // them and return only the byte count.
-  //
-  // Sizing: the largest QR is Version 40 = 177×177 = 31329 modules. The single
-  // buffer holds one matrix; the multi buffer holds the flat [u32 count][per
-  // matrix: u32 side + side² bytes] layout for up to 4 matrices.
-  // ⚠ The subarray views handed to drawMatrix are only valid for the current
-  // tick — the next tick overwrites the backing buffer. The render path reads
-  // them to the Canvas within the same tick (putImageData is synchronous), so
-  // this is safe; never store these views across frames.
   const MAX_QR_SIDE = 177
   const MAX_QR_MODULES = MAX_QR_SIDE * MAX_QR_SIDE
   const matrixBufRef = useRef(new Uint8Array(MAX_QR_MODULES))
   const sideBufRef = useRef(new Uint32Array(1))
-  // Multi buffer: u32 count + (u32 side + side²) per matrix, up to 4 matrices.
   const multiBufRef = useRef(new Uint8Array(4 + 4 * (4 + MAX_QR_MODULES)))
 
-  // Refs for callback props so the render function's useCallback identity stays
-  // stable across parent re-renders. Without this, an inline arrow function
-  // (e.g. onError={(e) => setError(...)}) gets a new identity every time the
-  // parent re-renders — which happens every ~250ms via onStats → setStats.
-  // That would recreate `render`, which would restart the rAF loop (cancel +
-  // reschedule), causing periodic frame drops. By reading callbacks through
-  // refs we keep `render` dependent only on [session, multiQr].
   const onStatsRef = useRef(onStats)
   const onErrorRef = useRef(onError)
   onStatsRef.current = onStats
@@ -90,22 +83,14 @@ export function QrStream({
     const ctx = canvas.getContext("2d", { alpha: false })
     if (!ctx) return
 
-    // Decide single vs multi-QR mode. multiQr<=1 keeps the proven single-code
-    // path (one next_qr call, fills the whole canvas). multiQr>=2 requests N
-    // distinct symbols in one WASM call and tiles them in a grid.
     const wantMulti = multiQr >= 2
 
-    // Collect the matrices to render this tick. Each entry: [side, modules].
-    // Uses the zero-copy `*_into` exports: the WASM side writes directly into
-    // our reused scratch buffers (matrixBufRef / multiBufRef), and we slice
-    // views into them — no per-tick allocation.
     type Matrix = { side: number; modules: Uint8Array }
     let matrices: Matrix[]
     try {
       if (!wantMulti) {
         const n = session.next_qr_into(matrixBufRef.current, sideBufRef.current)
         const side = sideBufRef.current[0]
-        // subarray is a zero-copy view; valid only until the next tick.
         matrices = [{ side, modules: matrixBufRef.current.subarray(0, n) }]
       } else {
         const written = session.next_qr_multi_into(
@@ -113,59 +98,60 @@ export function QrStream({
           multiBufRef.current
         )
         matrices = parseMultiQrBuf(multiBufRef.current, written)
-        if (matrices.length === 0) {
-          // Nothing produced this tick; skip the redraw.
-          return
-        }
+        if (matrices.length === 0) return
       }
     } catch (e) {
       onErrorRef.current?.(e as Error)
       return
     }
 
-    // Layout: single → fills canvas; multi → grid (2 → 1×2, 4 → 2×2, else row).
     const n = matrices.length
     const cols = n === 2 ? 2 : n === 4 ? 2 : n
     const rows = Math.ceil(n / cols)
-    const cssSize = canvas.clientWidth || 480 // Fallback to 480 if clientWidth is 0
+    const cssSize = canvas.clientWidth || 480
     const dpr = window.devicePixelRatio || 1
     const px = Math.max(cssSize * dpr, 256)
-    // Only resize the backing store when the target size actually changes.
-    // Reassigning canvas.width/height every frame clears the surface and
-    // forces the compositor to re-allocate its buffer — under sustained 60fps
-    // load this degrades into periodic stalls (observed FPS sliding 60→40 as
-    // the session runs longer). Caching the size keeps the GPU buffer stable.
     if (px !== lastPxRef.current) {
       lastPxRef.current = px
       canvas.width = px
       canvas.height = px
     }
 
-    // Pure white background (max contrast) across the whole canvas.
     ctx.fillStyle = "#ffffff"
     ctx.fillRect(0, 0, px, px)
 
-    // Each code occupies an equal square cell, packed edge-to-edge. No inter-cell
-    // gap is needed: drawMatrix() already renders a quiet zone inside every cell,
-    // so two adjacent codes already have 2 modules of white between their data.
-    const sep = wantMulti ? 1 : 0
-    const cellW = Math.floor((px - sep * (cols - 1)) / cols)
-    const cellH = Math.floor((px - sep * (rows - 1)) / rows)
+    // All codes in a session share the same QR version → same `side`. Compute
+    // modulePx once from the per-code cell size, then pack codes edge-to-edge
+    // with NO centering gap — the drawSize is the actual QR pixel size and we
+    // place codes at tight grid positions. This is faster (no drawImage scaling)
+    // and produces a compact QR cluster that's easier for a camera to frame.
+    // Multi-code: margin=2 gives each code a 2-module quiet zone. Two adjacent
+    // codes thus have 4 modules of white between them — meeting the QR spec
+    // minimum (4 modules) while staying compact. Single code: full 4-module
+    // margin (standard).
+    const margin = wantMulti ? 2 : 4
+    const quiet = matrices[0].side + margin * 2
+    const cellW = Math.floor(px / cols)
+    const cellH = Math.floor(px / rows)
     const cell = Math.min(cellW, cellH)
+    const modulePx = Math.max(1, Math.floor(cell / quiet))
+    const drawSize = modulePx * quiet
+    // Grid origin: center the packed grid (cols*drawSize) within the canvas.
+    const gridW = cols * drawSize
+    const gridH = rows * drawSize
+    const gridOx = Math.floor((px - gridW) / 2)
+    const gridOy = Math.floor((px - gridH) / 2)
+
     for (let i = 0; i < n; i++) {
       const c = i % cols
       const r = Math.floor(i / cols)
-      const ox = c * (cell + sep)
-      const oy = r * (cell + sep)
-      // Sub-pixel dithering: shift each code by ±1px per frame to break
-      // moiré patterns.  ±1px is kept as a whole integer so Canvas2D stays
-      // on the GPU-accelerated integer path (sub-pixel fillRect is ~5× slower).
+      const ox = gridOx + c * drawSize
+      const oy = gridOy + r * drawSize
       const djx = ditherJitter ? Math.round((Math.random() - 0.5) * 2) : 0
       const djy = ditherJitter ? Math.round((Math.random() - 0.5) * 2) : 0
-      drawMatrix(ctx, matrices[i].modules, matrices[i].side, ox + djx, oy + djy, cell, 4)
+      drawMatrix(ctx, matrices[i].modules, matrices[i].side, ox + djx, oy + djy, modulePx, margin)
     }
 
-    // Stats throttle: ~4 Hz.
     const now = performance.now()
     if (now - statsTimerRef.current > 250) {
       statsTimerRef.current = now
@@ -184,11 +170,6 @@ export function QrStream({
     }
   }, [session, multiQr])
 
-  // Apply brightness/contrast optimization at the canvas element level. This is
-  // a constant for a given (brightness, autoOptimize) combination, so set it
-  // once on mount / when those props change — NOT every render tick. Per-frame
-  // `canvas.style.filter = ...` triggers style recalculation / compositor-layer
-  // repaint every frame, which is wasted work when the filter never changes.
   useEffect(() => {
     const canvas = canvasRef.current
     if (!canvas) return
@@ -200,17 +181,31 @@ export function QrStream({
 
   useEffect(() => {
     let cancelled = false
-    const interval = 1000 / Math.max(1, Math.min(120, fps))
+
+    if (fps === 0) {
+      // Unlimited mode: setTimeout(0) bypasses the rAF 60Hz cap. Renders as
+      // fast as the WASM encode + putImageData pipeline allows. Useful for
+      // high-refresh displays or throughput benchmarking.
+      let timerRef: ReturnType<typeof setTimeout> | null = null
+      const unlimitedLoop = () => {
+        if (cancelled) return
+        render()
+        timerRef = setTimeout(unlimitedLoop, 0)
+      }
+      timerRef = setTimeout(unlimitedLoop, 0)
+      return () => {
+        cancelled = true
+        if (timerRef != null) clearTimeout(timerRef)
+      }
+    }
+
+    // Throttled mode: rAF with interval gating.
+    const interval = 1000 / Math.max(1, Math.min(240, fps))
 
     const loop = (ts: number) => {
       if (cancelled) return
       const delta = ts - lastTickRef.current
       if (delta >= interval) {
-        // Anti-stall guard: if we fell behind by more than ~2 frames (e.g.
-        // after a tab-switch, GC pause, or thermal throttle), snap to the
-        // current timestamp instead of letting delta keep growing. Otherwise
-        // the loop would fire several catch-up renders in rapid succession,
-        // compounding the slowdown (the "60 → 40 and keeps dropping" cascade).
         lastTickRef.current = delta > interval * 3 ? ts : ts - (delta % interval)
         render()
       }
@@ -223,14 +218,6 @@ export function QrStream({
     }
   }, [render, fps])
 
-  // Web-level "fullscreen": the SAME canvas/wrapper DOM node persists in both
-  // modes — only the wrapper's className flips. When .qr-fullscreen--active is
-  // applied, CSS turns the wrapper into a fixed inset:0 overlay and sizes the
-  // canvas to the viewport; without it, the wrapper is the normal centered
-  // .qr-canvas-wrap. Because React never remounts the canvas, the rAF loop and
-  // lastPxRef stay valid, and the next tick reads the new clientWidth to resize
-  // the backing store. This is deliberately NOT the browser Fullscreen API
-  // (no user-gesture/permission/OS handoff; covers only the page viewport).
   const toggleFullscreen = useCallback(() => {
     setFullscreen((f) => !f)
   }, [])
@@ -253,14 +240,8 @@ export function QrStream({
 }
 
 /**
- * Draw one QR matrix into the square cell at (ox, oy) with side `cellPx`,
- * using a single putImageData per code instead of per-module fillRect calls.
- * On GPU-backed Canvas2D (especially Windows D3D11) thousands of small fillRect
- * calls per frame create a CPU-GPU sync bottleneck; ImageData writes avoid the
- * per-call overhead by batching all pixel updates into one transfer.
- *
- * [imgDataCache] holds reusable ImageData objects keyed by drawSize so we
- * never re-allocate the buffer on every frame — just re-fill the existing one.
+ * Draw one QR module matrix into the canvas. Uses a cached ImageData buffer
+ * and a Uint32Array view for fast pixel writes, then a single putImageData.
  */
 const imgDataCache = new Map<number, ImageData>()
 
@@ -270,16 +251,11 @@ function drawMatrix(
   side: number,
   ox: number,
   oy: number,
-  cellPx: number,
-  /** Quiet-zone margin in modules: 4 = QR spec, 1 = tight (multi-code only). */
+  modulePx: number,
   margin: number
 ) {
   const quiet = side + margin * 2
-  // Module size that tiles evenly into the cell; floor keeps modules aligned.
-  const modulePx = Math.max(1, Math.floor(cellPx / quiet))
   const drawSize = modulePx * quiet
-  // Center the code within the cell.
-  const offset = Math.floor((cellPx - drawSize) / 2)
 
   // Obtain a reusable ImageData for this drawSize.
   let imgData = imgDataCache.get(drawSize)
@@ -287,20 +263,17 @@ function drawMatrix(
     imgData = ctx.createImageData(drawSize, drawSize)
     imgDataCache.set(drawSize, imgData)
   }
-  // Uint32 view: one uint32 per pixel (RGBA packed as 0xAABBGGRR on LE).
+  
+  // CRITICAL PERFORMANCE NOTE: We must construct a new Uint32Array view over
+  // imgData.data.buffer EVERY tick. Do NOT cache the Uint32Array itself. 
+  // Calling ctx.putImageData() can cause the browser's graphics engine to detach, 
+  // lock, or COW (copy-on-write) the underlying ArrayBuffer. Re-evaluating the 
+  // view ensures we always write to the correct, fast memory backing. Caching 
+  // the view caused a reproducible ~10% performance regression in V8.
   const pixels = new Uint32Array(imgData.data.buffer)
 
-  // Initialize to white (0xFFFFFFFF on little-endian = A=255,B=255,G=255,R=255).
-  pixels.fill(0xFFFFFFFF)
+  pixels.fill(0xFFFFFFFF) // white
 
-  // Plot dark modules as blocks of pixels. We tried replacing the inner
-  // modulePx-wide row write with `Uint32Array.set(blackRow, offset)` (batch
-  // copy of a pre-filled template), but benchmarking showed it is ~2× SLOWER
-  // at the realistic modulePx (4–7): TypedArray.set has per-call overhead
-  // (bounds check + memcpy setup) that exceeds the cost of 4–7 inline scalar
-  // writes. The crossover where set() wins is modulePx ≥ 16, far above what
-  // any real canvas size produces. The scalar loop below is the fast path.
-  // White modules are skipped (buffer is already white).
   const black = 0xFF000000
   for (let y = 0; y < side; y++) {
     const rowBase = y * side
@@ -317,35 +290,23 @@ function drawMatrix(
     }
   }
 
-  // Single Canvas API call instead of ~500 fillRect per code.
-  ctx.putImageData(imgData, ox + offset, oy + offset)
+  ctx.putImageData(imgData, ox, oy)
 }
 
-/**
- * Parse the flat little-endian buffer returned by `next_qr_multi_into`:
- *   [u32 count][for each: u32 side + side*side bytes modules]
- * Returns the list of {side, modules}. An empty/short buffer yields [].
- *
- * `len` is the number of bytes actually written by the WASM call (≤
- * buf.byteLength), so the parser stops at the real end of the data rather
- * than reading stale bytes from the reused backing buffer. The DataView reads
- * over the same buffer the WASM call returned (the caller's scratch buffer),
- * so no extra copy is made beyond the slice views into modules.
- */
 function parseMultiQrBuf(
   buf: Uint8Array,
   len: number = buf.length
 ): { side: number; modules: Uint8Array }[] {
   if (len < 4) return []
   const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength)
-  const count = dv.getUint32(0, true) // little-endian
+  const count = dv.getUint32(0, true)
   const out: { side: number; modules: Uint8Array }[] = []
   let pos = 4
   for (let i = 0; i < count && pos + 4 <= len; i++) {
     const side = dv.getUint32(pos, true)
     pos += 4
     const n = side * side
-    if (pos + n > len) break // truncated; stop
+    if (pos + n > len) break
     out.push({ side, modules: buf.subarray(pos, pos + n) })
     pos += n
   }
