@@ -44,10 +44,10 @@ serde_json = { workspace = true, optional = true }
 # default lockfile drift to 0.2.93+ and break the MV2 build.
 #
 # Measured note: +simd128 yields NO speedup on the current hot path (0.95×,
-# slightly slower) — raptorq/qrcode are pure scalar Rust with no SIMD
+# slightly slower) — raptorq and fast_qr are pure scalar Rust with no SIMD
 # intrinsics. It's kept only as build infrastructure for future SIMD-aware
 # libraries; the real value of the dual track is MV2/MV3 compatibility
-# separation. See AGENTS.md §5.6 for the full benchmark.
+# separation. See AGENTS.md §5 第6条 for the full benchmark.
 js-sys = "=0.3.69"
 wasm-bindgen = { version = "=0.2.92", optional = true }
 web-sys = { version = "=0.3.69", features = ["console"] }

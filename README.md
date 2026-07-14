@@ -44,18 +44,18 @@
 
 ## 下载安装
 
-最新版本发布在 [GitHub Release v1.0.0](https://github.com/UR-SillyB/AirFerry/releases/tag/v1.0.0)。
+最新版本发布在 [GitHub Release v1.0.1](https://github.com/UR-SillyB/AirFerry/releases/tag/v1.0.1)。
 
 | 文件 | 说明 |
 |------|------|
-| `airferry-android-v1.0.0.apk` | Android 接收端（Android 10+，arm64-v8a） |
-| `airferry-windows-x64-v1.0.0.zip` | Windows 接收端（Windows 10+，x64；需 .NET 8 运行时） |
-| `airferry-sender-chrome-mv3-v1.0.0.crx` | Chrome / Edge MV3 扩展（已签名 Cr24） |
-| `airferry-sender-chrome-mv3-v1.0.0.zip` | Chrome / Edge MV3（解压加载，crx 被拦截时用） |
-| `airferry-sender-chrome-mv2-v1.0.0.crx` | Chrome / Edge MV2 扩展（旧版兼容，已签名 Cr24） |
-| `airferry-sender-chrome-mv2-v1.0.0.zip` | Chrome / Edge MV2（解压加载） |
-| `airferry-sender-firefox-mv3-v1.0.0.xpi` | Firefox MV3 扩展（Firefox 109+） |
-| `airferry-sender-firefox-mv2-v1.0.0.xpi` | Firefox MV2 扩展（Firefox 91+） |
+| `airferry-android-v1.0.1.apk` | Android 接收端（Android 10+，arm64-v8a） |
+| `airferry-windows-x64-v1.0.1.zip` | Windows 接收端（Windows 10+，x64；需 .NET 8 运行时） |
+| `airferry-sender-chrome-mv3-v1.0.1.crx` | Chrome / Edge MV3 扩展（已签名 Cr24） |
+| `airferry-sender-chrome-mv3-v1.0.1.zip` | Chrome / Edge MV3（解压加载，crx 被拦截时用） |
+| `airferry-sender-chrome-mv2-v1.0.1.crx` | Chrome / Edge MV2 扩展（旧版兼容，已签名 Cr24） |
+| `airferry-sender-chrome-mv2-v1.0.1.zip` | Chrome / Edge MV2（解压加载） |
+| `airferry-sender-firefox-mv3-v1.0.1.xpi` | Firefox MV3 扩展（Firefox 109+） |
+| `airferry-sender-firefox-mv2-v1.0.1.xpi` | Firefox MV2 扩展（Firefox 91+） |
 
 > 由 `./scripts/build-all.sh release` 自动产出；版本号取自 `apps/sender/package.json`。Chrome `.crx` 需本机有 Chrome 才能签名，否则仅产出 `.zip`。
 
@@ -65,7 +65,7 @@
 
 ### Windows 接收端
 
-解压 `airferry-windows-x64-v1.0.0.zip`，安装 [.NET 8 运行时](https://dotnet.microsoft.com/download/dotnet/8.0) 后运行 `AirFerry.exe`。启动后在设备选择页挑选摄像头或采集卡（USB/HDMI/SDI 采集卡会被自动标注），进入扫码页对准屏幕二维码即可。
+解压 `airferry-windows-x64-v1.0.1.zip`，安装 [.NET 8 运行时](https://dotnet.microsoft.com/download/dotnet/8.0) 后运行 `AirFerry.exe`。启动后在设备选择页挑选摄像头或采集卡（USB/HDMI/SDI 采集卡会被自动标注），进入扫码页对准屏幕二维码即可。
 
 ### Chrome / Edge 扩展
 
@@ -140,6 +140,10 @@ AirFerry/
 - [构建指南 - Android](docs/build-android.md)
 - [构建指南 - Windows](docs/build-windows.md)
 - [开发环境搭建](docs/dev-setup.md)
+
+## 友情链接
+
+- [linux.do](https://linux.do) — 真诚、友善、实用的开源技术社区
 
 ## 许可证
 

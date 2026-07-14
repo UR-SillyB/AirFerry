@@ -21,9 +21,9 @@ npm run wasm
 | `wasm-pkg-legacy/` | `=0.2.92`（默认锁定） | 标量、无 externref（Chrome 87+ 可加载） | MV2（`chrome-mv2` / `firefox-mv2`） |
 | `wasm-pkg-simd/` | `=0.2.125`（脚本临时升级） | `+simd128` SIMD + externref（Chrome 96+ / FF 116+） | MV3（`chrome-mv3` / `firefox-mv3`） |
 
-> **Cargo.toml 还原**：构建 MV3 时脚本临时改写 `core/transfer-engine/Cargo.toml` 的 wasm-bindgen 版本到 0.2.125，构建完在 `finally` 里用 ① 内存回写 Cargo.toml + ② `git checkout Cargo.lock` 字节级还原。跑完后 `git status` 对 Cargo 文件零改动。详见 `apps/sender/scripts/build-wasm.cjs`。
+> **Cargo 文件还原**：构建 MV3 时脚本临时改写 `core/transfer-engine/Cargo.toml` 的 wasm-bindgen 版本到 0.2.125，并重算 workspace lockfile。脚本启动时已按字节快照 Cargo.toml/Cargo.lock，构建完在 `finally` 中逐字节恢复；不调用 `git checkout`，因此不会丢失运行前已有的未提交修改。详见 `apps/sender/scripts/build-wasm.cjs`。
 
-> **关于 SIMD 提速的实测结论**：`+simd128` 对当前纯标量的 `raptorq`/`qrcode` crate **无性能收益**（实测 0.95×，反而因 wasm 变大略慢）。双产物机制的真实价值是「MV2 兼容老 Chrome（无 externref）+ MV3 用新工具链」的兼容性分离，并为未来引入 SIMD 化的库保留构建基础设施。详见 `AGENTS.md` §5.6。
+> **关于 SIMD 提速的实测结论**：`+simd128` 对当前纯标量的 `raptorq` crate **无性能收益**（实测 0.95×，反而因 wasm 变大略慢）；QR 编码现用 `fast_qr` crate（已替代旧 `qrcode`，Reed-Solomon 路径 ~7-9× 提速），同样无 wasm32 SIMD intrinsics。双产物机制的真实价值是「MV2 兼容老 Chrome（无 externref）+ MV3 用新工具链」的兼容性分离，并为未来引入 SIMD 化的库保留构建基础设施。详见 `AGENTS.md` §5 第6条。
 
 > `npm run build` 已内嵌此步骤，通常无需单独跑 `npm run wasm`。
 

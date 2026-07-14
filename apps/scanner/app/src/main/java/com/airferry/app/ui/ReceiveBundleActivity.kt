@@ -22,7 +22,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -111,7 +110,6 @@ class ReceiveBundleActivity : ComponentActivity() {
 
     @Composable
     private fun BundleDetailScreen() {
-        val context = LocalContext.current
         val crcOk = !crcUnknown && expectedCrc == receivedCrc
         val totalCount = files.size
         val totalSize = files.sumOf { it.size }

@@ -39,9 +39,13 @@ impl Encoder {
                 source_packets: b.source_packets(),
             })
             .collect();
-        let meta = ObjectMeta::from_encoder(data.len() as u64, config, &oti, &rq_blocks);
+        let meta = ObjectMeta::from_encoder(data.len() as u64, config, &oti, rq_blocks);
 
-        Ok(Self { config, meta, blocks })
+        Ok(Self {
+            config,
+            meta,
+            blocks,
+        })
     }
 
     #[inline]
@@ -74,23 +78,34 @@ impl Encoder {
         let block = self.block(sbn)?;
         let k = self.meta.blocks[sbn as usize].num_source_symbols;
         let pkts: Vec<EncodingPacket> = block.encoder.repair_packets(start, count);
-        pkts.into_iter().enumerate().map(|(i, p)| {
-            let esi = k.checked_add(start).and_then(|s| s.checked_add(i as u32))
-                .ok_or_else(|| Error::UnknownSymbol { sbn, esi: u32::MAX })?;
-            Ok(Symbol::new(sbn, esi, p.data().to_vec()))
-        }).collect()
+        pkts.into_iter()
+            .enumerate()
+            .map(|(i, p)| {
+                let esi = k
+                    .checked_add(start)
+                    .and_then(|s| s.checked_add(i as u32))
+                    .ok_or(Error::UnknownSymbol { sbn, esi: u32::MAX })?;
+                Ok(Symbol::new(sbn, esi, p.data().to_vec()))
+            })
+            .collect()
     }
 
     pub fn source_symbols(&self, sbn: u32) -> Result<Vec<Symbol>> {
         let block = self.block(sbn)?;
         let k = self.meta.blocks[sbn as usize].num_source_symbols;
-        Ok(block.source_packets.iter().enumerate().take(k as usize)
-            .map(|(i, p)| Symbol::new(sbn, i as u32, p.data().to_vec())).collect())
+        Ok(block
+            .source_packets
+            .iter()
+            .enumerate()
+            .take(k as usize)
+            .map(|(i, p)| Symbol::new(sbn, i as u32, p.data().to_vec()))
+            .collect())
     }
 
     fn block(&self, sbn: u32) -> Result<&CachedBlock> {
-        self.blocks.get(sbn as usize).ok_or_else(|| Error::BlockOutOfRange {
-            sbn, total: self.blocks.len() as u32,
+        self.blocks.get(sbn as usize).ok_or(Error::BlockOutOfRange {
+            sbn,
+            total: self.blocks.len() as u32,
         })
     }
 }
@@ -100,14 +115,21 @@ mod tests {
     use super::*;
 
     fn random_data(n: usize) -> Vec<u8> {
-        (0..n).map(|i| ((i * 1103515245 + 12345) & 0xff) as u8).collect()
+        (0..n)
+            .map(|i| ((i * 1103515245 + 12345) & 0xff) as u8)
+            .collect()
     }
 
     #[test]
     fn encodes_and_lists_blocks() {
         let data = random_data(50_000);
         let enc = Encoder::new(&data, Config::default()).unwrap();
-        let total_k: u64 = enc.meta().blocks.iter().map(|b| b.num_source_symbols as u64).sum();
+        let total_k: u64 = enc
+            .meta()
+            .blocks
+            .iter()
+            .map(|b| b.num_source_symbols as u64)
+            .sum();
         assert!(total_k * 1024 >= 50_000);
     }
 

@@ -58,6 +58,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "fast_qr"
+version = "0.12.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "16e326670ab63ef13c7699301dbb3441573ba3288e83c3bb9efaacc91a33fd01"
+
+[[package]]
 name = "find-msvc-tools"
 version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -196,22 +202,16 @@ dependencies = [
 
 [[package]]
 name = "qr-protocol"
-version = "1.1.0-beta.1"
+version = "1.0.1"
 dependencies = [
  "crc32fast",
- "qrcode",
+ "fast_qr",
  "raptorq-core",
  "serde",
  "thiserror",
  "xz2",
  "zstd",
 ]
-
-[[package]]
-name = "qrcode"
-version = "0.14.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d68782463e408eb1e668cf6152704bd856c78c5b6417adaee3203d8f4c1fc9ec"
 
 [[package]]
 name = "quote"
@@ -239,7 +239,7 @@ dependencies = [
 
 [[package]]
 name = "raptorq-core"
-version = "1.1.0-beta.1"
+version = "1.0.1"
 dependencies = [
  "raptorq",
  "serde",
@@ -337,7 +337,7 @@ dependencies = [
 
 [[package]]
 name = "transfer-engine"
-version = "1.1.0-beta.1"
+version = "1.0.1"
 dependencies = [
  "crc32fast",
  "jni",

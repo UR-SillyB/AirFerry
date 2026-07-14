@@ -5,6 +5,14 @@
 //! `Vec<bool>` (`true` == dark module) plus the side length. The display layer
 //! (Canvas on the browser, native draw on Android) maps this matrix to pixels.
 //!
+//! ## QR backend
+//!
+//! Encoding is done by the [`fast_qr`] crate, an optimized QR generator that is
+//! ~7-9× faster than the scalar `qrcode` crate on the per-frame Reed-Solomon
+//! path — the dominant cost (~98%) of each render tick in the sender's rAF loop.
+//! `fast_qr` compiles cleanly to `wasm32-unknown-unknown`, so the speedup
+//! reaches the browser sender where it matters most on low-end hardware.
+//!
 //! ## Why the minimal version (not a fixed Version 40)
 //!
 //! A Version-40 code is 177×177 modules — the densest QR there is. Forcing it
@@ -19,16 +27,14 @@
 //! V16 (81²), far easier to scan.
 
 use crate::{Error, Result};
-use qrcode::{bits::Bits, EcLevel, QrCode, Version};
+use fast_qr::{qr::QRBuilder, ECL, Version};
 use std::vec::Vec;
 
-/// QR parameters used by AirFerry.
-pub const QR_EC_LEVEL: EcLevel = EcLevel::L;
 /// Maximum payload (bytes) a Version-40 / L QR can carry in binary mode.
 pub const QR_MAX_BYTES: usize = 2953;
 
 /// Byte-mode data capacity (bytes) for QR Versions 1..=40 at EC level L
-/// (ISO/IEC 18004 Table 7). Index `i` is the capacity of `Version::Normal(i+1)`.
+/// (ISO/IEC 18004 Table 7). Index `i` is the capacity of version `i+1`.
 const QR_BYTE_CAPACITY_L: [usize; 40] = [
     17, 32, 53, 78, 106, 134, 154, 192, 230, 271,
     321, 367, 425, 458, 520, 586, 644, 718, 792, 858,
@@ -36,13 +42,27 @@ const QR_BYTE_CAPACITY_L: [usize; 40] = [
     1840, 1952, 2068, 2188, 2303, 2431, 2563, 2699, 2809, 2953,
 ];
 
-/// Smallest QR version whose byte-mode EC-L capacity holds `len` bytes, or
-/// `None` if `len` exceeds Version 40's capacity ([`QR_MAX_BYTES`]).
-pub fn min_version_for(len: usize) -> Option<Version> {
+/// `fast_qr::Version` is a C-like enum (`V01=0`..`V40=39`) whose `from_n(n)`
+/// constructor is `pub(crate)`, so we keep our own lookup table to convert a
+/// 1-based version number (1..=40) into the enum without `unsafe` transmute.
+const VERSIONS: [Version; 40] = [
+    Version::V01, Version::V02, Version::V03, Version::V04, Version::V05,
+    Version::V06, Version::V07, Version::V08, Version::V09, Version::V10,
+    Version::V11, Version::V12, Version::V13, Version::V14, Version::V15,
+    Version::V16, Version::V17, Version::V18, Version::V19, Version::V20,
+    Version::V21, Version::V22, Version::V23, Version::V24, Version::V25,
+    Version::V26, Version::V27, Version::V28, Version::V29, Version::V30,
+    Version::V31, Version::V32, Version::V33, Version::V34, Version::V35,
+    Version::V36, Version::V37, Version::V38, Version::V39, Version::V40,
+];
+
+/// Smallest QR version (1..=40) whose byte-mode EC-L capacity holds `len`
+/// bytes, or `None` if `len` exceeds Version 40's capacity ([`QR_MAX_BYTES`]).
+pub fn min_version_for(len: usize) -> Option<u8> {
     QR_BYTE_CAPACITY_L
         .iter()
         .position(|&cap| cap >= len)
-        .map(|i| Version::Normal((i + 1) as i16))
+        .map(|i| (i + 1) as u8)
 }
 
 /// A rendered QR code: flat module grid (row-major) + side length.
@@ -64,10 +84,11 @@ impl QrMatrix {
 /// Encode `data` into the smallest EC-L QR version that holds it.
 ///
 /// Starts at the version suggested by the byte-mode capacity table
-/// ([`min_version_for`]) and, if that exact version refuses the byte-mode bit
-/// stream, walks upward version by version up to Version 40. Walking up
-/// guarantees every in-range frame renders, so the high-speed tier never
-/// stutters on a rare capacity-edge symbol.
+/// ([`min_version_for`]) and, if `fast_qr` rejects that exact version (a rare
+/// capacity-edge case where the fixed-width frame header consumes the last few
+/// bytes of headroom), walks upward version by version up to Version 40. Walking
+/// up guarantees every in-range frame renders, so the high-speed tier never
+/// stutters.
 ///
 /// `data` must be ≤ [`QR_MAX_BYTES`]; the caller (frame layer) guarantees this
 /// since frames are fixed-size and well under a Version-40 payload.
@@ -76,32 +97,28 @@ pub fn encode(data: &[u8]) -> Result<QrMatrix> {
         need: QR_MAX_BYTES,
         have: data.len(),
     })?;
-    // `min_version_for` returns `Version::Normal(v)` with v in 1..=40. Walk from
-    // that version up to 40 inclusive, returning the first that encodes.
-    let start_v = match start {
-        Version::Normal(v) => v,
-        // Micro codes aren't produced here (we always request Normal); defend.
-        _ => 1,
-    };
-    for v in start_v..=40 {
-        let version = Version::Normal(v);
-        let mut bits = Bits::new(version);
-        if bits
-            .push_byte_data(data)
-            .and_then(|_| bits.push_terminator(QR_EC_LEVEL))
-            .is_err()
+    // Walk from the table-suggested version up to 40 inclusive, returning the
+    // first version that `fast_qr` accepts.
+    for v in start..=40 {
+        let version = VERSIONS[(v - 1) as usize];
+        let code = match QRBuilder::new(data)
+            .ecl(ECL::L)
+            .version(version)
+            .build()
         {
-            continue;
-        }
-        if let Ok(code) = QrCode::with_bits(bits, QR_EC_LEVEL) {
-            let size = code.width();
-            let modules = code
-                .to_colors()
-                .into_iter()
-                .map(|c| c != qrcode::types::Color::Light)
-                .collect();
-            return Ok(QrMatrix { modules, size });
-        }
+            Ok(code) => code,
+            // Capacity edge: this version can't hold the payload; try the next.
+            Err(_) => continue,
+        };
+        let size = code.size;
+        // `fast_qr::QRCode.data` is a fixed `[Module; 177*177]` array; only the
+        // leading `size*size` entries are meaningful. `Module::value()` is
+        // `true` for a dark module — exactly the convention `QrMatrix` uses.
+        let modules = code.data[..size * size]
+            .iter()
+            .map(|m| m.value())
+            .collect();
+        return Ok(QrMatrix { modules, size });
     }
     Err(Error::BufferTooShort {
         need: QR_MAX_BYTES,
@@ -131,115 +148,9 @@ pub fn encode(data: &[u8]) -> Result<QrMatrix> {
 //   - 接收端是否需要增加 `setTryRotate(false)` 以避免颜色通道混淆
 //
 // ── End future work ──────────────────────────────────────────────────────
+#[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_old_vs_new_sizes() {
-        use crate::{Frame, FLAG_DESCRIPTOR};
-        
-        let frame = Frame::build(
-            0u128,
-            0, // flags
-            1, // sbn
-            1, // esi
-            1, // total_blocks
-            10, // total_symbols
-            1024, // symbol_size
-            1, // frame_index
-            1234567, // timestamp_ms
-            &vec![0u8; 1024],
-        );
-        let bytes = frame.to_bytes();
-        
-        let m_new = encode(&bytes).unwrap();
-        
-        // Old encoding method
-        let encode_old = |data: &[u8]| -> QrMatrix {
-            let start = min_version_for(data.len()).unwrap();
-            let start_v = match start { Version::Normal(v) => v, _ => 1 };
-            for v in start_v..=40 {
-                if let Ok(code) = QrCode::with_version(data, Version::Normal(v), QR_EC_LEVEL) {
-                    let size = code.width();
-                    let modules = code.to_colors().into_iter().map(|c| c != qrcode::types::Color::Light).collect();
-                    return QrMatrix { modules, size };
-                }
-            }
-            panic!("failed old");
-        };
-        
-        let m_old = encode_old(&bytes);
-        
-        println!("Data frame - Old size: {}, New size: {}", m_old.size, m_new.size);
-        
-        let desc_frame = Frame::build(
-            0u128,
-            FLAG_DESCRIPTOR, // flags
-            0,
-            0,
-            1,
-            10,
-            1024,
-            0,
-            1234567,
-            &vec![0u8; 1024],
-        );
-        let desc_bytes = desc_frame.to_bytes();
-        let desc_m_new = encode(&desc_bytes).unwrap();
-        let desc_m_old = encode_old(&desc_bytes);
-        
-        // New encoder must pick a valid QR at least as compact as the legacy scan.
-        assert!(m_new.size > 0);
-        assert!(desc_m_new.size > 0);
-        assert!(
-            m_new.size <= m_old.size,
-            "data frame: new QR version {} should be <= old {}",
-            m_new.size,
-            m_old.size
-        );
-        assert!(
-            desc_m_new.size <= desc_m_old.size,
-            "descriptor frame: new QR version {} should be <= old {}",
-            desc_m_new.size,
-            desc_m_old.size
-        );
-    }
-
-    #[test]
-    fn compare_with_version_and_with_bits() {
-        use crate::Frame;
-        
-        let symbol_sizes = [512, 896, 1008, 1024, 1400];
-        
-        for &sym_size in &symbol_sizes {
-            let frame = Frame::build(
-                0u128,
-                0, // flags
-                1, // sbn
-                1, // esi
-                1, // total_blocks
-                10, // total_symbols
-                sym_size,
-                1, // frame_index
-                1234567, // timestamp_ms
-                &vec![0u8; sym_size as usize],
-            );
-            let bytes = frame.to_bytes();
-            
-            let version = min_version_for(bytes.len()).unwrap();
-            let code_version = QrCode::with_version(&bytes, version.clone(), QR_EC_LEVEL).unwrap();
-            
-            let mut bits = Bits::new(version.clone());
-            bits.push_byte_data(&bytes).unwrap();
-            bits.push_terminator(QR_EC_LEVEL).unwrap();
-            let code_bits = QrCode::with_bits(bits, QR_EC_LEVEL).unwrap();
-            
-            let m_version: Vec<bool> = code_version.to_colors().into_iter().map(|c| c != qrcode::types::Color::Light).collect();
-            let m_bits: Vec<bool> = code_bits.to_colors().into_iter().map(|c| c != qrcode::types::Color::Light).collect();
-            
-            assert_eq!(m_version, m_bits, "QR codes are not identical for sym_size = {}", sym_size);
-        }
-    }
 
     #[test]
     fn encodes_frame_sized_payload() {
@@ -252,11 +163,49 @@ mod tests {
     }
 
     #[test]
+    fn encodes_all_sender_symbol_sizes() {
+        // Every symbol size the sender exposes as a speed preset must render at
+        // the expected minimal QR version/side. This guards the capacity table
+        // ↔ `fast_qr` version hand-off for the full preset range.
+        use crate::Frame;
+        // (symbol_size, expected_side)  — side = 21 + 4*(v-1)
+        let cases: [(usize, usize); 5] = [
+            (512, 81),   // V16
+            (896, 105),  // V22
+            (1008, 109), // V23
+            (1024, 109), // V23
+            (1400, 125), // V27
+        ];
+        for &(sym_size, expected_side) in &cases {
+            let frame = Frame::build(
+                0u128,
+                0, // flags
+                1, // sbn
+                1, // esi
+                1, // total_blocks
+                10, // total_symbols
+                sym_size as u32,
+                1, // frame_index
+                1234567, // timestamp_ms
+                &vec![0u8; sym_size],
+            );
+            let bytes = frame.to_bytes();
+            let m = encode(&bytes).unwrap();
+            assert_eq!(
+                m.size, expected_side,
+                "symbol_size={} frame ({} wire bytes) expected side {}, got {}",
+                sym_size, bytes.len(), expected_side, m.size
+            );
+            assert_eq!(m.modules.len(), expected_side * expected_side);
+        }
+    }
+
+    #[test]
     fn picks_minimal_version() {
-        assert_eq!(min_version_for(1088), Some(Version::Normal(23)));
-        assert_eq!(min_version_for(576), Some(Version::Normal(16)));
-        assert_eq!(min_version_for(17), Some(Version::Normal(1)));
-        assert_eq!(min_version_for(QR_MAX_BYTES), Some(Version::Normal(40)));
+        assert_eq!(min_version_for(1088), Some(23));
+        assert_eq!(min_version_for(576), Some(16));
+        assert_eq!(min_version_for(17), Some(1));
+        assert_eq!(min_version_for(QR_MAX_BYTES), Some(40));
         assert_eq!(min_version_for(QR_MAX_BYTES + 1), None);
     }
 

@@ -24,6 +24,7 @@ dist-standalone/
 # per-package). These are regenerable build artifacts, never source.
 apps/sender/build/
 apps/sender/.plasmo/
+apps/sender/assets/icon.png
 .plasmo/
 
 # Android / Gradle
@@ -66,3 +67,4 @@ release/
 
 # Local agent working directories (session memory, scratch)
 .workbuddy/
+.zcode/

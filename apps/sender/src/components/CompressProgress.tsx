@@ -22,7 +22,7 @@
  *
  * All timing lives in React state keyed off [phase]. When a new transfer
  * begins, the worker re-emits "reading" (the first phase), which naturally
- * resets the list — and when the overlay is hidden (phase → null/done), a
+ * resets the list — and when the overlay is hidden (phase → null), a
  * `useEffect` clears the recorded timestamps so the next transfer starts clean.
  * Previous versions stored timestamps in `useRef`, which persisted across
  * transfers (the component never unmounts) and left stale timers / stuck steps.
@@ -94,7 +94,7 @@ export function CompressProgress({ phase, displayName, originalSize, isBundle }:
 
   // 100ms ticker, only while visible.
   useEffect(() => {
-    if (!phase || phase === "done") return
+    if (!phase) return
     const id = setInterval(() => setNow(Date.now()), 100)
     return () => clearInterval(id)
   }, [phase])
@@ -102,7 +102,7 @@ export function CompressProgress({ phase, displayName, originalSize, isBundle }:
   // Track phase transitions: stamp the enter time of a new phase, and freeze
   // the just-left phase's duration.
   useEffect(() => {
-    if (!phase || phase === "done") return
+    if (!phase) return
     setPrevPhase((prev) => {
       // Finalize the previous phase's duration when we advance to a new one.
       if (prev && prev !== phase) {
@@ -121,14 +121,14 @@ export function CompressProgress({ phase, displayName, originalSize, isBundle }:
   // timing. Previous versions used useRef, which survived across transfers and
   // left stale/frozen timers.
   useEffect(() => {
-    if (!phase || phase === "done") {
+    if (!phase) {
       setEnterMs({})
       setDoneMs({})
       setPrevPhase(null)
     }
   }, [phase])
 
-  if (!phase || phase === "done") return null
+  if (!phase) return null
 
   const steps = stepOrder(!!isBundle)
   const activeIdx = steps.findIndex((s) => s.phase === phase)

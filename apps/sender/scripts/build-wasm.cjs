@@ -13,21 +13,27 @@
  *
  * ## ⚠️ Measured performance (do NOT expect a speedup)
  *
- * Benchmark on the full `next_qr_into` path (V25 / 1400B symbol, 5000 frames):
- *   - SIMD vs scalar: 0.95× (slightly SLOWER). `raptorq` and `qrcode` are pure
- *     scalar Rust with no `std::arch::wasm32::*` intrinsics, so `+simd128` has
- *     nothing to vectorize — it only makes the wasm ~8KB larger (312KB vs
+ * Benchmark on the full `next_qr_into` path (V25 / 1400B symbol, 5000 frames),
+ * taken BEFORE the QR library swap (i.e. with the old scalar `qrcode` crate):
+ *   - SIMD vs scalar: 0.95× (slightly SLOWER). `raptorq` and `qrcode` were pure
+ *     scalar Rust with no `std::arch::wasm32::*` intrinsics, so `+simd128` had
+ *     nothing to vectorize — it only made the wasm ~8KB larger (312KB vs
  *     304KB) and marginally slower from icache pressure.
- *   - externref: no measurable win either; the cost is drowned out by QR
+ *   - externref: no measurable win either; the cost was drowned out by QR
  *     Reed-Solomon encoding (~4.8ms/frame, ~98% of per-tick work).
+ *
+ * NOTE: QR encoding now uses `fast_qr` (replaces `qrcode`, ~7-9× faster on the
+ * Reed-Solomon path), so QR is no longer the dominant cost. The SIMD finding
+ * still holds: `fast_qr` likewise has no wasm32 SIMD intrinsics, so `+simd128`
+ * remains a no-op for the hot path. Re-benchmark if a SIMD-aware QR lib is added.
  *
  * ## Why keep the dual build + SIMD then
  *
  *   1. Solves the root cause of the Chrome 87 `externref` CompileError: MV2
  *      gets the legacy (externref-free) build, MV3 gets the modern one.
  *   2. Keeps the build infrastructure ready for the day we swap in a SIMD-aware
- *      QR library or RaptorQ GF(256) SIMD — flipping `+simd128` on/off is then
- *      a one-line change with instant effect.
+ *      RaptorQ GF(256) SIMD path — flipping `+simd128` on/off is then a
+ *      one-line change with instant effect.
  *
  * ## How the dual-version build stays reproducible
  *
@@ -37,10 +43,9 @@
  * Chrome-87-safe module. To build the SIMD variant against a newer
  * wasm-bindgen we temporarily rewrite those three version pins to a modern
  * matched set, regenerate Cargo.lock, run wasm-pack, then RESTORE the
- * original bytes verbatim in `finally`. `git status` after this script is
- * therefore always clean (modulo the generated wasm-pkg-* dirs which are
- * git-ignored). A `git checkout Cargo.toml Cargo.lock` is the belt-and-
- * suspenders fallback if the restore somehow fails.
+ * original bytes verbatim in `finally`. This preserves even uncommitted
+ * Cargo.toml/Cargo.lock edits that existed before the build; the script never
+ * uses `git checkout` to overwrite developer work.
  *
  * Output dirs (both git-ignored via their internal `*` .gitignore copied from
  * wasm-pack's pkg/ output):
@@ -57,6 +62,7 @@ const path = require("path");
 const root = path.resolve(__dirname, "..");
 const repoRoot = path.resolve(root, "../..");
 const cargoTomlPath = path.join(repoRoot, "core/transfer-engine/Cargo.toml");
+const cargoLockPath = path.join(repoRoot, "Cargo.lock");
 
 // Modern, matched triple: these three crates release in lockstep, so their
 // versions must move together. 0.2.125 / 0.3.102 is the current stable line.
@@ -79,6 +85,7 @@ function fail(msg) {
 // --- 1. Read the canonical Cargo.toml and verify it's in the expected
 //        legacy-pinned state before we touch anything. ----------------------
 const originalToml = fs.readFileSync(cargoTomlPath, "utf8");
+const originalLock = fs.readFileSync(cargoLockPath);
 
 const LEGACY_PATTERNS = {
   wasmBindgen: /wasm-bindgen = \{ version = "=0\.2\.92"/,
@@ -121,41 +128,23 @@ try {
   run("cargo generate-lockfile", { cwd: repoRoot });
   run("npm run wasm:simd");
 } finally {
-  // --- 4. Restore Cargo.toml verbatim + Cargo.lock via git checkout. -----
+  // --- 4. Restore both files from their pre-build byte snapshots. --------
   //    This is the critical reproducibility invariant: after this script,
   //    `git status` must show no Cargo.toml / Cargo.lock changes.
   //
-  //    Cargo.toml we restore from the in-memory `originalToml` snapshot (no git
-  //    round-trip needed). Cargo.lock we restore via `git checkout`: we MUST
-  //    NOT use `cargo generate-lockfile` here, because that would re-resolve
-  //    the WHOLE dependency tree and bump unrelated packages (bytes, cc, syn,
-  //    …) to their latest compatible versions, leaking unrelated changes into
-  //    the lockfile. `git checkout Cargo.lock` restores it byte-exact.
+  //    Never restore through Git: doing so discards legitimate uncommitted
+  //    lockfile changes that predated this build. We also must not run
+  //    `cargo generate-lockfile` here because it would re-resolve unrelated
+  //    packages. The startup snapshots preserve the caller's exact bytes.
   try {
     fs.writeFileSync(cargoTomlPath, originalToml);
-    execSync("git checkout Cargo.lock", {
-      cwd: repoRoot,
-      stdio: "inherit",
-    });
-    console.log("\n✓ Cargo.toml + Cargo.lock restored to legacy =0.2.92 state.");
+    fs.writeFileSync(cargoLockPath, originalLock);
+    console.log("\n✓ Cargo.toml + Cargo.lock restored to their pre-build bytes.");
   } catch (restoreErr) {
-    // Last line of defense: restore Cargo.toml from git too.
-    console.error(
-      "\n✖ Restore failed — falling back to `git checkout Cargo.toml Cargo.lock`"
-    );
-    try {
-      execSync("git checkout Cargo.toml Cargo.lock", {
-        cwd: repoRoot,
-        stdio: "inherit",
-      });
-      console.log("\n✓ Cargo.toml + Cargo.lock restored via git fallback.");
-    } catch (gitErr) {
-      console.error(
-        "\n‼ git checkout also failed. RUN THIS MANUALLY before committing:"
-      );
-      console.error(`    cd ${repoRoot} && git checkout Cargo.toml Cargo.lock`);
-      throw gitErr;
-    }
+    console.error("\n‼ Failed to restore the pre-build Cargo file snapshots.");
+    console.error(`   Cargo.toml: ${cargoTomlPath}`);
+    console.error(`   Cargo.lock: ${cargoLockPath}`);
+    throw restoreErr;
   }
 }
 

@@ -120,10 +120,11 @@ mod tests {
 
     #[test]
     fn fps_and_throughput() {
-        let mut s = Stats::default();
-        s.frames = 300;
-        s.bytes = 300 * 1024;
-        s.elapsed_ms = 10_000;
+        let s = Stats {
+            frames: 300,
+            bytes: 300 * 1024,
+            elapsed_ms: 10_000,
+        };
         assert!((s.fps() - 30.0).abs() < 0.01);
         assert!((s.throughput_bps() - 30.0 * 1024.0).abs() < 0.5);
     }

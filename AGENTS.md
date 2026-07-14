@@ -79,19 +79,20 @@ npm run wasm
 #     • wasm-pkg-simd/   — wasm-bindgen =0.2.125（脚本临时升级）、+simd128、含 externref
 #       → Chrome 91+/FF 89+ 支持 SIMD、Chrome 96+/FF 116+ 支持 externref，供 MV3 目标使用
 #   ⚠️ Cargo.toml 还原：build-wasm.cjs 在构建 MV3 时临时把 wasm-bindgen 改成 =0.2.125
-#       （js-sys/web-sys 同期 0.3.102），构建完在 finally 里：
-#         ① 内存还原 Cargo.toml（从脚本启动时读的 originalToml 字节级回写）
-#         ② `git checkout Cargo.lock` 还原 Cargo.lock（不能用 cargo generate-lockfile，
-#            那会把无关包也升到最新，污染 lockfile）
-#       跑完 `npm run wasm` 后 `git status` 对 Cargo.toml/Cargo.lock 必须无改动。
+#       （js-sys/web-sys 同期 0.3.102）。脚本启动时按字节快照 Cargo.toml/Cargo.lock，
+#       构建完在 finally 中逐字节回写；不调用 `git checkout`，因此不会覆盖构建前
+#       已存在的未提交修改（也不能用 cargo generate-lockfile 恢复，那会升级无关包）。
+#       跑完 `npm run wasm` 后两个 Cargo 文件必须与运行前逐字节一致。
 #   说明: `wasm` feature 已隐含 `serde`（见 core/transfer-engine/Cargo.toml）。
 #         SIMD（+simd128）是 RUSTFLAGS target-feature，与 wasm-bindgen 版本正交——
 #         0.2.92 也能开 SIMD。MV3 同时开新版 wasm-bindgen（externref）+ SIMD。
-#   ⚠️ 实测结论（见 §5.7）：当前 raptorq/qrcode crate 均为纯标量 Rust，无 SIMD
-#       intrinsics，+simd128 对热路径无收益（0.95×，wasm 反而大 ~8KB）。新版
-#       wasm-bindgen 的 externref 对 JS↔WASM 交互也无显著提升。双产物机制的
-#       真实价值是「MV2 兼容老 Chrome + MV3 用新工具链」各得其所，并为未来
-#       引入 SIMD 化的库（如换更快 QR 库、RaptorQ 用 GF(256) SIMD）铺路。
+#   ⚠️ 实测结论（见 §5 第6条）：当前 raptorq crate 为纯标量 Rust，无 SIMD
+#       intrinsics，+simd128 对其无收益。QR 编码已改用 fast_qr（~7-9× 快于
+#       旧 qrcode crate，Reed-Solomon 路径大幅提速，见 §5 第6条），但 fast_qr 同样
+#       无 wasm32 SIMD intrinsics，+simd128 对它也无作用（wasm 反而大 ~8KB）。
+#       新版 wasm-bindgen 的 externref 对 JS↔WASM 交互也无显著提升。双产物机制
+#       的真实价值是「MV2 兼容老 Chrome + MV3 用新工具链」各得其所，并为未来
+#       引入 SIMD 化的库（如 RaptorQ 用 GF(256) SIMD）铺路。
 
 # ② 构建扩展（全部 4 个目标，会自动先跑 extract-lzma-wasm + build-wasm.cjs）
 npm run build
@@ -278,7 +279,7 @@ npm run preview        # 本地预览构建产物
 | 帧封装 | `core/qr-protocol/src/frame.rs:71,109` | `build` / `to_bytes` |
 | 会话 ID 派生（FNV-1a 128） | `core/qr-protocol/src/session.rs:23` | `derive`——必须与 TS 端位一致 |
 | 压缩分发 + 解压炸弹防护 | `core/qr-protocol/src/compress.rs:68,97` | `compress_with` / `decompress_with_limit` |
-| QR 矩阵（动态最小版本） | `core/qr-protocol/src/qr_render.rs:74` | `encode`：576B帧→V16，1088B帧→V23 |
+| QR 矩阵（动态最小版本） | `core/qr-protocol/src/qr_render.rs:74` | `encode`：fast_qr 后端，576B帧→V16，1088B帧→V23 |
 | **发送端帧流入口** | `core/transfer-engine/src/sender.rs:164` | `next_frame`：每16帧插描述符，首帧即描述符 |
 | 无限新鲜修复符号 | `core/transfer-engine/src/sender.rs:235` | `next_symbol_id`：源一遍→无限新修复 |
 | **接收端摄入入口** | `core/transfer-engine/src/receiver.rs:147` | `ingest`：缓存引导→描述符确认 OTI→喂解码器 |
@@ -306,7 +307,7 @@ npm run preview        # 本地预览构建产物
 | 多文件容器 | `apps/sender/src/wasm/bundle.ts` | 打包格式（ETBUNDL1） |
 | 4 个页面 | `apps/sender/src/pages/*.tsx` | FileSelect / Params / Play / Stats。FileSelect 顶部有「文件/文字」Tab 切换 |
 | **文字草稿（IndexedDB）** | `apps/sender/src/storage/textDrafts.ts` + `FileSelectPage.tsx` TextTab | 命名保存（原文不 trim，与单条发送一致）；载入后可「更新草稿」；「一起发送」→ `draftsToFiles`（按保存时间正序 + `dedupeDraftFilenamesForBundle` 重名后缀）→ `processFiles`/ETBUNDL1。单条「发送当前这一条」仍走 `processText`/ETTEXTv1 |
-| manifest 后处理 | `apps/sender/scripts/fix-manifest.cjs` | 图标/MV2 CSP/Firefox id；**兜底删 `default_popup`**（保证 onClicked 生效） |
+| manifest 前/后处理 | `prepare-plasmo-icon.cjs` + `fix-manifest.cjs` | 前者从 icon128 生成 git-ignored 的 `assets/icon.png`（clean build 必需）；后者写入各尺寸图标/MV2 CSP/Firefox id，并兜底删 `default_popup` |
 
 ### 3.3 Android 扫码端
 
@@ -395,9 +396,7 @@ npm run preview        # 本地预览构建产物
 
 > 调研发现多处文档滞后于代码。**修改/引用时一律以代码为准**。下面是已确认的偏差：
 
-1. **`docs/api.md` JNI 签名过时**：
-   - 写 `receiverIngest` 返回 `ByteArray?`（进度 JSON）—— **实际返回 packed `jlong` 位域**（`jni.rs:68`）。位布局见 [`docs/SPEC.md`](docs/SPEC.md) §JNI ingest 状态字。Kotlin 侧 `IngestStatus.unpack`（`ReceiverSessionManager.kt:67`）镜像此布局。
-   - 写 `receiverAssemble(handle, outBuf): Int` —— **实际是 `receiverAssembleBytes(handle): ByteArray`**（原子返回完整字节，修复了 >2GB 截断 + 长度/填充竞态）。
+1. **JNI 签名已在本轮审计同步**：`docs/api.md`、`docs/SPEC.md` 与 `NativeBridge.kt` 现统一为 `receiverIngest(...): Long`、`receiverProgressJson(...): ByteArray?`、`receiverAssembleBytes(...): ByteArray?`。后续修改 JNI 时须三处同步；位布局见 [`docs/SPEC.md`](docs/SPEC.md) §JNI ingest 状态字。
 
 2. **压缩参数（两端不同，勿混为一谈）**：
    - **浏览器发送端**（`apps/sender/src/wasm/compress.ts:55-64`）：Zstd **level 1**、Xz **level 9**、early-exit 阈值 **70%**（`e10079d`/`c2ae4a2` 提交已调；三算法选优 raw/zstd/xz）。
@@ -410,19 +409,19 @@ npm run preview        # 本地预览构建产物
 
 5. **`derive_meta_from_totals` 已废弃**：`receiver.rs:422`，仅保留 JNI ABI 兼容，**新代码勿调用**（其 OTI 构建在大文件上会 assert）。现代路径：从描述符帧拿权威 OTI。
 
-6. **wasm-bindgen 双轨制（MV2=0.2.92 旧版 / MV3=0.2.125 新版）**：`core/transfer-engine/Cargo.toml` **默认仍钉死 `=0.2.92`**（js-sys/web-sys `=0.3.69`），**不要**改回宽松的 `"0.2"` / `"0.3"`——任何 `cargo update` 都会把默认 lockfile 漂移到 0.2.93+ 并破坏 MV2 构建。MV3 走另一条路：`apps/sender/scripts/build-wasm.cjs` 在构建 `wasm-pkg-simd/` 时**临时**把 Cargo.toml 改写成 `=0.2.125`（js-sys/web-sys `=0.3.102`）+ `RUSTFLAGS=+simd128`，构建完在 `finally` 里用 ① 内存回写 Cargo.toml + ② `git checkout Cargo.lock` 字节级还原，保证跑完后 `git status` 对 Cargo 文件零改动。
+6. **wasm-bindgen 双轨制（MV2=0.2.92 旧版 / MV3=0.2.125 新版）**：`core/transfer-engine/Cargo.toml` **默认仍钉死 `=0.2.92`**（js-sys/web-sys `=0.3.69`），**不要**改回宽松的 `"0.2"` / `"0.3"`——任何 `cargo update` 都会把默认 lockfile 漂移到 0.2.93+ 并破坏 MV2 构建。MV3 走另一条路：`apps/sender/scripts/build-wasm.cjs` 在构建 `wasm-pkg-simd/` 时**临时**把 Cargo.toml 改写成 `=0.2.125`（js-sys/web-sys `=0.3.102`）+ `RUSTFLAGS=+simd128`。脚本在改写前按字节快照 Cargo.toml/Cargo.lock，构建完在 `finally` 中逐字节恢复，**不会用 Git 覆盖构建前已有的未提交修改**。
    - **为什么是双轨**：wasm-bindgen 0.2.93+ 默认开 reference-types proposal（`externref` 值类型），仅 Chrome 96+ 支持；Chrome 87/88 会在 `WebAssembly.instantiateStreaming()` 报 `CompileError: invalid value type 'externref'`。Chrome 87 是 MV2 的兼容目标。MV3 同时启用新版 externref（JS↔WASM 引用传递）+ SIMD（`+simd128` target-feature）。SIMD 本身与 wasm-bindgen 版本正交——0.2.92 也能开——但新版 externref 必须升 wasm-bindgen，MV3 默认把两者一起给。
    - **⚠️ 实测性能结论（不要据此期待提速）**：对当前 `next_qr_into` 全链路（RaptorQ 取符号 + Frame 序列化 + QR Reed-Solomon 编码 + 矩阵构建）的 Node benchmark（V25/1400B symbol、5000 帧）：
-     - **SIMD vs 标量**：0.95×（**轻微变慢**）。`raptorq` 与 `qrcode` crate 均为纯标量 Rust，无 `std::arch::wasm32::*` SIMD intrinsics，`+simd128` 对它们毫无作用，只让 wasm 大 ~8KB（312KB vs 304KB）并因指令缓存压力略慢。
-     - **新版 wasm-bindgen externref**：对 `&mut [u8]` 传递无明显收益（淹没在 QR 编码耗时里）。
-     - **真实瓶颈是 QR 编码**：单帧 ~4.8ms，其中 QR Reed-Solomon + 矩阵构建占 ~98%，Frame 序列化 + 数据传递占 ~2%。要提速只能换更快的 QR 库（如 C 实现的 ZXing）、降 symbol size（低 QR 版本）、或多线程并行编码（需 SharedArrayBuffer + COOP/COEP）。
-   - **那为什么还保留双产物 + SIMD**：① 双产物解决「MV2 兼容老 Chrome + MV3 用新工具链」的根本诉求（externref 错误的根治方案）；② 为未来引入 SIMD 化的库（换 QR 库、RaptorQ 用 GF(256) SIMD）保留构建基础设施——届时去掉/保留 `+simd128` 即可即时生效。
+     - **SIMD vs 标量**：0.95×（**轻微变慢**）。`raptorq` crate 为纯标量 Rust，无 `std::arch::wasm32::*` SIMD intrinsics，`+simd128` 对它毫无作用。QR 编码现用 `fast_qr` crate（已替代旧 `qrcode`，Reed-Solomon 路径 ~7-9× 提速，见下条），但 `fast_qr` 同样无 wasm32 SIMD intrinsics。`+simd128` 只让 wasm 大 ~8KB（312KB vs 304KB）并因指令缓存压力略慢。
+     - **新版 wasm-bindgen externref**：对 `&mut [u8]` 传递无明显收益。
+     - **原真实瓶颈 QR 编码已大幅缓解**：旧 `qrcode` crate 单帧 ~4.8ms、占每帧 ~98%（V25/1400B benchmark），现已换用 `fast_qr`（~7-9× 快），QR 编码不再是主导瓶颈。剩余提速方向：降 symbol size（低 QR 版本）、多线程并行编码（需 SharedArrayBuffer + COOP/COEP）、或 RaptorQ GF(256) SIMD。
+   - **那为什么还保留双产物 + SIMD**：① 双产物解决「MV2 兼容老 Chrome + MV3 用新工具链」的根本诉求（externref 错误的根治方案）；② 为未来引入 SIMD 化的库（RaptorQ 用 GF(256) SIMD）保留构建基础设施——届时去掉/保留 `+simd128` 即可即时生效。
    - **产物分流**：`wasm-pkg-legacy/`（MV2 用，无 SIMD/externref）+ `wasm-pkg-simd/`（MV3 用，两者都有）。`build-all.cjs` 按 `target.endsWith('mv3')` 把对应目录复制到 `wasm-pkg/` 后 plasmo build。loader.ts 的 import 路径固定 `../../wasm-pkg/`，靠 swap 目录名切换。
-   - **升级现代版**：改 `build-wasm.cjs` 顶部的 `MODERN = { wasmBindgen, jsSys, webSys }` 三元组，三者必须同期发版、版本号匹配（见 crates.io）。改完跑 `npm run wasm` 验证 `git status` 干净。
+   - **升级现代版**：改 `build-wasm.cjs` 顶部的 `MODERN = { wasmBindgen, jsSys, webSys }` 三元组，三者必须同期发版、版本号匹配（见 crates.io）。改完跑 `npm run wasm`，确认 Cargo 文件与运行前逐字节一致。
    - **症状定位**：若扩展在新 Chrome 正常、在旧 Chrome（87/88）报 `CompileError: invalid value type 'externref'`，即 MV2 产物意外用了新版 wasm-bindgen——检查 `build-all.cjs` 是否按 MV2/MV3 正确 swap。
 
 7. **WASM 零拷贝 API**：`SenderSessionWasm` 同时提供 `next_qr`/`next_qr_multi`（返回 `Vec<u8>`，wasm-bindgen 深拷贝成新 `Uint8Array`）和 `next_qr_into`/`next_qr_multi_into`（写入调用方提供的 `&mut [u8]`，无分配）。**热路径（`QrStream.tsx` 的 rAF 循环）用 `_into` 变体**——组件用 `useRef` 预分配最大尺寸 buffer（V40=177²=31329 字节）跨帧复用。保留旧变体是为了备用路径/调试。**注意**：`_into` 写入的 subarray 视图只在当帧有效（下一帧会被覆盖），`drawMatrix` 必须在同一 tick 内 putImageData 完毕。
-   - **⚠️ 实测性能结论**：零拷贝 vs 返回 `Vec` 实测 **0.99×（持平）**。QR 编码耗时（~4.8ms）完全主导，`Vec<u8>` → `Uint8Array` 的深拷贝（V25=13689 字节）相对可忽略。保留 `_into` 的真实价值不是单帧提速，而是**消除每帧的堆分配**（4码×60fps = 240 次/秒），降低 GC 压力（benchmark 测不到 GC 抖动，但长时间运行下 GC stall 会导致 rAF 周期性掉帧）。
+   - **⚠️ 实测性能结论**：零拷贝 vs 返回 `Vec` 实测 **0.99×（持平）**。换用 `fast_qr` 后 QR 编码已不再是压倒性主导（旧 `qrcode` 单帧 ~4.8ms 占 ~98%），`Vec<u8>` → `Uint8Array` 的深拷贝（V25=13689 字节）仍相对可忽略。保留 `_into` 的真实价值不是单帧提速，而是**消除每帧的堆分配**（4码×60fps = 240 次/秒），降低 GC 压力（benchmark 测不到 GC 抖动，但长时间运行下 GC stall 会导致 rAF 周期性掉帧）。
    - **drawMatrix 像素填充**：当前是逐像素 `pixels[i] = black` 写（跳过白模块）。曾尝试用 `Uint32Array.set(blackRow, offset)` 批量复制整行黑模块，**实测 0.5×（慢一倍）**——`TypedArray.set` 对 modulePx=4~7 的小块有调用开销（边界检查 + memcpy setup），拐点在 modulePx ≥ 16。已回退，勿再尝试此「优化」。
 
 8. **网页端（apps/web）零代码复用 sender**：web 工程通过 Vite alias `@/ → ../sender/src/` **直接跨工程 import** `apps/sender/src/options.tsx` 的 `App`，所有页面/组件/worker/wasm 模块都来自 sender，**不复制任何业务代码**。改 sender 业务代码，web 端自动同步。
@@ -449,7 +448,7 @@ npm run preview        # 本地预览构建产物
 ## 7. 约定
 
 - **语言**：文档、提交信息均用中文；代码注释中英混合（Rust 偏英文 doc-comment，TS 偏英文）。
-- **构建 profile**：`release` 用 `opt-level="z"` + LTO + `panic="abort"`（求小体积）；但热路径 crate（raptorq-core / qr-protocol / raptorq / qrcode / crc32fast / transfer-engine）单独提升到 `opt-level=3`（见 `Cargo.toml`）。
+- **构建 profile**：`release` 用 `opt-level="z"` + LTO + `panic="abort"`（求小体积）；但热路径 crate（raptorq-core / qr-protocol / raptorq / fast_qr / crc32fast / transfer-engine）单独提升到 `opt-level=3`（见 `Cargo.toml`）。
 - **不提交产物**：`target/`、`wasm-pkg/`、`build/`、`dist/`、`*.so`、`*.apk`、`*.pem`、`*.keystore` 均在 `.gitignore`。
 - **修改帧/协议字段**：两端（Rust + TS + Kotlin）必须同步；更新 [`docs/SPEC.md`](docs/SPEC.md) 的位级规格。
 - **改码即改文档（AI 硬性收尾）**：每次改动代码后，凡是影响文档中引用过的**事实**——常量值、默认值、`file:line` 行号、函数签名、帧/字段布局、文件路径、目录结构、构建命令、版本号——都必须在**同一个提交**里回写对应文档（AGENTS.md 的 §3 导航 / §4 调试表 / §5 偏差清单，或 `docs/SPEC.md` 的权威源/速查表，或具体 `docs/*.md`）。改了哪一端，就核对该端在文档里的所有引用点。提交前自检：「本次改的符号/常量/路径，在文档里被引用过吗？被引用的地方还成立吗？」**不更新文档的代码改动视为未完成**。这是防止文档再次漂移的唯一手段，也是上一轮 SPEC.md/AGENTS.md 互相矛盾（浏览器默认 512 vs 1400）的根本成因——代码改了，文档没跟上。
@@ -464,7 +463,7 @@ npm run preview        # 本地预览构建产物
 | RaptorQ 参数 | [docs/raptorq-params.md](docs/raptorq-params.md) |
 | 系统架构 | [docs/architecture.md](docs/architecture.md) |
 | 数据流 | [docs/data-flow.md](docs/data-flow.md) |
-| API 参考（⚠️ JNI 部分已过时，见 §5） | [docs/api.md](docs/api.md) |
+| API 参考 | [docs/api.md](docs/api.md) |
 | 构建指南 - 浏览器 | [docs/build-browser.md](docs/build-browser.md) |
 | 构建指南 - 网页端 | [docs/build-web.md](docs/build-web.md) |
 | 构建指南 - Android | [docs/build-android.md](docs/build-android.md) |

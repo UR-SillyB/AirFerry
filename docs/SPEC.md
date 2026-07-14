@@ -292,9 +292,9 @@ offset  size   field
 |------|------|------|
 | `receiverCreate` | `(sidLo, sidHi, _blocks, _symbols, _symSize) -> Long` | 缓存引导，**不**从 caller 提供的 totals 建解码器（等待首个校验过的描述符帧） |
 | `receiverIngest` | `(handle, frameBytes) -> Long` | 见上 |
-| `receiverProgressJson` | `(handle) -> String` | 按需 JSON（UI ~7Hz） |
+| `receiverProgressJson` | `(handle) -> ByteArray?` | NUL 结尾的按需 JSON（UI ~7Hz）；native 失败可返回 null/空数组 |
 | `receiverIsComplete` | `(handle) -> Int` | 0/1 |
-| `receiverAssembleBytes` | `(handle) -> ByteArray` | **原子返回完整字节**（修复了旧 `receiverAssemble(handle,outBuf)` 的 >2GB 截断 + 长度/填充竞态） |
+| `receiverAssembleBytes` | `(handle) -> ByteArray?` | **原子返回完整字节**，未完成/失败可为 null（修复了旧 `receiverAssemble(handle,outBuf)` 的 >2GB 截断 + 长度/填充竞态） |
 | `receiverDestroy` | `(handle)` | 释放 |
 | `receiverFileName/FileSize/Crc32/Crc32Known` | `(handle) -> ...` | 文件元数据访问器 |
 

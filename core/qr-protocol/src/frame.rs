@@ -68,6 +68,7 @@ impl Frame {
     }
 
     /// Build a frame from a payload + header fields, computing both CRCs.
+    #[allow(clippy::too_many_arguments)]
     pub fn build(
         session_id: SessionIdRaw,
         flags: u8,

@@ -1,18 +1,19 @@
 {
   "name": "@airferry/sender",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "AirFerry sender — Chrome/Edge/Firefox extension that streams QR codes.",
   "type": "module",
   "license": "MIT",
   "scripts": {
     "extract-lzma-wasm": "node scripts/extract-lzma-wasm.cjs",
-    "postinstall": "node scripts/extract-lzma-wasm.cjs",
-    "dev": "plasmo dev",
-    "build": "node scripts/extract-lzma-wasm.cjs && node scripts/build-wasm.cjs && node scripts/build-all.cjs",
-    "build:chrome-mv3": "node scripts/extract-lzma-wasm.cjs && plasmo build --target=chrome-mv3 && node scripts/fix-manifest.cjs chrome-mv3-prod && cp node_modules/@foxglove/wasm-zstd/dist/wasm-zstd.wasm build/chrome-mv3-prod/wasm-zstd.wasm",
-    "build:chrome-mv2": "node scripts/extract-lzma-wasm.cjs && plasmo build --target=chrome-mv2 && node scripts/fix-manifest.cjs chrome-mv2-prod && cp node_modules/@foxglove/wasm-zstd/dist/wasm-zstd.wasm build/chrome-mv2-prod/wasm-zstd.wasm",
-    "build:firefox-mv3": "node scripts/extract-lzma-wasm.cjs && plasmo build --target=firefox-mv3 && node scripts/fix-manifest.cjs firefox-mv3-prod && cp node_modules/@foxglove/wasm-zstd/dist/wasm-zstd.wasm build/firefox-mv3-prod/wasm-zstd.wasm",
-    "build:firefox-mv2": "node scripts/extract-lzma-wasm.cjs && plasmo build --target=firefox-mv2 && node scripts/fix-manifest.cjs firefox-mv2-prod && cp node_modules/@foxglove/wasm-zstd/dist/wasm-zstd.wasm build/firefox-mv2-prod/wasm-zstd.wasm",
+    "prepare-plasmo-icon": "node scripts/prepare-plasmo-icon.cjs",
+    "postinstall": "node scripts/extract-lzma-wasm.cjs && node scripts/prepare-plasmo-icon.cjs",
+    "dev": "node scripts/prepare-plasmo-icon.cjs && plasmo dev",
+    "build": "node scripts/extract-lzma-wasm.cjs && node scripts/prepare-plasmo-icon.cjs && node scripts/build-wasm.cjs && node scripts/build-all.cjs",
+    "build:chrome-mv3": "node scripts/extract-lzma-wasm.cjs && node scripts/prepare-plasmo-icon.cjs && plasmo build --target=chrome-mv3 && node scripts/fix-manifest.cjs chrome-mv3-prod && cp node_modules/@foxglove/wasm-zstd/dist/wasm-zstd.wasm build/chrome-mv3-prod/wasm-zstd.wasm",
+    "build:chrome-mv2": "node scripts/extract-lzma-wasm.cjs && node scripts/prepare-plasmo-icon.cjs && plasmo build --target=chrome-mv2 && node scripts/fix-manifest.cjs chrome-mv2-prod && cp node_modules/@foxglove/wasm-zstd/dist/wasm-zstd.wasm build/chrome-mv2-prod/wasm-zstd.wasm",
+    "build:firefox-mv3": "node scripts/extract-lzma-wasm.cjs && node scripts/prepare-plasmo-icon.cjs && plasmo build --target=firefox-mv3 && node scripts/fix-manifest.cjs firefox-mv3-prod && cp node_modules/@foxglove/wasm-zstd/dist/wasm-zstd.wasm build/firefox-mv3-prod/wasm-zstd.wasm",
+    "build:firefox-mv2": "node scripts/extract-lzma-wasm.cjs && node scripts/prepare-plasmo-icon.cjs && plasmo build --target=firefox-mv2 && node scripts/fix-manifest.cjs firefox-mv2-prod && cp node_modules/@foxglove/wasm-zstd/dist/wasm-zstd.wasm build/firefox-mv2-prod/wasm-zstd.wasm",
     "package": "plasmo package",
     "wasm": "node scripts/build-wasm.cjs",
     "wasm:legacy": "wasm-pack build ../../core/transfer-engine --target web --out-dir pkg-legacy -- --features wasm,serde && rm -rf wasm-pkg-legacy && cp -r ../../core/transfer-engine/pkg-legacy wasm-pkg-legacy",
@@ -34,7 +35,7 @@
   "manifest": {
     "name": "AirFerry - 无网文件传输",
     "description": "通过屏幕二维码视频流，无网传输文件到手机。无需网络、蓝牙、USB。",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "permissions": [
       "storage"
     ],

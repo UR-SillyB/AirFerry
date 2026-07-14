@@ -35,7 +35,7 @@ object NativeBridge {
      * On-demand progress query (NUL-terminated JSON byte[], or empty on error).
      * Call at the UI refresh cadence (~7 Hz), not per-frame.
      */
-    external fun receiverProgressJson(handle: Long): ByteArray
+    external fun receiverProgressJson(handle: Long): ByteArray?
 
     external fun receiverIsComplete(handle: Long): Int
     /**

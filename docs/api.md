@@ -148,32 +148,36 @@ object NativeBridge {
         totalBlocks: Int, totalSymbols: Int, symbolSize: Int
     ): Long  // handle（不透明指针）
 
-    // 摄入一帧；返回新分配的 byte[]（进度 JSON，NUL 结尾），出错返回 null/空数组
-    external fun receiverIngest(handle: Long, frameBytes: ByteArray): ByteArray?
+    // 摄入一帧；返回 packed Long：完成/接受/mismatch/已收符号数，位布局见 SPEC.md
+    external fun receiverIngest(handle: Long, frameBytes: ByteArray): Long
+
+    // UI 约 7Hz 拉取完整进度；NUL 结尾 JSON，native 失败可返回 null/空数组
+    external fun receiverProgressJson(handle: Long): ByteArray?
 
     external fun receiverIsComplete(handle: Long): Int
-    external fun receiverAssembledLength(handle: Long): Int
-    external fun receiverAssemble(handle: Long, outBuf: ByteArray): Int
+    external fun receiverAssembleBytes(handle: Long): ByteArray?
+    external fun receiverLastAssembleError(handle: Long): String
     external fun receiverDestroy(handle: Long)
 
     // 文件元数据（来自描述符帧）
     external fun receiverFileName(handle: Long): String
     external fun receiverFileSize(handle: Long): Long
     external fun receiverCrc32(handle: Long): Long   // 无符号 32 位装入 Long
+    external fun receiverCrc32Known(handle: Long): Int
 }
 
 object ZxingDecoder {
     external fun decodeY(
         yPlane: ByteArray, width: Int, height: Int, rowStride: Int
-    ): ByteArray?  // 解码载荷或 null（接收端对中心 ROI 裁剪后调用）
+    ): ByteArray?  // 解码载荷或 null；native 按 rowStride 读取完整 Y 平面
 }
 ```
 
-> **线程模型**：`receiverIngest`/`receiverAssemble` 等操作同一原生句柄，**非线程安全**。Android 侧用一把 ingest 锁串行化所有调用，ZXing 解码则在多个 worker 上并行（见 [data-flow.md](data-flow.md)）。
+> **线程模型**：`receiverIngest`/`receiverAssembleBytes` 等操作同一原生句柄，**非线程安全**。Android 侧用一把 ingest 锁串行化所有调用，ZXing 解码则在多个 worker 上并行（见 [data-flow.md](data-flow.md)）。
 
 ### 进度 JSON 格式
 
-`receiverIngest` 返回的 JSON（键与 `jni.rs::progress_json` 一致）：
+`receiverProgressJson` 返回的 JSON（`receiverIngest` 只返回 packed `Long`）：
 
 ```json
 {

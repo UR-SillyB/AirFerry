@@ -304,8 +304,7 @@ impl ReceiverSession {
         }
 
         // Count how many unique symbols survived the replay.
-        self.progress.received_symbols =
-            self.received.iter().map(|s| s.len() as u32).sum();
+        self.progress.received_symbols = self.received.iter().map(|s| s.len() as u32).sum();
 
         // Refresh progress counters after replay.
         self.refresh_decoded_counts();
@@ -455,7 +454,7 @@ impl ReceiverSession {
         Some(crate::ResumeState {
             session_id: self.session_id,
             meta,
-            received: self.received.iter().map(|s| s.clone()).collect(),
+            received: self.received.clone(),
             symbols,
         })
     }
@@ -469,17 +468,15 @@ impl ReceiverSession {
         let mut rx = Self::new_confirmed(state.session_id, state.meta);
         for (sbn, esi, data) in state.symbols {
             let bi = sbn as usize;
-            if bi < rx.received.len() {
-                if rx.received[bi].insert(esi) {
-                    if let Some(meta) = &rx.meta {
-                        if esi < meta.blocks[bi].num_source_symbols {
-                            rx.source_recv[bi] += 1;
-                        }
+            if bi < rx.received.len() && rx.received[bi].insert(esi) {
+                if let Some(meta) = &rx.meta {
+                    if esi < meta.blocks[bi].num_source_symbols {
+                        rx.source_recv[bi] += 1;
                     }
-                    let symbol = Symbol::new(sbn, esi, data);
-                    if let Some(dec) = rx.decoder.as_mut() {
-                        let _ = dec.add_symbol(&symbol);
-                    }
+                }
+                let symbol = Symbol::new(sbn, esi, data);
+                if let Some(dec) = rx.decoder.as_mut() {
+                    let _ = dec.add_symbol(&symbol);
                 }
             }
         }
@@ -511,7 +508,11 @@ impl ReceiverSession {
     since = "1.0.0",
     note = "heuristic OTI that mis-decodes multi-block objects; use new_pending + a descriptor frame instead"
 )]
-pub fn derive_meta_from_totals(total_blocks: u32, total_symbols: u32, symbol_size: u32) -> ObjectMeta {
+pub fn derive_meta_from_totals(
+    total_blocks: u32,
+    total_symbols: u32,
+    symbol_size: u32,
+) -> ObjectMeta {
     use raptorq::ObjectTransmissionInformation;
     // Heuristic: place all symbols in the number of blocks reported, splitting
     // as evenly as possible. The OTI we hand raptorq must satisfy its internal
@@ -589,7 +590,7 @@ mod tests {
         let mut rx = ReceiverSession::new_confirmed(sid.into(), meta);
         let total = sender.total_k();
         // Emit enough frames: one full source pass + a few repair rounds.
-        let frames_needed = (total as u32 + total as u32 * redundancy as u32 / 100 + 10) as usize;
+        let frames_needed = (total + total * redundancy as u32 / 100 + 10) as usize;
         let mut emitted = 0u32;
         let mut ingested = 0u32;
         for _ in 0..(frames_needed * 3) {
@@ -617,7 +618,12 @@ mod tests {
         // In the real pipeline, the payload is a zstd stream whose own length
         // is self-describing, so truncation to the true length happens at
         // decompression time.
-        assert!(out.len() >= data.len(), "assembled too short: out={} data={}", out.len(), data.len());
+        assert!(
+            out.len() >= data.len(),
+            "assembled too short: out={} data={}",
+            out.len(),
+            data.len()
+        );
         assert_eq!(&out[..data.len()], data, "payload bytes must match");
         // Padding region must be all zero.
         assert!(
@@ -722,20 +728,35 @@ mod tests {
         let data = payload(20_000);
         let sid = SessionId::derive("evil", data.len() as u64, 0, &[]);
         let sender = SenderSession::new(
-            &data, sid, SenderConfig::default(), crate::descriptor::FileMeta::default(),
-        ).unwrap();
+            &data,
+            sid,
+            SenderConfig::default(),
+            crate::descriptor::FileMeta::default(),
+        )
+        .unwrap();
         let meta = sender.meta().clone();
         let mut desc = crate::descriptor::build_frame(
-            &meta, &crate::descriptor::FileMeta::default(), sid.into(), 1, 0,
-        ).unwrap();
+            &meta,
+            &crate::descriptor::FileMeta::default(),
+            sid.into(),
+            1,
+            0,
+        )
+        .unwrap();
         // Corrupt the descriptor's symbol_size field (offset 12..16) so it no
         // longer matches the embedded OTI → validate() must reject it.
         desc.payload[12..16].copy_from_slice(&999u32.to_be_bytes());
 
         let mut rx = ReceiverSession::new_pending(sid.into());
         let _ = rx.ingest(desc); // must not panic
-        assert!(!rx.is_meta_confirmed(), "tampered descriptor must be rejected");
-        assert!(rx.progress().frames_corrupt >= 1, "rejected descriptor counts as corrupt");
+        assert!(
+            !rx.is_meta_confirmed(),
+            "tampered descriptor must be rejected"
+        );
+        assert!(
+            rx.progress().frames_corrupt >= 1,
+            "rejected descriptor counts as corrupt"
+        );
     }
 
     /// A data frame whose ESI exceeds RFC 6330's 24-bit space (which would panic
@@ -745,17 +766,35 @@ mod tests {
         let data = payload(20_000);
         let sid = SessionId::derive("e", data.len() as u64, 0, &[]);
         let meta = SenderSession::new(
-            &data, sid, SenderConfig::default(), crate::descriptor::FileMeta::default(),
-        ).unwrap().meta().clone();
+            &data,
+            sid,
+            SenderConfig::default(),
+            crate::descriptor::FileMeta::default(),
+        )
+        .unwrap()
+        .meta()
+        .clone();
         let mut rx = ReceiverSession::new_confirmed(sid.into(), meta.clone());
 
         let payload_bytes = vec![0u8; meta.symbol_size as usize];
         let f = Frame::build(
-            sid.into(), 0, 0, 1u32 << 24,
-            meta.blocks.len() as u32, 1, meta.symbol_size, 1, 0, &payload_bytes,
+            sid.into(),
+            0,
+            0,
+            1u32 << 24,
+            meta.blocks.len() as u32,
+            1,
+            meta.symbol_size,
+            1,
+            0,
+            &payload_bytes,
         );
         let _ = rx.ingest(f); // must not panic
-        assert_eq!(rx.progress().received_symbols, 0, "hostile ESI must not be accepted");
+        assert_eq!(
+            rx.progress().received_symbols,
+            0,
+            "hostile ESI must not be accepted"
+        );
         assert!(rx.progress().frames_corrupt >= 1);
     }
 }

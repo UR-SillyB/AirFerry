@@ -116,7 +116,8 @@ pub fn build_payload(meta: &ObjectMeta, file_meta: &FileMeta) -> Result<Vec<u8>>
 
     // body = fixed overhead + blocks + (filename_len byte + filename) + v2 tail
     // (without its leading filename_len byte, already counted) + v3 tail.
-    let body_len = DESC_FIXED_OVERHEAD + blocks_len + 1 + filename_len + DESC_V2_TAIL_FIXED - 1 + DESC_V3_TAIL_FIXED;
+    let body_len = DESC_FIXED_OVERHEAD + blocks_len + 1 + filename_len + DESC_V2_TAIL_FIXED - 1
+        + DESC_V3_TAIL_FIXED;
     if body_len > symbol_size {
         return Err(Error::Protocol(qr_protocol::Error::BufferTooShort {
             need: body_len,
@@ -219,7 +220,7 @@ pub fn parse_payload(payload: &[u8]) -> Option<DescriptorInfo> {
     // Parsed purely on availability of trailing bytes (not on the version
     // byte), so this stays compatible with any future version that preserves
     // the v1/v2 layout prefix.
-    let file_meta = if payload.len() >= o + 1 {
+    let file_meta = if payload.len() > o {
         let fn_len = payload[o] as usize;
         o += 1;
         // Need filename bytes + u64 original_size + u32 crc32 = fn_len + 12.
@@ -322,7 +323,7 @@ mod tests {
         // original_size + crc32) and clear everything from there to the end of the
         // symbol, exactly as a real v2 sender's zero-pad would.
         let blocks_len = meta.blocks.len() * 16;
-        let fn_len = file_meta.filename.as_bytes().len();
+        let fn_len = file_meta.filename.len();
         let v2_body_end = DESC_FIXED_OVERHEAD + blocks_len + 1 + fn_len + 8 + 4;
         full[1] = 2; // downgrade version byte
         for b in &mut full[v2_body_end..] {
@@ -358,7 +359,10 @@ mod tests {
         assert_eq!(info.file_meta.filename, "test文档.pdf");
         assert_eq!(info.file_meta.original_size, 50_000);
         assert_eq!(info.file_meta.crc32, 0xDEADBEEF);
-        assert_eq!(info.file_meta.compression, qr_protocol::compress::COMPRESSION_NONE);
+        assert_eq!(
+            info.file_meta.compression,
+            qr_protocol::compress::COMPRESSION_NONE
+        );
         assert_eq!(info.file_meta.compressed_size, 50_000);
         assert!(info.file_meta.crc32_known);
     }
@@ -387,7 +391,10 @@ mod tests {
         let payload = build_payload(&meta, &file_meta).unwrap();
         assert_eq!(payload[1], DESC_VERSION);
         let info = parse_payload(&payload).unwrap();
-        assert_eq!(info.file_meta.compression, qr_protocol::compress::COMPRESSION_ZSTD);
+        assert_eq!(
+            info.file_meta.compression,
+            qr_protocol::compress::COMPRESSION_ZSTD
+        );
         assert_eq!(info.file_meta.compressed_size, 18_000);
         assert_eq!(info.file_meta.original_size, 50_000);
         assert_eq!(info.file_meta.crc32, 0xCAFEBABE);
@@ -430,7 +437,10 @@ mod tests {
         assert_eq!(info.file_meta.crc32, 0x11223344);
         // The all-zero tail must NOT be read as a v3 extension claiming a 0-byte
         // compressed payload — that would truncate the recovered file to empty.
-        assert_eq!(info.file_meta.compression, qr_protocol::compress::COMPRESSION_NONE);
+        assert_eq!(
+            info.file_meta.compression,
+            qr_protocol::compress::COMPRESSION_NONE
+        );
         assert_eq!(
             info.file_meta.compressed_size, 1_234,
             "v2 descriptor must fall back to compressed_size == original_size, not 0"
@@ -485,7 +495,8 @@ mod tests {
 
         // Drive a receiver purely from frames, mimicking the wire path.
         let first = sender.next_frame().unwrap();
-        let mut rx = ReceiverSession::from_first_frame(&Frame::from_bytes(&first.to_bytes()).unwrap());
+        let mut rx =
+            ReceiverSession::from_first_frame(&Frame::from_bytes(&first.to_bytes()).unwrap());
         let mut guard = 0;
         while !rx.is_complete() {
             let f = sender.next_frame().unwrap();

@@ -38,11 +38,11 @@ UI 把 (symbol_size, fps) 打包成一个用户选项；默认「激进」实测
 
 ## QR 矩阵生成
 
-发送端使用 Rust `qrcode` crate 将帧字节编码为模块矩阵：
+发送端使用 Rust `fast_qr` crate 将帧字节编码为模块矩阵：
 
 ```rust
 // qr-protocol/src/qr_render.rs
-pub fn min_version_for(len: usize) -> Option<Version>  // 最小可容纳版本
+pub fn min_version_for(len: usize) -> Option<u8>        // 最小可容纳版本（1..=40）
 pub fn encode(data: &[u8]) -> Result<QrMatrix>          // 选最小版本编码
 // 输出：QrMatrix { modules: Vec<bool>, size: usize }
 // modules[y * size + x] = true 表示深色模块

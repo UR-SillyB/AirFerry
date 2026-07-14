@@ -121,7 +121,7 @@ export interface AppState {
   /** Loading state while WASM encoder is being initialized (can be slow for large files). */
   initializing: boolean
   /**
-   * Compress-worker phase. While set (not null/done), a full-screen progress
+   * Compress-worker phase. While set (not null), a full-screen progress
    * overlay is shown — the prep runs in the worker so this spinner keeps
    * animating even during the slow synchronous-WASM compress.
    */

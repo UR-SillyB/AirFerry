@@ -7,7 +7,7 @@ members = [
 ]
 
 [workspace.package]
-version = "1.0.0"
+version = "1.0.1"
 edition = "2021"
 rust-version = "1.75"
 license = "MIT"
@@ -37,7 +37,7 @@ strip = true
 opt-level = 3
 
 # The optical hot path is not just transfer-engine: every frame touches
-# raptorq-core (encode/decode), qr-protocol (CRC + QR render via the `qrcode`
+# raptorq-core (encode/decode), qr-protocol (CRC + QR render via the `fast_qr`
 # and `crc32fast` crates), and the upstream `raptorq` solver. Building these at
 # opt-level="z" (the workspace default, chosen for small WASM/APK size) leaves a
 # lot of scalar throughput on the table on the per-frame path — noticeable on
@@ -50,7 +50,7 @@ opt-level = 3
 opt-level = 3
 [profile.release.package.raptorq]
 opt-level = 3
-[profile.release.package.qrcode]
+[profile.release.package.fast_qr]
 opt-level = 3
 [profile.release.package.crc32fast]
 opt-level = 3

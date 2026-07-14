@@ -42,7 +42,7 @@ core/
 │   ├── frame          60B Header + T 字节 Payload + 4B Footer
 │   ├── compress       Zstd (Lv22) + XZ 解压分发
 │   ├── session        确定性会话 ID（FNV-1a 128-bit）
-│   └── qr_render      qrcode crate → 模块矩阵（按帧长选最小版本）
+│   └── qr_render      fast_qr crate → 模块矩阵（按帧长选最小版本）
 └── transfer-engine/   编排 + 状态机 + 进度 + 断点 + FFI
     ├── sender         帧流生成（源符号一遍 → 无限新鲜修复符号）
     ├── receiver       帧摄入 + 去重 + 解码 + 重组（O(1) 进度计数）

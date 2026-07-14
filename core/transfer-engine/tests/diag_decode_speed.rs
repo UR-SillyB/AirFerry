@@ -5,7 +5,6 @@ use qr_protocol::{Frame, SessionId};
 use raptorq_core::Config;
 
 #[test]
-#[ignore]
 #[ignore = "diagnostic benchmark — run with: cargo test -- --ignored diag_small"]
 fn diag_small() {
     let size = 50_000usize;

@@ -14,7 +14,7 @@ use transfer_engine::sender::{SenderConfig, SenderSession};
 fn pseudo_random(n: usize) -> Vec<u8> {
     // Text-like, highly compressible content (repeating patterns).
     (0..n)
-        .map(|i| b"ABCDEFGHabcdefgh0123456789\n"[(i % 27) as usize])
+        .map(|i| b"ABCDEFGHabcdefgh0123456789\n"[i % 27])
         .collect()
 }
 
@@ -95,13 +95,8 @@ fn uncompressed_pipeline_still_works() {
         compressed_size_known: true,
         crc32_known: false,
     };
-    let mut sender = SenderSession::new(
-        &original,
-        SessionId::zero(),
-        SenderConfig::default(),
-        fm,
-    )
-    .unwrap();
+    let mut sender =
+        SenderSession::new(&original, SessionId::zero(), SenderConfig::default(), fm).unwrap();
     sender.set_descriptor_interval(5);
 
     let mut rx = None;
