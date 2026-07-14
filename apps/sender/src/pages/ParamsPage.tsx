@@ -56,7 +56,8 @@ export function ParamsPage({
   // Total frames ≈ source symbols × (1 + redundancy) + descriptor overhead.
   const totalSymbols = Math.ceil(compressedSize / config.symbolSize)
   const totalFrames = Math.ceil(totalSymbols * (1 + config.redundancyPct / 100))
-  const estimatedSeconds = totalFrames / config.fps
+  const effectiveFps = config.fps > 0 ? config.fps : 120 // estimate for "unlimited"
+  const estimatedSeconds = totalFrames / effectiveFps
 
   // Show the file list (collapsible-ish: first few + "还有 N 个" for bundles).
   const visibleFiles = files.slice(0, 5)
@@ -107,7 +108,7 @@ export function ParamsPage({
             <td>预计传输时间</td>
             <td>
               <strong>{formatDuration(estimatedSeconds)}</strong>
-              <span className="muted"> ({config.fps}fps, {config.redundancyPct}% 冗余)</span>
+              <span className="muted"> ({config.fps > 0 ? config.fps + "fps" : "无限制"}, {config.redundancyPct}% 冗余)</span>
             </td>
           </tr>
         </tbody>
@@ -162,10 +163,14 @@ export function ParamsPage({
           value={config.fps}
           onChange={(e) => onChange({ fps: Number(e.target.value) })}
         >
+          <option value={15}>15 FPS（低端设备）</option>
           <option value={20}>20 FPS（大码稳定）</option>
           <option value={30}>30 FPS</option>
           <option value={45}>45 FPS（推荐）</option>
           <option value={60}>60 FPS（高速）</option>
+          <option value={90}>90 FPS（高刷屏）</option>
+          <option value={120}>120 FPS（高刷屏）</option>
+          <option value={0}>无限制（最大化吞吐）</option>
         </select>
       </div>
 

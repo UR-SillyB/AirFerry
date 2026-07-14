@@ -54,3 +54,8 @@ opt-level = 3
 opt-level = 3
 [profile.release.package.crc32fast]
 opt-level = 3
+
+# Vendored fast_qr with fixed-mask fast path (skips the 8-mask evaluation loop
+# when a fixed mask is specified — ~10× QR encode speedup for AirFerry).
+[patch.crates-io]
+fast_qr = { path = "core/qr-protocol/vendor/fast_qr" }

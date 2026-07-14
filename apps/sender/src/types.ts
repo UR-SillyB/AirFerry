@@ -42,33 +42,21 @@ export interface TransferConfig {
  * choice. Larger symbols pack more payload per frame (the QR header carries
  * symbol_size, so the receiver auto-adapts), but produce a denser QR that's
  * harder for a phone camera to resolve — so each step up also assumes a cleaner
- * scanning setup. The theoretical no-loss payload throughput at each preset
- * (factoring the 60-byte frame header + 4-byte footer + ~1/16 descriptor
- * overhead) is roughly:
+ * scanning setup.
  *
- *   稳定 (512B):  ~21 KiB/s @45fps,  ~28 KiB/s @60fps   (V16, 81×81)
- *   高速 (896B):  ~37 KiB/s @45fps,  ~49 KiB/s @60fps   (V21, 101×101)
- *   极限 (1008B): ~42 KiB/s @45fps,  ~55 KiB/s @60fps   (V22, 105×105)   ← 默认
- *   激进 (1400B): ~78 KiB/s @60fps  (V25, 117×117)   ← 默认 (实测最快)
- *   4 码模式: ~312KB/s 理论，实测约 280KB/s+
- * 大符号的 4 码模式下吞吐乘以 ~4×：
- *   激进 4码: 252KB/s（当前上限）
- *
- * 大符号的 4 码模式下吞吐乘以 ~4×（理论 644KB/s 以上），但码密度更高，
- * 对摄像头对焦和距离要求更严格。
- *
- * 1008B (not the full 1024B core default) is chosen so a frame (header +
- * payload + footer = 1072 B) still fits comfortably under V22's byte-mode L
- * capacity, leaving the version-fallback headroom in qr_render.rs to recover
- * the occasional un-encodable repair frame without jumping to V23.
+ * fps = 0 means "unlimited" (driven by setTimeout(0) instead of rAF throttle);
+ * this can exceed the display refresh rate (60Hz) when the WASM encode +
+ * putImageData path is fast enough, pushing more QR symbols per second through
+ * the optical channel. Useful for high-refresh-rate displays (120/144Hz) or
+ * when the bottleneck is encode speed rather than display cadence.
  */
-export type SpeedPreset = "stable" | "fast" | "extreme" | "aggressive"
+export type SpeedPreset = "stable" | "fast" | "extreme" | "aggressive" | "turbo" | "max"
 
 export interface SpeedPresetDef {
   id: SpeedPreset
   label: string
   symbolSize: number
-  /** Recommended fps used when the user picks this preset. */
+  /** Recommended fps used when the user picks this preset (0 = unlimited). */
   fps: number
   blurb: string
 }
@@ -86,21 +74,35 @@ export const SPEED_PRESETS: SpeedPresetDef[] = [
     label: "高速（896B）",
     symbolSize: 896,
     fps: 60,
-    blurb: "V21",
+    blurb: "V22",
   },
   {
     id: "extreme",
     label: "极限（1008B）",
     symbolSize: 1008,
     fps: 60,
-    blurb: "V22",
+    blurb: "V23",
   },
   {
     id: "aggressive",
     label: "激进（1400B）← 默认",
     symbolSize: 1400,
     fps: 60,
-    blurb: "V25，实测最快",
+    blurb: "V27，实测最快",
+  },
+  {
+    id: "turbo",
+    label: "极速（1900B）",
+    symbolSize: 1900,
+    fps: 60,
+    blurb: "V34，码密度极高",
+  },
+  {
+    id: "max",
+    label: "极限（2400B）",
+    symbolSize: 2400,
+    fps: 60,
+    blurb: "V39，接近上限",
   },
 ]
 

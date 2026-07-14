@@ -1,0 +1,13 @@
+[package]
+name = "fast_qr"
+version = "0.13.1"
+edition = "2021"
+license = "MIT"
+description = "Vendored fast_qr with fixed-mask fast path for AirFerry."
+publish = false
+
+[features]
+default = []
+svg = []
+image = []
+wasm-bindgen = []
