@@ -143,7 +143,7 @@ AirFerry/
 
 ## 致谢
 
-- [RaptorQR](https://github.com/infrost/RaptorQR)（MIT，© 2026 Haixiang）— 同样基于 Rust→WASM RaptorQ 喷泉码管线与并行二维码播放的离线光学传输工具。本项目在「Rust 核心编译到 WASM + 浏览器二维码视频流」这一架构方向上参考了它的先行探索。
+- [RaptorQR](https://github.com/infrost/RaptorQR)（MIT，© 2026 Haixiang）— 同样基于 Rust→WASM RaptorQ 喷泉码管线与并行二维码播放的离线光学传输工具。AirFerry v1.0.1 在「Rust 核心编译到 WASM + 浏览器二维码视频流」这一架构方向上参考了它的先行探索。
 - [cberner/raptorq](https://github.com/cberner/raptorq) — 本项目核心依赖的 RFC 6330 RaptorQ Rust 实现。
 
 ## 友情链接
