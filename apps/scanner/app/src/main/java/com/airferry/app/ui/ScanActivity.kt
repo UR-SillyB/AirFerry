@@ -581,15 +581,14 @@ class ScanActivity : ComponentActivity() {
                     it.setSurfaceProvider(previewView.surfaceProvider)
                 }
 
-                // Request a 720p analysis stream. 1080p gives more px/module (helpful for
-                // dense multi-QR) but makes full-frame ReadBarcodes ~2.25× heavier;
-                // on the stock multi path that re-locks often, 720p trades a little
-                // module resolution for cheaper full multi and fewer pipeline stalls.
-                // CameraX may pick the closest supported size.
+                // Request a 1080p analysis stream so each QR module has more camera pixels,
+                // improving ZXing decode reliability — especially important with the
+                // reduced quiet zone on multi-QR. CameraX may pick the closest
+                // supported size.
                 val resolutionSelector = ResolutionSelector.Builder()
                     .setResolutionStrategy(
                         ResolutionStrategy(
-                            Size(1280, 720),
+                            Size(1920, 1080),
                             ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER
                         )
                     )
