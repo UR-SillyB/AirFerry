@@ -82,4 +82,22 @@ object FileNameUtil {
         while (File(dir, "$base($i)$ext").exists()) i++
         return File(dir, "$base($i)$ext")
     }
+
+    /**
+     * Fixed path under [dir] for a sanitized [name], without appending `(1)`.
+     * Use for **share cache** staging: the same logical file may be shared
+     * repeatedly, and `uniqueTarget` would otherwise produce `foo(1).ext` on
+     * the second share even though the caller overwrites the content.
+     * Callers should `copyTo(..., overwrite = true)` onto the returned file.
+     */
+    fun shareStagingFile(dir: File, name: String): File {
+        val safe = sanitize(name)
+        fun within(f: File): Boolean = try {
+            f.canonicalPath.startsWith(dir.canonicalPath + File.separator)
+        } catch (_: Exception) {
+            false
+        }
+        val target = File(dir, safe)
+        return if (within(target)) target else File(dir, "received_file")
+    }
 }

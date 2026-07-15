@@ -231,7 +231,8 @@ class ReceiveDetailActivity : ComponentActivity() {
             val safeName = com.airferry.app.scan.FileNameUtil.sanitize(fileName)
             val shareDir = File(cacheDir, "share")
             if (!shareDir.exists()) shareDir.mkdirs()
-            val shareFile = com.airferry.app.scan.FileNameUtil.uniqueTarget(shareDir, safeName)
+            // Fixed name + overwrite: re-sharing the same file must not become name(1).ext
+            val shareFile = com.airferry.app.scan.FileNameUtil.shareStagingFile(shareDir, safeName)
             src.copyTo(shareFile, overwrite = true)
 
             val authority = "${packageName}.fileprovider"

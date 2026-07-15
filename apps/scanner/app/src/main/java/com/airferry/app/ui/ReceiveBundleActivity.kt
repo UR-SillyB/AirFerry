@@ -325,7 +325,8 @@ class ReceiveBundleActivity : ComponentActivity() {
         }
         try {
             val shareDir = File(cacheDir, "share").also { if (!it.exists()) it.mkdirs() }
-            val shareFile = com.airferry.app.scan.FileNameUtil.uniqueTarget(shareDir, info.name)
+            // Fixed name + overwrite so re-share keeps the original filename.
+            val shareFile = com.airferry.app.scan.FileNameUtil.shareStagingFile(shareDir, info.name)
             src.copyTo(shareFile, overwrite = true)
             val uri = FileProvider.getUriForFile(this, "${packageName}.fileprovider", shareFile)
             val intent = Intent(Intent.ACTION_SEND).apply {
@@ -352,7 +353,7 @@ class ReceiveBundleActivity : ComponentActivity() {
             for (f in files) {
                 val src = File(f.filePath)
                 if (!src.exists()) continue
-                val shareFile = com.airferry.app.scan.FileNameUtil.uniqueTarget(shareDir, f.name)
+                val shareFile = com.airferry.app.scan.FileNameUtil.shareStagingFile(shareDir, f.name)
                 src.copyTo(shareFile, overwrite = true)
                 uris.add(FileProvider.getUriForFile(this, "${packageName}.fileprovider", shareFile))
                 names.add(f.name)

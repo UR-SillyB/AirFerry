@@ -346,11 +346,11 @@ offset  size   field
 
 | 源 | 当前 |
 |----|------|
-| `Cargo.toml` `[workspace.package] version` | `1.1.1` |
-| `apps/sender/package.json` `version` + `manifest.version` | `1.1.1` |
-| `apps/scanner/app/build.gradle.kts` `versionName` / `versionCode` | `1.1.1` / `6` |
-| `apps/windows/AirFerry.Windows/AirFerry.Windows.csproj` `<Version>` | `1.1.1` |
-| `.github/workflows/windows.yml` `env.VER`（Windows 发版 zip 名 + release tag） | `1.1.1` |
+| `Cargo.toml` `[workspace.package] version` | `1.1.2` |
+| `apps/sender/package.json` `version` + `manifest.version` | `1.1.2` |
+| `apps/scanner/app/build.gradle.kts` `versionName` / `versionCode` | `1.1.2` / `7` |
+| `apps/windows/AirFerry.Windows/AirFerry.Windows.csproj` `<Version>` | `1.1.2` |
+| `.github/workflows/windows.yml` `env.VER`（Windows 发版 zip 名 + release tag） | `1.1.2` |
 
 `scripts/build-all.sh` 的 release 打包文件名版本号由 `read_version()` 从 `apps/sender/package.json` 动态读取，与 `manifest.version` 同源，**无需在脚本里手改**。Windows 发版 zip 名由 workflow 的 `VER` 控制，**须与上表同步**。
 

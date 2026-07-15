@@ -607,7 +607,8 @@ class FileListActivity : ComponentActivity() {
                     metaFile.readLines().getOrElse(0) { src.name }
                 } else src.name
                 val safeName = com.airferry.app.scan.FileNameUtil.sanitize(displayName)
-                val shareFile = com.airferry.app.scan.FileNameUtil.uniqueTarget(shareDir, safeName)
+                // Fixed name + overwrite: re-sharing must not yield name(1).ext
+                val shareFile = com.airferry.app.scan.FileNameUtil.shareStagingFile(shareDir, safeName)
                 src.copyTo(shareFile, overwrite = true)
                 uris.add(FileProvider.getUriForFile(this, authority, shareFile))
             }

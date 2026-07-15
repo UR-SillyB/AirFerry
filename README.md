@@ -46,19 +46,19 @@
 
 ## 下载安装
 
-最新版本发布在 [GitHub Release v1.1.1](https://github.com/UR-SillyB/AirFerry/releases/tag/v1.1.1)。
+最新版本发布在 [GitHub Release v1.1.2](https://github.com/UR-SillyB/AirFerry/releases/tag/v1.1.2)。
 
 | 文件 | 说明 |
 |------|------|
-| `airferry-android-v1.1.1.apk` | Android 接收端（Android 10+，arm64-v8a） |
-| `airferry-windows-x64-v1.1.1.zip` | Windows 接收端（Windows 10+，x64；需 .NET 8 运行时；由 CI `windows.yml` 打包） |
-| `airferry-sender-chrome-mv3-v1.1.1.crx` | Chrome / Edge MV3 扩展（已签名 Cr24） |
-| `airferry-sender-chrome-mv3-v1.1.1.zip` | Chrome / Edge MV3（解压加载，crx 被拦截时用） |
-| `airferry-sender-chrome-mv2-v1.1.1.crx` | Chrome / Edge MV2 扩展（旧版兼容，已签名 Cr24） |
-| `airferry-sender-chrome-mv2-v1.1.1.zip` | Chrome / Edge MV2（解压加载） |
-| `airferry-sender-firefox-mv3-v1.1.1.xpi` | Firefox MV3 扩展（Firefox 109+） |
-| `airferry-sender-firefox-mv2-v1.1.1.xpi` | Firefox MV2 扩展（Firefox 91+） |
-| `airferry-web-v1.1.1.zip` | 网页发送端静态站点 |
+| `airferry-android-v1.1.2.apk` | Android 接收端（Android 10+，arm64-v8a） |
+| `airferry-windows-x64-v1.1.2.zip` | Windows 接收端（Windows 10+，x64；需 .NET 8 运行时；由 CI `windows.yml` 打包） |
+| `airferry-sender-chrome-mv3-v1.1.2.crx` | Chrome / Edge MV3 扩展（已签名 Cr24） |
+| `airferry-sender-chrome-mv3-v1.1.2.zip` | Chrome / Edge MV3（解压加载，crx 被拦截时用） |
+| `airferry-sender-chrome-mv2-v1.1.2.crx` | Chrome / Edge MV2 扩展（旧版兼容，已签名 Cr24） |
+| `airferry-sender-chrome-mv2-v1.1.2.zip` | Chrome / Edge MV2（解压加载） |
+| `airferry-sender-firefox-mv3-v1.1.2.xpi` | Firefox MV3 扩展（Firefox 109+） |
+| `airferry-sender-firefox-mv2-v1.1.2.xpi` | Firefox MV2 扩展（Firefox 91+） |
+| `airferry-web-v1.1.2.zip` | 网页发送端静态站点 |
 
 > 发送端/APK/web 由 `./scripts/build-all.sh release` 产出；版本号取自 `apps/sender/package.json`。Windows zip 默认由 GitHub Actions `windows` workflow（`workflow_dispatch`）上传到同一 Release。Chrome `.crx` 需本机有 Chrome 才能签名，否则仅产出 `.zip`。
 
@@ -68,7 +68,7 @@
 
 ### Windows 接收端
 
-解压 `airferry-windows-x64-v1.1.1.zip`，安装 [.NET 8 运行时](https://dotnet.microsoft.com/download/dotnet/8.0) 后运行 `AirFerry.exe`。启动后在设备选择页挑选摄像头或采集卡（USB/HDMI/SDI 采集卡会被自动标注），进入扫码页对准屏幕二维码即可。
+解压 `airferry-windows-x64-v1.1.2.zip`，安装 [.NET 8 运行时](https://dotnet.microsoft.com/download/dotnet/8.0) 后运行 `AirFerry.exe`。启动后在设备选择页挑选摄像头或采集卡（USB/HDMI/SDI 采集卡会被自动标注），进入扫码页对准屏幕二维码即可。
 
 ### Chrome / Edge 扩展
 

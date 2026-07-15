@@ -434,7 +434,7 @@ npm run preview        # 本地预览构建产物
    - **Rust 核心库**（`core/qr-protocol/src/compress.rs:25,48`）：Zstd **level 22**（`DEFAULT_LEVEL`）、Xz **level 6 + EXTREME**（`XZ_PRESET`）。
    - 两端用不同级别是**有意的**：发送端追求压缩启动快（Lv1），接收端只做解压、用高 ratio（见 `compress.rs:42-44` 的 NOTE）。两端产物是标准 zstd/xz 流，互操作正确。引用压缩参数时**必须分清是 TS 端还是 Rust 端**，不要合并描述。
 
-3. **版本号/Release 混用（历史教训）**：README/dist/workflow 曾出现 v1.0.0/v1.0.1/v1.1.0 漂移（含 `windows.yml` 的 `VER` 滞后）。**当前权威版本 `1.1.1`**（versionCode=6）。改版本时按 §2.8 第 5 条 + §2.9 全表同步，勿只改 `package.json`。
+3. **版本号/Release 混用（历史教训）**：README/dist/workflow 曾出现 v1.0.0/v1.0.1/v1.1.0 漂移（含 `windows.yml` 的 `VER` 滞后）。**当前权威版本 `1.1.2`**（versionCode=7）。改版本时按 §2.8 第 5 条 + §2.9 全表同步，勿只改 `package.json`。
 
 4. **`derive_meta_from_totals` 已废弃**：`receiver.rs` 内仍保留 JNI/ABI 兼容符号，**新代码勿调用**（其 OTI 构建在大文件上会 assert）。现代路径：从描述符帧拿权威 OTI。
 
