@@ -133,9 +133,11 @@ Plasmo 启动 HMR 开发服务器，自动重载扩展。
 
 ### 使用
 
-1. 点击工具栏 AirFerry 图标 → 弹出窗口
-2. 点击「开始发送文件」→ 在新标签页打开完整应用
-3. 选择文件（≥2 自动打包）→ 选速度预设 / 调参数 → 开始播放二维码视频流
+1. 点击工具栏 AirFerry 图标 → **直接在新标签页打开完整应用**（无 popup；`background` 监听 `onClicked`）
+2. **添加文件**（拖拽/点选/文件夹，追加到列表）和/或 **添加文字**（弹窗命名为 `.txt`）
+3. 点 **「发送」** 才压缩并进入参数页 → 选速度预设 / 调参数 → 播放二维码视频流  
+   - 恰好 1 条文字、0 文件 → `ETTEXTv1`  
+   - ≥2 项（文件和/或文字）→ `ETBUNDL1` 打包
 
 ## 项目结构
 
@@ -146,31 +148,37 @@ apps/sender/
 ├── pnpm-workspace.yaml         # 允许构建的原生依赖白名单
 ├── scripts/
 │   ├── build-all.cjs           # 全量构建脚本（4 目标）
-│   ├── fix-manifest.cjs        # MV2/Firefox manifest + 图标修正
+│   ├── build-wasm.cjs          # 双 wasm 产物（legacy + simd）
+│   ├── fix-manifest.cjs        # MV2/Firefox manifest + 图标修正 + 删 default_popup
+│   ├── prepare-plasmo-icon.cjs # clean build 用 icon.png
 │   └── extract-lzma-wasm.cjs   # lzma-wasm base64 → .wasm 提取
 ├── src/
-│   ├── popup.tsx               # 工具栏弹出窗口
+│   ├── background/index.ts     # 图标 onClicked → 打开 options
 │   ├── options.tsx             # 完整应用（4 页面路由 + Worker 调度）
-│   ├── types.ts                # 共享类型 + 速度预设 + DEFAULT_CONFIG
+│   ├── types.ts                # PendingItem + 速度预设(6档) + DEFAULT_CONFIG
 │   ├── pages/                  # 4 个页面组件
-│   │   ├── FileSelectPage.tsx
+│   │   ├── FileSelectPage.tsx  # 统一列表：添加文件/文字 → 发送
 │   │   ├── ParamsPage.tsx
 │   │   ├── PlayPage.tsx
 │   │   └── StatsPage.tsx
 │   ├── components/
-│   │   ├── QrStream.tsx        # QR 视频流渲染器（单码/4码 + 抖动）
+│   │   ├── QrStream.tsx        # QR 视频流（next_qr_*_into + putImageData）
 │   │   └── CompressProgress.tsx# 压缩阶段进度遮罩
 │   ├── workers/
-│   │   └── compress.worker.ts  # 离线压缩/打包/CRC/指纹/会话ID（主线程不卡）
+│   │   └── compress.worker.ts  # processFiles / processText
 │   ├── wasm/
 │   │   ├── loader.ts           # WASM 加载
-│   │   ├── bundle.ts           # 多文件打包（ETBUNDL1 容器）
-│   │   ├── compress.ts         # 三算法选优压缩（Zstd Lv1 / Xz Lv9 / Raw）
-│   │   ├── crc32.ts            # CRC32 计算
-│   │   └── session.ts          # 会话 ID 派生（FNV-1a 128）
+│   │   ├── bundle.ts           # 多文件打包（ETBUNDL1）
+│   │   ├── text.ts             # ETTEXTv1
+│   │   ├── compress.ts         # 三算法选优压缩
+│   │   ├── crc32.ts
+│   │   ├── session.ts
+│   │   └── base64.ts           # 单文件版 WASM 解码
+│   ├── storage/
+│   │   └── textDrafts.ts       # 文件名规范化等（草稿库遗留，UI 主路径不依赖）
 │   └── assets/
-│       └── app.css             # 样式
-├── wasm-pkg-legacy/            # wasm-pack 产物（generated，MV2 用，标量+0.2.92）
-├── wasm-pkg-simd/              # wasm-pack 产物（generated，MV3 用，SIMD+0.2.125）
-└── assets/                     # 图标（icon{16,32,48,64,128}.png）
+│       └── app.css
+├── wasm-pkg-legacy/            # MV2：标量 + wasm-bindgen 0.2.92
+├── wasm-pkg-simd/              # MV3：SIMD + 0.2.125
+└── assets/                     # 图标 icon{16,32,48,64,128}.png
 ```

@@ -9,7 +9,6 @@ import android.widget.Toast
 import android.util.Log
 import android.util.Range
 import android.util.Size
-import android.view.Surface
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -43,7 +42,6 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import com.airferry.app.nativelib.NativeBridge
 import com.airferry.app.scan.BundleParser
-import com.airferry.app.scan.HighSpeedCaptureController
 import com.airferry.app.scan.QrDecodePool
 import com.airferry.app.scan.QrStreamAnalyzer
 import com.airferry.app.scan.ReceiverSessionManager
@@ -75,15 +73,6 @@ class ScanActivity : ComponentActivity() {
     private var lastRateTimeMs = 0L
     private var lastDecodedCount = 0L
     private var decodePerSec = 0
-
-    // Experimental high-speed (record → batch decode) mode.
-    private var highSpeedEnabled = false
-    /** Live UI flag: starts == highSpeedEnabled, flips to false to fall back to
-     *  the normal CameraX pipeline if the high-speed path fails at runtime. */
-    private val useHighSpeedMode = mutableStateOf(false)
-    private var highSpeedController: HighSpeedCaptureController? = null
-    private var highSpeedSurface: Surface? = null
-    private val highSpeedRecording = mutableStateOf(false)
 
     // Reactive state observed by Compose
     private val uiState = mutableStateOf(UiState())
@@ -145,18 +134,6 @@ class ScanActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // 高速录像模式（record → batch decode）已下线。实测得不偿失：
-        //  1. H.264 all-intra 即使 120Mbps 仍引入块效应/振铃，破坏 QR 锐利
-        //     黑白边缘，ZXing 解码率骤降（40-70% 帧解码失败）。
-        //  2. 录像后批量解码引入 2-5 秒管线延迟，录制期间 0 进度反馈。
-        //  3. Camera2 ConstrainedHighSpeedCaptureSession 禁用 ImageReader，
-        //     无法"边录边解"，只能录像后批处理 → 上述延迟无法消除。
-        // 理论 2-4× 帧率优势被压缩损耗 + 延迟完全侵蚀，且仅旗舰机可用。
-        // 统一走 60fps 实时 + 多码管道（已验证、全设备可用、实时反馈）。
-        // HighSpeedCaptureController 源码保留供参考，但入口已关闭。
-        highSpeedEnabled = false
-        useHighSpeedMode.value = false
-
         // JNI self-test
         val jniOk = try {
             val h = NativeBridge.receiverCreate(0L, 1L, 1, 100, 1024)
@@ -183,42 +160,20 @@ class ScanActivity : ComponentActivity() {
     @Composable
     private fun ScanScreen() {
         val state by uiState
-        val highSpeed by useHighSpeedMode
         val recovery by recoveryStage
 
         BoxWithConstraints(modifier = Modifier.fillMaxSize().background(BgDark)) {
 
-            // Camera preview (full screen). High-speed mode uses a raw SurfaceView
-            // (Camera2 high-speed sessions can't target a CameraX PreviewView);
-            // the normal path uses CameraX's PreviewView.
-            if (highSpeed) {
-                AndroidView(
-                    factory = { ctx ->
-                        android.view.SurfaceView(ctx).also { sv ->
-                            sv.holder.addCallback(object : android.view.SurfaceHolder.Callback {
-                                override fun surfaceCreated(holder: android.view.SurfaceHolder) {
-                                    highSpeedSurface = holder.surface
-                                }
-                                override fun surfaceChanged(holder: android.view.SurfaceHolder, format: Int, width: Int, height: Int) {}
-                                override fun surfaceDestroyed(holder: android.view.SurfaceHolder) {
-                                    highSpeedSurface = null
-                                }
-                            })
-                        }
-                    },
-                    modifier = Modifier.fillMaxSize()
-                )
-            } else {
-                AndroidView(
-                    factory = { ctx ->
-                        PreviewView(ctx).also { pv ->
-                            pv.scaleType = PreviewView.ScaleType.FILL_CENTER
-                        }
-                    },
-                    modifier = Modifier.fillMaxSize(),
-                    update = { pv -> bindCameraIfNeeded(pv) }
-                )
-            }
+            // Camera preview (full screen) — CameraX PreviewView + ImageAnalysis.
+            AndroidView(
+                factory = { ctx ->
+                    PreviewView(ctx).also { pv ->
+                        pv.scaleType = PreviewView.ScaleType.FILL_CENTER
+                    }
+                },
+                modifier = Modifier.fillMaxSize(),
+                update = { pv -> bindCameraIfNeeded(pv) }
+            )
 
             Column(
                 modifier = Modifier.fillMaxSize().padding(16.dp),
@@ -307,23 +262,6 @@ class ScanActivity : ComponentActivity() {
                 )
 
                 Spacer(modifier = Modifier.height(16.dp))
-
-                // Experimental high-speed record / stop-and-decode control.
-                // 已下线：highSpeedEnabled 恒为 false，此分支永不渲染（dead
-                // branch）。保留代码结构供未来参考，但 Compose 编译器会移除它。
-                if (highSpeed) {
-                    val recording by highSpeedRecording
-                    Button(
-                        onClick = { if (recording) stopHighSpeed() else startHighSpeed() },
-                        modifier = Modifier.fillMaxWidth(),
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = if (recording) Color(0xFFDC2626) else Accent
-                        )
-                    ) {
-                        Text(if (recording) "停止并解码" else "开始高速录制", fontSize = 16.sp)
-                    }
-                    Spacer(modifier = Modifier.height(12.dp))
-                }
 
                 // Action buttons row
                 Row(
@@ -506,62 +444,6 @@ class ScanActivity : ComponentActivity() {
             decodePool = p
         }
         return p
-    }
-
-    /** Experimental: begin a high-speed recording; decoded frames flow into the
-     *  same pool/receiver as the normal path once decoding starts.
-     *
-     *  已下线（@Deprecated）：高速录像模式因 H.264 损耗 + 录像后批处理延迟得不偿失，
-     *  入口已关闭（highSpeedEnabled 恒为 false，UI 永不调用此方法）。保留方法体供
-     *  未来参考，但不应再被调用。统一走 startCameraWithView 的 60fps 实时管道。 */
-    @Deprecated("高速录像模式已下线，统一走 60fps 实时 + 多码管道")
-    private fun startHighSpeed() {
-        val surface = highSpeedSurface
-        if (surface == null || !surface.isValid) {
-            updateUi { it.copy(statusText = "预览未就绪，请稍候再试…") }
-            return
-        }
-        ensurePool()
-        // Start a fresh receiver for this capture (coordinated with the pool).
-        val reset = {
-            session.destroy()
-            session = ReceiverSessionManager()
-            ingestStopped.set(false)
-        }
-        decodePool?.runExclusive(reset) ?: reset()
-        completedHandled = false
-
-        val controller = HighSpeedCaptureController(
-            context = this,
-            previewSurface = surface,
-            onYFrame = { buf, w, h, rs -> decodePool?.submit(buf, w, h, rs) },
-            onStatus = { msg -> runOnUiThread { updateUi { it.copy(statusText = msg) } } },
-            onError = { msg ->
-                runOnUiThread {
-                    highSpeedRecording.value = false
-                    // Fall back to the normal real-time CameraX pipeline: releasing
-                    // the controller and flipping useHighSpeedMode recomposes the
-                    // preview to the PreviewView, whose update→bindCameraIfNeeded
-                    // starts the standard QrDecodePool scanning path.
-                    highSpeedController?.release()
-                    highSpeedController = null
-                    highSpeedSurface = null
-                    useHighSpeedMode.value = false
-                    updateUi { it.copy(statusText = "高速模式失败，已回退普通模式：$msg") }
-                }
-            }
-        )
-        highSpeedController = controller
-        highSpeedRecording.value = true
-        controller.startRecording()
-    }
-
-    /** Experimental: stop recording and kick off background decode of the clip.
-     *  已下线（@Deprecated），见 [startHighSpeed]。 */
-    @Deprecated("高速录像模式已下线，统一走 60fps 实时 + 多码管道")
-    private fun stopHighSpeed() {
-        highSpeedRecording.value = false
-        highSpeedController?.stopAndDecode()
     }
 
     @androidx.annotation.OptIn(androidx.camera.camera2.interop.ExperimentalCamera2Interop::class)
@@ -934,11 +816,41 @@ class ScanActivity : ComponentActivity() {
 
         // Single-file path. Preserve the original name + extension in the temp
         // file (was recovered_<ts>.bin, which dropped the extension).
+        // Text-like names (txt/md/json/…) open the copy/share text UI; others go
+        // to the generic file detail screen. ETTEXTv1 already handled above.
         updateRecoveryStage("正在保存文件…")
         val finalName = if (displayName.isNotEmpty()) displayName else "received_file"
         val safeName = com.airferry.app.scan.FileNameUtil.sanitize(finalName)
         val tmp = java.io.File(cacheDir, "recovered_$safeName")
         tmp.writeBytes(truncBytes)
+        if (com.airferry.app.scan.TextLike.isTextLikeName(finalName) &&
+            com.airferry.app.scan.TextLike.fitsTextUi(truncBytes.size)
+        ) {
+            // Strict UTF-8 only (invalid sequences → file detail, not silent
+            // U+FFFD corruption). Oversize text-like files also fall through so
+            // we never load multi-MB logs into a single String. CRC uses the
+            // on-disk/recovered bytes so re-open CRC matches file content.
+            val text = com.airferry.app.scan.TextLike.decodeUtf8Strict(truncBytes)
+            if (text != null) {
+                val contentCrc = crc32OfBytes(truncBytes)
+                // Prefer the original display name for the archive (.md/.json keep
+                // their extension); fall back to 文字消息.txt only for bare names.
+                val archiveLabel =
+                    if (finalName.contains('.')) finalName else TEXT_RECEIVED_NAME
+                archiveTextAs(tmp, archiveLabel, contentCrc)
+                clearRecoveryStage()
+                return Intent(this, ReceiveTextActivity::class.java).apply {
+                    putExtra("TEXT", text)
+                    putExtra("FILE_PATH", tmp.absolutePath)
+                    putExtra("FILE_NAME", finalName)
+                    // Descriptor CRC when known (matches wire payload); else on-disk.
+                    putExtra("CRC32", if (crcKnown) expectedCrc else contentCrc)
+                    putExtra("CRC32_RECEIVED", contentCrc)
+                    putExtra("CRC32_UNKNOWN", !crcKnown)
+                }
+            }
+            // Non-UTF-8 → fall through to file detail.
+        }
         clearRecoveryStage()
         return Intent(this, ReceiveDetailActivity::class.java).apply {
             putExtra("FILE_PATH", tmp.absolutePath)
@@ -988,28 +900,32 @@ class ScanActivity : ComponentActivity() {
      * payload) — it's deterministic, so we always store it as a KNOWN crc. The
      * re-open path recomputes CRC over the same plain-text .txt and matches.
      */
-    private fun archiveText(src: java.io.File, contentCrc: Long): String {
+    private fun archiveText(src: java.io.File, contentCrc: Long): String =
+        archiveTextAs(src, TEXT_RECEIVED_NAME, contentCrc)
+
+    /**
+     * Archive a recovered text-like transfer into `received/` as the given
+     * [displayName] + `.meta` with `kind=text`, so history re-opens it in
+     * [ReceiveTextActivity].
+     */
+    private fun archiveTextAs(src: java.io.File, displayName: String, contentCrc: Long): String {
         return try {
             val parent = java.io.File(getExternalFilesDir(null), "received")
             if (!parent.exists()) parent.mkdirs()
-            val target = com.airferry.app.scan.FileNameUtil.uniqueTarget(parent, TEXT_RECEIVED_NAME)
+            val target = com.airferry.app.scan.FileNameUtil.uniqueTarget(parent, displayName)
             src.copyTo(target, overwrite = true)
             // .meta: name / size / crcHex / crcUnknown / kind
-            // Line 4 follows the SAME semantics as ReceiveDetailActivity's
-            // sidecar: it is the `crcUnknown` flag (true = no crc), NOT
-            // `crcKnown`. We always have a deterministic text CRC, so it's
-            // always "false" (crc is known). Line 5 (kind) is optional for old
-            // readers (they use getOrElse on indices 0..3); only text items
-            // carry it.
+            // Line 4 is the `crcUnknown` flag (true = no crc). Line 5 kind=text
+            // is optional for old readers.
             val crcStr = java.lang.Long.toHexString(contentCrc)
             val size = src.length().toString()
             java.io.File(parent, "${target.name}.meta").writeText(
-                "$TEXT_RECEIVED_NAME\n$size\n$crcStr\nfalse\nkind=text"
+                "$displayName\n$size\n$crcStr\nfalse\nkind=text"
             )
             target.name
         } catch (e: Exception) {
             android.util.Log.w("ScanActivity", "text archive failed", e)
-            TEXT_RECEIVED_NAME
+            displayName
         }
     }
 
@@ -1118,9 +1034,6 @@ class ScanActivity : ComponentActivity() {
     override fun onDestroy() {
         super.onDestroy()
         cameraExecutor.shutdown()
-        // Stop the high-speed controller (if any) first so it stops feeding frames.
-        highSpeedController?.release()
-        highSpeedController = null
         // Drain the IO executor BEFORE tearing down the decode pool: the pending
         // recovery task holds the pool's ingest lock and touches the native
         // session, so freeing the handle first would race it. Shutdown + await

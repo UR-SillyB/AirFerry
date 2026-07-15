@@ -1,12 +1,14 @@
 /**
  * AirFerry sender app — single full-tab page with internal routing across
- * the four required screens: file select → params → play → stats.
+ * the four required screens: select → params → play → stats.
  *
- * Supports multiple files: when ≥2 files are selected they are packed into a
- * single bundle container (`bundle.ts`) before compression, so the whole batch
- * travels as one RaptorQ object / one QR video stream. The receiver detects the
- * bundle magic after recovery and unpacks every file. A single-file selection
- * keeps the original (non-bundled) path for full backward compatibility.
+ * The select page holds a unified pending list (real files + text items that
+ * keep their string content). Nothing is compressed until the user clicks
+ * 「发送」. Staging rules:
+ *  - exactly one text item, no files → ETTEXTv1 (`processText`) so the
+ *    receiver opens the copy/share text page (and can still save as .txt)
+ *  - otherwise materialise text as named .txt Files and `processFiles`
+ *    (1 item = single-file path; ≥2 = ETBUNDL1 bundle)
  */
 import { useState, useCallback, useEffect, useRef } from "react"
 import "@/assets/app.css"
@@ -17,7 +19,13 @@ import { ParamsPage } from "@/pages/ParamsPage"
 import { PlayPage } from "@/pages/PlayPage"
 import { StatsPage } from "@/pages/StatsPage"
 import { CompressProgress, type CompressPhase } from "@/components/CompressProgress"
-import { loadConfig, saveConfig, type Page, type TransferConfig, type TransferKind } from "@/types"
+import {
+  loadConfig,
+  saveConfig,
+  type Page,
+  type PendingItem,
+  type TransferConfig,
+} from "@/types"
 import { base64ToBuffer } from "@/wasm/base64"
 
 /**
@@ -88,9 +96,9 @@ const compressWorker = standaloneGlobals.__AIRFERRY_STANDALONE__ && standaloneGl
   }
 })()
 
-export type { Page, TransferConfig, TransferKind }
+export type { Page, PendingItem, TransferConfig }
 
-/** A "send unit": either one real file or a bundle of several. */
+/** A "send unit": either one real file, a text message, or a bundle of several. */
 interface PreparedPayload {
   /** Final bytes fed to the RaptorQ encoder (already compressed). */
   compressed: Uint8Array
@@ -104,17 +112,18 @@ interface PreparedPayload {
   originalSize: number
   /** Session id derived from the transfer identity. */
   sessionId: { lo: bigint; hi: bigint }
+  /** True when staged as a pure ETTEXTv1 text transfer (receiver copy UI). */
+  isText: boolean
 }
 
 export interface AppState {
   page: Page
-  /** Transfer kind: "file" (default) or "text". Picks the select-page Tab. */
-  kind: TransferKind
-  /** Files chosen by the user (1 or more), in the file Tab. */
-  files: File[]
-  /** Text typed in the text Tab. */
-  text: string
-  /** The prepared transfer unit (once files/text are staged). Null until ready. */
+  /**
+   * Pending send list on the select page (files + text items with content).
+   * Only staged into the compress worker when the user clicks「发送」.
+   */
+  items: PendingItem[]
+  /** The prepared transfer unit (after compress worker). Null until ready. */
   prepared: PreparedPayload | null
   session: SenderSessionWasm | null
   config: TransferConfig
@@ -130,6 +139,24 @@ export interface AppState {
   error: string | null
 }
 
+/** Materialise pending items as File[] for the file/bundle worker path. */
+function itemsToFiles(items: PendingItem[]): File[] {
+  return items.map((it) => {
+    if (it.kind === "file") return it.file
+    const blob = new Blob([it.content], { type: "text/plain;charset=utf-8" })
+    return new File([blob], it.name, {
+      type: "text/plain",
+      lastModified: Date.now(),
+    })
+  })
+}
+
+function itemByteSize(it: PendingItem): number {
+  return it.kind === "file"
+    ? it.file.size
+    : new TextEncoder().encode(it.content).length
+}
+
 export default function App() {
   useEffect(() => {
     document.title = "AirFerry · 无网文件传输"
@@ -140,9 +167,7 @@ export default function App() {
   // every subsequent transfer instead of resetting to defaults each time).
   const [state, setState] = useState<AppState>({
     page: "select",
-    kind: "file",
-    files: [],
-    text: "",
+    items: [],
     prepared: null,
     session: null,
     config: loadConfig(),
@@ -151,25 +176,44 @@ export default function App() {
     error: null
   })
 
-  const go = useCallback((page: Page) => setState((s) => ({ ...s, page })), [])
-
   /**
-   * Handle the compress worker's messages: stage progress updates and the final
-   * prepared payload. Registered once (the worker is a module singleton); a ref
-   * tracks whether we're actively awaiting a result so stale messages from a
-   * superseded selection don't clobber state.
+   * Epoch for in-flight compress. Bumped when the pending list changes so a
+   * late worker `done` cannot apply after the user edited the selection.
+   * `issuedEpoch` is the epoch at postMessage time; results apply only when
+   * `epoch.current === issuedEpoch.current`.
    */
-  const awaitingResult = useRef(false)
+  const epoch = useRef(0)
+  const issuedEpoch = useRef(-1)
+  /** Items snapshot at compress start (for prepared.isText). */
+  const compressItemsRef = useRef<PendingItem[]>([])
+
+  const go = useCallback((page: Page) => {
+    // Navigating back to select while compressing must cancel the in-flight
+    // worker result (same as editing the list).
+    if (page === "select") {
+      epoch.current += 1
+      issuedEpoch.current = -1
+      setState((s) => ({
+        ...s,
+        page,
+        compressPhase: null,
+      }))
+      return
+    }
+    setState((s) => ({ ...s, page }))
+  }, [])
+
   useEffect(() => {
     const handler = (e: MessageEvent) => {
       const msg = e.data
       if (!msg || typeof msg.phase !== "string") return
+      // Stale: list was edited (or a newer send replaced this one).
+      if (issuedEpoch.current !== epoch.current) return
 
       if (msg.phase === "done") {
-        if (!awaitingResult.current) return
-        awaitingResult.current = false
-        // Convert the transferable ArrayBuffer back into a Uint8Array view and
-        // the decimal-string session-id halves back into bigint.
+        const itemsSnap = compressItemsRef.current
+        const pureText =
+          itemsSnap.length === 1 && itemsSnap[0].kind === "text"
         const compressed = new Uint8Array(msg.compressed as ArrayBuffer)
         setState((s) => ({
           ...s,
@@ -183,23 +227,24 @@ export default function App() {
               lo: BigInt(msg.sessionId.lo),
               hi: BigInt(msg.sessionId.hi),
             },
+            isText: pureText,
           },
           compressPhase: null,
           page: "params",
           error: null,
         }))
       } else if (msg.phase === "error") {
-        awaitingResult.current = false
         setState((s) => ({
           ...s,
           compressPhase: null,
           error: `文件处理失败: ${msg.message}`,
         }))
       } else {
-        // stage progress: reading / bundling / zstd / xz
-        if (awaitingResult.current) {
-          setState((s) => ({ ...s, compressPhase: msg.phase as CompressPhase }))
-        }
+        setState((s) =>
+          s.compressPhase != null
+            ? { ...s, compressPhase: msg.phase as CompressPhase }
+            : s
+        )
       }
     }
     compressWorker.addEventListener("message", handler)
@@ -207,65 +252,51 @@ export default function App() {
   }, [])
 
   /**
-   * Stage 1 (file): files chosen → hand them to the compress worker, which
-   * packs (if >1), compresses, and derives the session id OFF the main thread
-   * while the UI shows a progress overlay. A single file skips bundling so the
-   * old single-file flow is byte-identical for old receivers.
+   * Select page: only update the pending list. Does NOT compress or advance —
+   * that happens in `onSend` when the user explicitly confirms.
+   * Changing the list invalidates prepared/session and cancels in-flight compress.
    */
-  const stageFiles = useCallback((files: File[]) => {
-    if (files.length === 0) {
-      setState((s) => ({ ...s, files: [], prepared: null, page: "select" }))
-      return
+  const onItemsChange = useCallback((items: PendingItem[]) => {
+    epoch.current += 1
+    issuedEpoch.current = -1
+    compressItemsRef.current = []
+    setState((s) => ({
+      ...s,
+      items,
+      prepared: null,
+      session: null,
+      compressPhase: null,
+      error: null,
+      page: "select",
+    }))
+  }, [])
+
+  /**
+   * Explicit send:
+   *  - one text item alone → worker `{ text }` → ETTEXTv1 (receiver copy/share)
+   *  - otherwise → materialise text as .txt Files → worker `{ files }`
+   * Re-entry while compressPhase != null is ignored.
+   */
+  const onSend = useCallback(() => {
+    const items = state.items
+    if (items.length === 0) return
+    if (state.compressPhase != null) return
+    const e = epoch.current
+    issuedEpoch.current = e
+    compressItemsRef.current = items
+    setState((s) => ({
+      ...s,
+      compressPhase: "reading",
+      error: null,
+    }))
+    if (items.length === 1 && items[0].kind === "text") {
+      compressWorker.postMessage({ text: items[0].content })
+    } else {
+      compressWorker.postMessage({ files: itemsToFiles(items) })
     }
-    awaitingResult.current = true
-    setState((s) => ({
-      ...s,
-      kind: "file",
-      files,
-      text: "",
-      compressPhase: "reading",
-      error: null,
-    }))
-    compressWorker.postMessage({ files })
-  }, [])
+  }, [state.items, state.compressPhase])
 
-  const onFilesSelected = stageFiles
-
-  const onSendDraftsAsFiles = stageFiles
-
-  /**
-   * Stage 1 (text): submitted text → hand it to the compress worker, which
-   * wraps it in the ETTEXTv1 magic, compresses, and derives the session id.
-   * Same worker pipeline as files; the result is a normal PreparedPayload.
-   */
-  const onTextEntered = useCallback((text: string) => {
-    if (text.trim().length === 0) return
-    awaitingResult.current = true
-    setState((s) => ({
-      ...s,
-      kind: "text",
-      text,
-      compressPhase: "reading",
-      error: null,
-    }))
-    compressWorker.postMessage({ text })
-  }, [])
-
-  /**
-   * Switch the select-page Tab. Clears the OTHER kind's staged selection so a
-   * half-prepared file transfer doesn't leak into a text flow and vice versa.
-   * Stays on the select page (no prepared payload → can't advance yet).
-   */
-  const onKindChange = useCallback((kind: TransferKind) => {
-    setState((s) => {
-      if (s.kind === kind) return s
-      return kind === "file"
-        ? { ...s, kind, text: "", prepared: null, page: "select" }
-        : { ...s, kind, files: [], prepared: null, page: "select" }
-    })
-  }, [])
-
-  /** Stage 2: params confirmed → build the WASM sender session, go to play. */
+  /** Params confirmed → build the WASM sender session, go to play. */
   const onStart = useCallback(async () => {
     await ensureWasm()
     if (!state.prepared) return
@@ -338,23 +369,19 @@ export default function App() {
         )}
         {state.page === "select" && (
           <FileSelectPage
-            kind={state.kind}
-            files={state.files}
-            text={state.text}
-            onKindChange={onKindChange}
-            onSelected={onFilesSelected}
-            onTextEntered={onTextEntered}
-            onSendDraftsAsFiles={onSendDraftsAsFiles}
+            items={state.items}
+            onItemsChange={onItemsChange}
+            onSend={onSend}
           />
         )}
         {state.page === "params" && state.prepared && (
           <ParamsPage
-            kind={state.kind}
-            files={state.files}
+            items={state.items}
             displayName={state.prepared.displayName}
             originalSize={state.prepared.originalSize}
             compressedSize={state.prepared.compressed.length}
-            isBundle={state.kind === "file" && state.files.length > 1}
+            isBundle={state.items.length > 1}
+            isText={state.prepared.isText}
             config={state.config}
             onChange={updateConfig}
             onStart={onStart}
@@ -381,18 +408,20 @@ export default function App() {
           during the slow xz pass. */}
       <CompressProgress
         phase={state.compressPhase}
-        isBundle={state.kind === "file" && state.files.length > 1}
+        isBundle={state.items.length > 1}
         displayName={
-          state.kind === "text"
-            ? "文字消息"
-            : state.files.length > 0
-              ? (state.files.length > 1 ? `${state.files.length}个文件` : state.files[0].name)
-              : undefined
+          state.items.length === 0
+            ? undefined
+            : state.items.length === 1 && state.items[0].kind === "text"
+              ? "文字消息"
+              : state.items.length > 1
+                ? `${state.items.length}项`
+                : state.items[0].kind === "file"
+                  ? state.items[0].file.name
+                  : state.items[0].name
         }
         originalSize={
-          state.kind === "text"
-            ? (state.text.length > 0 ? new TextEncoder().encode(state.text).length + 8 : undefined)
-            : (state.files.reduce((sum, f) => sum + f.size, 0) || undefined)
+          state.items.reduce((sum, it) => sum + itemByteSize(it), 0) || undefined
         }
       />
     </div>

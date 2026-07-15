@@ -1,13 +1,11 @@
 /** Page 2: transfer parameters (redundancy, fps, symbol size, brightness). */
-import type { TransferConfig, TransferKind } from "@/types"
+import type { PendingItem, TransferConfig } from "@/types"
 import { SPEED_PRESETS, presetForSymbolSize } from "@/types"
 
 interface Props {
-  /** Transfer kind — only affects the first KV row's label/list rendering. */
-  kind: TransferKind
-  /** Files chosen by the user (1 or more); empty for a text transfer. */
-  files: File[]
-  /** Display name for the transfer (single file name, "N个文件打包", or "文字消息.txt"). */
+  /** Pending items that were staged (files + text). */
+  items: PendingItem[]
+  /** Display name for the transfer (single name, "文字消息.txt", or "N个文件打包"). */
   displayName: string
   /** Total original (pre-compression) byte count of the transfer unit. */
   originalSize: number
@@ -15,11 +13,23 @@ interface Props {
   compressedSize: number
   /** Whether the payload is a multi-file bundle. */
   isBundle: boolean
+  /** Pure ETTEXTv1 text transfer (receiver copy/share UI). */
+  isText: boolean
   config: TransferConfig
   onChange: (patch: Partial<TransferConfig>) => void
   onStart: () => void
   /** Whether the WASM encoder is currently being initialized. */
   initializing?: boolean
+}
+
+function itemLabel(it: PendingItem): string {
+  return it.kind === "file" ? it.file.name : it.name
+}
+
+function itemSize(it: PendingItem): number {
+  return it.kind === "file"
+    ? it.file.size
+    : new TextEncoder().encode(it.content).length
 }
 
 function formatBytes(n: number): string {
@@ -39,12 +49,12 @@ function formatDuration(seconds: number): string {
 }
 
 export function ParamsPage({
-  kind,
-  files,
+  items,
   displayName,
   originalSize,
   compressedSize,
   isBundle,
+  isText,
   config,
   onChange,
   onStart,
@@ -59,14 +69,11 @@ export function ParamsPage({
   const effectiveFps = config.fps > 0 ? config.fps : 120 // estimate for "unlimited"
   const estimatedSeconds = totalFrames / effectiveFps
 
-  // Show the file list (collapsible-ish: first few + "还有 N 个" for bundles).
-  const visibleFiles = files.slice(0, 5)
-  const hiddenCount = files.length - visibleFiles.length
+  // Show the item list (collapsible-ish: first few + "还有 N 个" for bundles).
+  const visibleItems = items.slice(0, 5)
+  const hiddenCount = items.length - visibleItems.length
 
-  // First-row label depends on kind: text shows "文字内容", file shows
-  // "打包内容" (bundle) or "文件" (single).
-  const contentLabel =
-    kind === "text" ? "文字内容" : isBundle ? "打包内容" : "文件"
+  const contentLabel = isText ? "文字内容" : isBundle ? "打包内容" : "文件"
 
   return (
     <div className="page">
@@ -79,14 +86,17 @@ export function ParamsPage({
               {displayName}
               {isBundle && (
                 <ul className="kv-file-list">
-                  {visibleFiles.map((f, i) => (
-                    <li key={i}>
-                      <span>{f.name}</span>
-                      <span className="muted"> {formatBytes(f.size)}</span>
+                  {visibleItems.map((it) => (
+                    <li key={it.id}>
+                      <span>
+                        {it.kind === "text" ? "📝 " : ""}
+                        {itemLabel(it)}
+                      </span>
+                      <span className="muted"> {formatBytes(itemSize(it))}</span>
                     </li>
                   ))}
                   {hiddenCount > 0 && (
-                    <li className="muted">…还有 {hiddenCount} 个文件</li>
+                    <li className="muted">…还有 {hiddenCount} 项</li>
                   )}
                 </ul>
               )}

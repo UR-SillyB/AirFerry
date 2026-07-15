@@ -111,31 +111,26 @@ body {
 .file-list-remove { flex-shrink: 0; border: none; background: transparent; color: var(--color-text-muted); cursor: pointer; font-size: 14px; padding: 4px 8px; border-radius: 4px; }
 .file-list-remove:hover { background: var(--color-error); color: #fff; }
 
-/* Kind Tab switch on the select page (file vs text). Two equal-width pill
-   buttons; the active one takes the primary fill. */
-.kind-tabs { display: flex; gap: 8px; margin-bottom: 20px; }
-.kind-tab {
-  flex: 1; padding: 12px 16px;
-  border: 1px solid var(--color-border); background: #fff;
-  border-radius: var(--radius-sm); cursor: pointer;
-  font-size: 15px; font-weight: 500; color: var(--color-text-secondary);
-  transition: all 0.15s;
-}
-.kind-tab:hover { background: var(--color-bg); }
-.kind-tab.active {
-  background: var(--color-primary); color: #fff; border-color: var(--color-primary);
-}
+/* Select page: add-file / add-text action row above the dropzone. */
+.select-actions { display: flex; gap: 8px; margin-bottom: 16px; }
+.select-action-btn { flex: 1; margin: 0; }
 
-/* Text input surface (text Tab on the select page). */
+/* Text input surface (Add Text modal on the select page). */
 .text-input-wrap { display: flex; flex-direction: column; }
 .text-input {
   width: 100%; min-height: 240px; resize: vertical;
   padding: 16px; font-family: inherit; font-size: 15px; line-height: 1.6;
   border: 1px solid var(--color-border); border-radius: var(--radius);
   background: #fff; color: var(--color-text);
+  box-sizing: border-box;
+}
+.text-input-modal {
+  min-height: 320px;
+  max-height: min(60vh, 480px);
 }
 .text-input:focus { outline: none; border-color: var(--color-primary); box-shadow: 0 0 0 3px var(--color-primary-light); }
 .text-input-stats { display: flex; gap: 8px; align-items: center; margin-top: 10px; font-size: 13px; color: var(--color-text-secondary); }
+.modal-card-text { max-width: 560px; }
 
 
 /* Inline file list inside the params KV table (bundle view) */

@@ -207,4 +207,71 @@ public static class FileNameUtil
             return false;
         }
     }
+
+    /// <summary>
+    /// Soft cap for the in-memory text (copy) UI — mirrors Android
+    /// <c>TextLike.MAX_TEXT_UI_BYTES</c>. Larger files stay on the file screen.
+    /// </summary>
+    public const int MaxTextUiBytes = 2 * 1024 * 1024;
+
+    /// <summary>
+    /// Heuristic: recovered files that should open in the text (copy/share) UI.
+    /// Extension-based; mirrors Android <c>TextLike.isTextLikeName</c>.
+    /// </summary>
+    public static bool IsTextLikeName(string name)
+    {
+        string baseName = name;
+        int slash = baseName.LastIndexOfAny(['/', '\\']);
+        if (slash >= 0)
+        {
+            baseName = baseName[(slash + 1)..];
+        }
+        int dot = baseName.LastIndexOf('.');
+        if (dot <= 0 || dot >= baseName.Length - 1)
+        {
+            return false;
+        }
+        string ext = baseName[(dot + 1)..].ToLowerInvariant();
+        return TextLikeExtensions.Contains(ext);
+    }
+
+    public static bool FitsTextUi(long size) => size >= 0 && size <= MaxTextUiBytes;
+
+    /// <summary>
+    /// Decode <paramref name="bytes"/> as UTF-8 only if the sequence is valid and
+    /// within <see cref="MaxTextUiBytes"/>. Mirrors Android
+    /// <c>TextLike.decodeUtf8Strict</c>.
+    /// </summary>
+    public static string? DecodeUtf8Strict(byte[] bytes)
+    {
+        if (bytes.Length > MaxTextUiBytes)
+        {
+            return null;
+        }
+        try
+        {
+            var enc = new System.Text.UTF8Encoding(
+                encoderShouldEmitUTF8Identifier: false,
+                throwOnInvalidBytes: true);
+            return enc.GetString(bytes);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    // Keep in sync with apps/scanner/.../scan/TextLike.kt
+    private static readonly HashSet<string> TextLikeExtensions = new(StringComparer.Ordinal)
+    {
+        "txt", "text", "md", "markdown", "rst", "adoc", "asciidoc",
+        "csv", "tsv", "log", "nfo", "srt", "vtt", "diff", "patch",
+        "json", "jsonl", "xml", "yaml", "yml", "toml", "ini", "cfg", "conf",
+        "properties", "env", "plist",
+        "html", "htm", "css", "svg",
+        "js", "mjs", "cjs", "ts", "tsx", "jsx",
+        "py", "rb", "go", "rs", "java", "kt", "kts", "swift",
+        "c", "h", "cpp", "cc", "cxx", "hpp", "cs", "sql", "sh", "bash",
+        "zsh", "bat", "cmd", "ps1", "r", "lua", "php",
+    };
 }

@@ -3,6 +3,8 @@ using System.Diagnostics;
 using System.IO;
 using System.Windows;
 using System.Windows.Controls;
+using AirFerry.Windows.Bundle;
+using AirFerry.Windows.Models;
 using AirFerry.Windows.ViewModels;
 
 namespace AirFerry.Windows.Views;
@@ -10,7 +12,7 @@ namespace AirFerry.Windows.Views;
 /// <summary>
 /// Received-file history browser — mirrors Android's <c>FileListActivity</c>.
 /// Lists files (and bundle subdirs) under <see cref="ScanViewModel.ReceivedDir"/>,
-/// double-click to open, "clear all" to wipe.
+/// double-click to open (text-like → copy UI, else shell), "clear all" to wipe.
 /// </summary>
 public partial class FileListView : Page
 {
@@ -75,6 +77,39 @@ public partial class FileListView : Page
         if (FilesListView.SelectedItem is not FileEntry entry)
         {
             return;
+        }
+        if (!entry.IsDirectory && FileNameUtil.IsTextLikeName(entry.Name))
+        {
+            try
+            {
+                long len = new FileInfo(entry.FullPath).Length;
+                if (FileNameUtil.FitsTextUi(len))
+                {
+                    byte[] bytes = File.ReadAllBytes(entry.FullPath);
+                    string? text = FileNameUtil.DecodeUtf8Strict(bytes);
+                    if (text is not null)
+                    {
+                        var result = new RecoveryResult(
+                            SingleFilePath: entry.FullPath,
+                            SingleFileSize: (ulong)bytes.Length,
+                            ExpectedCrc32: null,
+                            Crc32Known: false,
+                            ReceivedCrc32: null,
+                            Bundle: null,
+                            BundleDir: null,
+                            Text: text);
+                        NavigationService?.Navigate(new ReceiveTextView(result, entry.Name));
+                        return;
+                    }
+                }
+                // Oversize or invalid UTF-8 → fall through to shell open.
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"无法作为文字打开: {ex.Message}", "AirFerry",
+                    MessageBoxButton.OK, MessageBoxImage.Error);
+                // fall through to shell open
+            }
         }
         // Open with the shell handler (file → default app, dir → Explorer).
         Process.Start(new ProcessStartInfo(entry.FullPath)

@@ -17,11 +17,17 @@ namespace AirFerry.Windows.Views;
 public partial class ReceiveTextView : Page
 {
     private readonly RecoveryResult _result;
+    private readonly string _saveFileName;
 
-    public ReceiveTextView(RecoveryResult result)
+    public ReceiveTextView(RecoveryResult result, string? suggestedFileName = null)
     {
         InitializeComponent();
         _result = result;
+        _saveFileName = string.IsNullOrWhiteSpace(suggestedFileName)
+            ? "文字消息.txt"
+            : (suggestedFileName.EndsWith(".txt", StringComparison.OrdinalIgnoreCase)
+                ? suggestedFileName
+                : suggestedFileName + ".txt");
         Loaded += (_, _) => Populate();
     }
 
@@ -68,7 +74,7 @@ public partial class ReceiveTextView : Page
     {
         var dlg = new SaveFileDialog
         {
-            FileName = "文字消息.txt",
+            FileName = _saveFileName,
             Filter = "文本文件|*.txt|所有文件|*.*",
         };
         if (dlg.ShowDialog() != true)

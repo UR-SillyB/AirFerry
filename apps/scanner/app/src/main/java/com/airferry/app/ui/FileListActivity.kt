@@ -410,6 +410,11 @@ class FileListActivity : ComponentActivity() {
                 size = lines.getOrElse(1) { file.length().toString() }.toLongOrNull() ?: file.length()
                 isText = lines.getOrElse(4) { "" }.trim() == "kind=text"
             }
+            // Also treat common text extensions as text even without kind=text
+            // (user-sent .md/.json/…, or older archives).
+            if (!isText) {
+                isText = com.airferry.app.scan.TextLike.isTextLikeName(name)
+            }
             // For text items, read the first non-empty line as a preview. Cheap
             // (texts are small) and makes the history entry recognizable.
             if (isText) {
@@ -429,7 +434,11 @@ class FileListActivity : ComponentActivity() {
         // 文字项主标题不裸露「文字消息.txt」文件名——它对接收场景没有意义，
         // 且与首行预览重复。统一显示「文字消息」，首行预览作副标题。文件名仅在
         // 真正「保存为文件 / 分享」时用到（见 ReceiveTextActivity 的 saveAs）。
-        val displayTitle = if (isText) "文字消息" else origName
+        // Keep the real filename for text-like docs (readme.md, notes.json);
+        // only the generic ETTEXTv1 archive name collapses to「文字消息」.
+        val displayTitle =
+            if (isText && (origName == "文字消息.txt" || origName == "文字消息")) "文字消息"
+            else origName
 
         var showDeleteDialog by remember { mutableStateOf(false) }
         val cardColor by animateColorAsState(if (selected) SelectHighlight else CardBg, label = "cardBg")
@@ -678,23 +687,32 @@ class FileListActivity : ComponentActivity() {
             // generic file detail screen.
             isText = lines.getOrElse(4) { "" }.trim() == "kind=text"
         }
-        if (isText) {
-            // Text transfer: read the .txt back and open the text detail screen.
-            // No re-archiving (file is already in received/), so we just show it.
+        if (!isText) {
+            isText = com.airferry.app.scan.TextLike.isTextLikeName(fileName)
+        }
+        if (isText && com.airferry.app.scan.TextLike.fitsTextUi(file.length())) {
+            // Text / text-like doc: open the copy/share screen (no re-archive).
+            // CRC over on-disk bytes (must match what archiveTextAs / file detail
+            // stored in .meta). Invalid UTF-8 or oversize → fall through to file detail.
             try {
-                val text = file.readText(Charsets.UTF_8)
-                val intent = Intent(this, ReceiveTextActivity::class.java).apply {
-                    putExtra("TEXT", text)
-                    putExtra("FILE_NAME", fileName)
-                    putExtra("CRC32", expectedCrc)
-                    putExtra("CRC32_RECEIVED", ScanActivity.crc32OfBytes(text.toByteArray(Charsets.UTF_8)))
-                    putExtra("CRC32_UNKNOWN", crcUnknown)
+                val bytes = file.readBytes()
+                val text = com.airferry.app.scan.TextLike.decodeUtf8Strict(bytes)
+                if (text != null) {
+                    val intent = Intent(this, ReceiveTextActivity::class.java).apply {
+                        putExtra("TEXT", text)
+                        putExtra("FILE_NAME", fileName)
+                        putExtra("CRC32", expectedCrc)
+                        putExtra("CRC32_RECEIVED", ScanActivity.crc32OfBytes(bytes))
+                        putExtra("CRC32_UNKNOWN", crcUnknown)
+                    }
+                    startActivity(intent)
+                    return
                 }
-                startActivity(intent)
             } catch (_: Exception) {
                 Toast.makeText(this, "无法读取文字", Toast.LENGTH_SHORT).show()
+                return
             }
-            return
+            // Invalid UTF-8 with text-like name → treat as ordinary file below.
         }
         // Off-load the disk read + CRC to a background thread so a multi-MB file
         // doesn't freeze the UI on click. We compute the ACTUAL CRC of the bytes

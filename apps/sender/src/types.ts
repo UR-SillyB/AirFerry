@@ -3,15 +3,15 @@
 export type Page = "select" | "params" | "play" | "stats"
 
 /**
- * What kind of content is being sent. Both kinds end up as an opaque byte
- * payload fed to the same compress → RaptorQ → QR pipeline; the distinction
- * only affects how the payload is *produced* (a File's bytes vs. a text
- * message with a magic prefix) and a few cosmetic bits in the UI.
- *
- *  - "file" → one or more File objects (≥2 are bundled via `bundle.ts`)
- *  - "text" → a user-typed string, wrapped in the `ETTEXTv1` magic (`text.ts`)
+ * One row on the select-page pending list.
+ *  - file: a real File from drag/browse
+ *  - text: user-composed message; content kept as string so a lone text item
+ *    can still be sent as ETTEXTv1 (receiver copy/share UI). When mixed with
+ *    other items it is materialised as a named .txt inside ETBUNDL1.
  */
-export type TransferKind = "file" | "text"
+export type PendingItem =
+  | { id: string; kind: "file"; file: File }
+  | { id: string; kind: "text"; name: string; content: string }
 
 export interface TransferConfig {
   redundancyPct: number

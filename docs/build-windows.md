@@ -90,11 +90,35 @@ dotnet run --project AirFerry.Windows -c Release
 
 1. **Rust DLL 必须先于 C# 构建**：见 §4.1 注释。走 `build-windows.ps1` 会自动先跑 cargo。
 2. **WPF 只能在 Windows 上构建**：`net8.0-windows` TFM 依赖 Windows SDK，无法在 macOS/Linux 上编译 C# 主项目。**协议层单元测试**（`AirFerry.Windows.Tests`）用纯 `net8.0` TFM，可在任何 OS 上跑（不依赖 P/Invoke，只测 IngestStatus 位域、FrameHeader 解析、BundleParser 等纯逻辑）。
-3. **版本号四同步**：改版本时同时改 `apps/sender/package.json`（→ 文件名）+ `apps/scanner/app/build.gradle.kts` versionName（→ APK 内嵌）+ `Cargo.toml`（→ 核心库）+ `apps/windows/AirFerry.Windows/AirFerry.Windows.csproj` `<Version>`（→ exe 内嵌）。
+3. **版本号同步**：改版本时同时改 `apps/sender/package.json`（→ 文件名）+ `apps/scanner/app/build.gradle.kts` versionName（→ APK 内嵌）+ `Cargo.toml`（→ 核心库）+ `apps/windows/AirFerry.Windows/AirFerry.Windows.csproj` `<Version>`（→ exe 内嵌）+ **`.github/workflows/windows.yml` `env.VER`**（→ CI zip 名与 release tag）。详见 [AGENTS.md](../AGENTS.md) §2.8 / §2.9。
 
 ---
 
-## 6. 设备选择（摄像头 / 采集卡）
+## 6. GitHub Actions 发版（推荐，非 Windows 本机）
+
+macOS/Linux 无法编 WPF。正式 Windows 产物用 [`.github/workflows/windows.yml`](../.github/workflows/windows.yml)：
+
+```text
+push/PR（core/** 或 apps/windows/**）
+  → rust-cffi (ubuntu) + csharp-tests (ubuntu) + windows-build (windows-latest)
+
+workflow_dispatch（手动）且上述三 job 成功
+  → windows-pack：
+       cargo build --features cffi --release
+       拷贝 transfer_engine.dll → apps/windows/AirFerry.Windows/runtime/
+       dotnet publish -c Release -r win-x64 -p:PublishSingleFile=true --self-contained false
+       Compress-Archive → airferry-windows-x64-v${VER}.zip
+       gh release upload v${VER} … --clobber
+       （若 tag/release 不存在则 gh release create --draft）
+```
+
+操作：Actions → **windows** → **Run workflow**。`VER` 在 workflow 文件顶部 `env.VER`，发版前与四处版本号一并改。
+
+本地 Windows 仍可用 `.\scripts\build-windows.ps1 -Pack`（产物进 `dist/`）。
+
+---
+
+## 7. 设备选择（摄像头 / 采集卡）
 
 Windows 端的核心新增功能。启动后进入**设备选择页**：
 
@@ -105,18 +129,19 @@ Windows 端的核心新增功能。启动后进入**设备选择页**：
 
 ---
 
-## 7. 产物
+## 8. 产物
 
 | 产物 | 路径 | 说明 |
 |------|------|------|
 | 可执行文件 | `apps/windows/AirFerry.Windows/bin/x64/Release/net8.0-windows/AirFerry.exe` | 依赖同目录下的 `transfer_engine.dll` + OpenCV native DLLs |
-| 发布 zip | `dist/airferry-windows-x64-v{VER}.zip` | `dotnet publish` 产物打包；单文件发布 + 框架依赖（需目标机装 .NET 8 运行时） |
+| 发布 zip（本地） | `dist/airferry-windows-x64-v{VER}.zip` | `build-windows.ps1 -Pack` |
+| 发布 zip（CI） | GitHub Release asset 同名 | `windows.yml` → `windows-pack` job |
 
-> 所有产物均 git-ignored（见 `.gitignore`）。分发走 GitHub Release。
+> 所有本地产物均 git-ignored。分发走 GitHub Release；**默认 Windows 发版路径是 workflow**（§6）。
 
 ---
 
-## 8. 测试
+## 9. 测试
 
 ```powershell
 cd apps\windows
@@ -134,7 +159,7 @@ dotnet test
 
 ---
 
-## 9. 与 Android 端的对照
+## 10. 与 Android 端的对照
 
 | 维度 | Android | Windows |
 |------|---------|---------|

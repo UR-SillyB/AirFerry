@@ -192,7 +192,12 @@ public partial class ScanView : Page
             DrawProgressRing(100);
             if (result.IsText)
             {
-                NavigationService?.Navigate(new ReceiveTextView(result));
+                // Prefer original filename for text-like docs (readme.md…);
+                // ETTEXTv1 has no path — ReceiveTextView defaults to 文字消息.txt.
+                string? suggested = result.SingleFilePath is not null
+                    ? System.IO.Path.GetFileName(result.SingleFilePath)
+                    : null;
+                NavigationService?.Navigate(new ReceiveTextView(result, suggested));
             }
             else if (result.IsBundle && result.Bundle is not null)
             {

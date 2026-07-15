@@ -57,6 +57,8 @@ class ReceiveTextActivity : ComponentActivity() {
     private var receivedCrc: Long = 0L
     /** True when the descriptor never supplied an expected CRC. */
     private var crcUnknown: Boolean = true
+    /** Suggested .txt name when saving (bundle entry name, or default). */
+    private var saveFileName: String = "文字消息.txt"
 
     private val createDocument = registerForActivityResult(
         ActivityResultContracts.CreateDocument("text/plain")
@@ -71,6 +73,11 @@ class ReceiveTextActivity : ComponentActivity() {
         expectedCrc = readCrcExtra(intent, "CRC32")
         receivedCrc = readCrcExtra(intent, "CRC32_RECEIVED")
         crcUnknown = intent.getBooleanExtra("CRC32_UNKNOWN", true)
+        // Optional display name (e.g. when opened from a bundle .txt entry).
+        val named = intent.getStringExtra("FILE_NAME")?.trim().orEmpty()
+        if (named.isNotEmpty()) {
+            saveFileName = if (named.endsWith(".txt", ignoreCase = true)) named else "$named.txt"
+        }
 
         setContent { ReceiveTextScreen() }
     }
@@ -189,7 +196,7 @@ class ReceiveTextActivity : ComponentActivity() {
             // Save as .txt via SAF.
             Button(
                 onClick = {
-                    if (hasText) createDocument.launch("文字消息.txt")
+                    if (hasText) createDocument.launch(saveFileName)
                 },
                 modifier = Modifier.fillMaxWidth().height(50.dp),
                 colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF6366F1)),

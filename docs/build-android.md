@@ -166,16 +166,18 @@ apps/scanner/
         │   │   ├── ZxingDecoder.kt       # ZXing JNI 绑定
         │   │   ├── QrStreamAnalyzer.kt   # CameraX 分析器（生产者）
         │   │   ├── QrDecodePool.kt       # 并行解码池 + 串行 JNI 摄入
-        │   │   ├── HighSpeedCaptureController.kt  # 实验性高速录制→批量解码
-        │   │   ├── ReceiverSessionManager.kt
-        │   │   ├── BundleParser.kt       # ETBUNDL1 多文件容器解析
-        │   │   └── FileNameUtil.kt       # 接收文件命名（去重 / 目录）
-        │   └── ui/
-        │       ├── ScanActivity.kt       # 扫描页
-        │       ├── ReceiveDetailActivity.kt
-        │       ├── ReceiveBundleActivity.kt  # 多文件接收结果页
-        │       ├── FileListActivity.kt
-        │       └── SettingsActivity.kt   # 设置（含实验性高速开关）
+│   │   ├── ReceiverSessionManager.kt
+│   │   ├── BundleParser.kt       # ETBUNDL1 多文件容器解析
+│   │   ├── TextParser.kt         # ETTEXTv1
+│   │   ├── TextLike.kt           # 文本类扩展名启发式 + 严格 UTF-8
+│   │   └── FileNameUtil.kt       # 接收文件命名（去重 / 目录）
+│   └── ui/
+│       ├── ScanActivity.kt       # 扫描页（ImageAnalysis 1920×1080）
+│       ├── ReceiveDetailActivity.kt
+│       ├── ReceiveTextActivity.kt    # 文字/文本类复制页
+│       ├── ReceiveBundleActivity.kt  # 多文件；.txt 等可点开复制
+│       ├── FileListActivity.kt
+│       └── SettingsActivity.kt
         ├── jniLibs/arm64-v8a/    # Rust .so（cargo-ndk 产物）
         └── res/                  # 布局 + 资源
 ```

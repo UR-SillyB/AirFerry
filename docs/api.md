@@ -137,7 +137,10 @@ function encode_qr(frameBytes: Uint8Array, outSide: Uint32Array): Uint8Array
 // 返回扁平模块网格（1=深色, 0=浅色），outSide[0] = 边长
 ```
 
-> **构造参数来源**：`compressedPayload` / `sessionId` / `crc32` / `compression` 并非主线程直接计算，而是由 `src/workers/compress.worker.ts` 在 Web Worker 里离线产出（避免同步 WASM 压缩卡住 UI）：读文件 →（≥2 文件）`bundle.ts` 打包成 ETBUNDL1 → `compress.ts` 三算法选优 → `crc32.ts` 算 CRC → `session.ts` 派生会话 ID（FNV-1a 128；打包时身份基于整个 bundle）。单文件不打包，保持向后兼容。多文件打包格式见 [protocol.md](protocol.md#多文件打包-bundle)。
+> **构造参数来源**：`compressedPayload` / `sessionId` / `crc32` / `compression` 由 `src/workers/compress.worker.ts` 离线产出（避免同步 WASM 卡住 UI）。主线程仅在用户点「发送」后 postMessage：
+> - `{ text }` → `processText`：包 `ETTEXTv1` 魔数后压缩（**仅**列表里恰好 1 条文字时）
+> - `{ files }` → `processFiles`：0/1 文件原样；≥2 → `bundle.ts` ETBUNDL1；混发时文字已物化为命名 `.txt` File
+> 然后 `compress.ts` 三算法选优 → CRC → `session.ts` 派生会话 ID。详见 [protocol.md](protocol.md)、[data-flow.md](data-flow.md)。
 
 ## JNI 绑定（Android）
 

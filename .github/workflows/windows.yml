@@ -142,7 +142,10 @@ jobs:
     permissions:
       contents: write   # gh release upload 需要
     env:
-      VER: '1.0.1'
+      # Keep in sync with apps/sender/package.json, build.gradle.kts,
+      # Cargo.toml workspace version, AirFerry.Windows.csproj <Version>
+      # (AGENTS.md §2.8 版本号同步 + Windows 发版).
+      VER: '1.1.1'
     steps:
       - uses: actions/checkout@v5
 
@@ -219,14 +222,22 @@ jobs:
           Compress-Archive -Path "$PublishDir/*" -DestinationPath $ZipName
           Write-Host "Windows 端 -> $ZipName ($((Get-Item $ZipName).Length) bytes)"
 
-      - name: Upload to GitHub release v1.0.0
+      - name: Upload to GitHub release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: pwsh
         run: |
           $ZipName = "airferry-windows-x64-v${env:VER}.zip"
-          # tag v1.0.0 已存在（发送端/APK 在本地构建后也上传到同一 release）。
+          $Tag = "v${env:VER}"
+          # Prefer an existing release tag (created when packaging sender/APK).
+          # If missing, create a draft release so upload still works when Windows
+          # is packed first via workflow_dispatch.
+          $exists = gh release view $Tag 2>$null
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "Release $Tag not found — creating draft"
+            gh release create $Tag --draft --title $Tag --notes "Windows build from CI (workflow_dispatch)"
+          }
           # --clobber：覆盖同名 asset（覆盖式发布）。
-          gh release upload "v${env:VER}" $ZipName --clobber
-          Write-Host "已上传 $ZipName 到 release v${env:VER}"
+          gh release upload $Tag $ZipName --clobber
+          Write-Host "已上传 $ZipName 到 release $Tag"
 

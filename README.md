@@ -36,28 +36,31 @@
 - ✅ Air-Gap 场景，零网络依赖
 - ✅ 单向信道，无需回传确认
 - ✅ 三算法选优压缩（Raw / Zstd Lv1 / Xz Lv9），自动选取最小结果
-- ✅ 多文件打包传输（≥2 文件自动打包成单个 ETBUNDL1 容器，走同一条二维码流）
+- ✅ 多文件打包传输（≥2 项自动打包成单个 ETBUNDL1 容器，走同一条二维码流）
+- ✅ 文件与文字混发（统一选择列表；单条纯文字仍为 ETTEXTv1，收端可复制）
+- ✅ 文本类文件（txt/md/json/源码等）收端可复制 / 分享 / 存盘
 - ✅ 4 码并行模式（同帧 tile 4 个不同符号，吞吐 ~4×，默认开启）
-- ✅ 速度预设（稳定 / 高速 / 极限 / 激进，默认激进 1400B@60fps 实测最快）
+- ✅ 速度预设（稳定 / 高速 / 极限 / 激进 / 极速 / 极限 2400B，默认激进 1400B@60fps）
 - ✅ 多浏览器支持（Chrome / Edge / Firefox，MV2 + MV3）
 - ✅ 多接收端：Android App（CameraX + ZXing-C++）与 Windows 应用（OpenCvSharp + ZXing.Net，支持摄像头 + USB/HDMI/SDI 采集卡）
 
 ## 下载安装
 
-最新版本发布在 [GitHub Release v1.0.1](https://github.com/UR-SillyB/AirFerry/releases/tag/v1.0.1)。
+最新版本发布在 [GitHub Release v1.1.1](https://github.com/UR-SillyB/AirFerry/releases/tag/v1.1.1)。
 
 | 文件 | 说明 |
 |------|------|
-| `airferry-android-v1.0.1.apk` | Android 接收端（Android 10+，arm64-v8a） |
-| `airferry-windows-x64-v1.0.1.zip` | Windows 接收端（Windows 10+，x64；需 .NET 8 运行时） |
-| `airferry-sender-chrome-mv3-v1.0.1.crx` | Chrome / Edge MV3 扩展（已签名 Cr24） |
-| `airferry-sender-chrome-mv3-v1.0.1.zip` | Chrome / Edge MV3（解压加载，crx 被拦截时用） |
-| `airferry-sender-chrome-mv2-v1.0.1.crx` | Chrome / Edge MV2 扩展（旧版兼容，已签名 Cr24） |
-| `airferry-sender-chrome-mv2-v1.0.1.zip` | Chrome / Edge MV2（解压加载） |
-| `airferry-sender-firefox-mv3-v1.0.1.xpi` | Firefox MV3 扩展（Firefox 109+） |
-| `airferry-sender-firefox-mv2-v1.0.1.xpi` | Firefox MV2 扩展（Firefox 91+） |
+| `airferry-android-v1.1.1.apk` | Android 接收端（Android 10+，arm64-v8a） |
+| `airferry-windows-x64-v1.1.1.zip` | Windows 接收端（Windows 10+，x64；需 .NET 8 运行时；由 CI `windows.yml` 打包） |
+| `airferry-sender-chrome-mv3-v1.1.1.crx` | Chrome / Edge MV3 扩展（已签名 Cr24） |
+| `airferry-sender-chrome-mv3-v1.1.1.zip` | Chrome / Edge MV3（解压加载，crx 被拦截时用） |
+| `airferry-sender-chrome-mv2-v1.1.1.crx` | Chrome / Edge MV2 扩展（旧版兼容，已签名 Cr24） |
+| `airferry-sender-chrome-mv2-v1.1.1.zip` | Chrome / Edge MV2（解压加载） |
+| `airferry-sender-firefox-mv3-v1.1.1.xpi` | Firefox MV3 扩展（Firefox 109+） |
+| `airferry-sender-firefox-mv2-v1.1.1.xpi` | Firefox MV2 扩展（Firefox 91+） |
+| `airferry-web-v1.1.1.zip` | 网页发送端静态站点 |
 
-> 由 `./scripts/build-all.sh release` 自动产出；版本号取自 `apps/sender/package.json`。Chrome `.crx` 需本机有 Chrome 才能签名，否则仅产出 `.zip`。
+> 发送端/APK/web 由 `./scripts/build-all.sh release` 产出；版本号取自 `apps/sender/package.json`。Windows zip 默认由 GitHub Actions `windows` workflow（`workflow_dispatch`）上传到同一 Release。Chrome `.crx` 需本机有 Chrome 才能签名，否则仅产出 `.zip`。
 
 ### Android 接收端
 
@@ -65,7 +68,7 @@
 
 ### Windows 接收端
 
-解压 `airferry-windows-x64-v1.0.1.zip`，安装 [.NET 8 运行时](https://dotnet.microsoft.com/download/dotnet/8.0) 后运行 `AirFerry.exe`。启动后在设备选择页挑选摄像头或采集卡（USB/HDMI/SDI 采集卡会被自动标注），进入扫码页对准屏幕二维码即可。
+解压 `airferry-windows-x64-v1.1.1.zip`，安装 [.NET 8 运行时](https://dotnet.microsoft.com/download/dotnet/8.0) 后运行 `AirFerry.exe`。启动后在设备选择页挑选摄像头或采集卡（USB/HDMI/SDI 采集卡会被自动标注），进入扫码页对准屏幕二维码即可。
 
 ### Chrome / Edge 扩展
 
@@ -122,7 +125,7 @@ AirFerry/
 - **编码层**：RaptorQ 喷泉码（RFC 6330）；发送端源符号发一遍后**无限补充新鲜修复符号**（ESI 单调递增、永不重复），接收端可随时加入
 - **打包层**：≥2 文件先打包成 ETBUNDL1 容器，整批走单条压缩 + 单条 RaptorQ 流
 - **压缩层**：三算法选优（Raw / Zstd Lv1 / Xz Lv9），70% Zstd early-exit 启发式跳过慢速 Xz
-- **传输层**：60 字节帧头 + symbol_size 负载（浏览器默认 1400）+ 4 字节 CRC，编码为**最小版本** EC-L 二维码（1404B 帧 → V25 117×117）；4 码模式同帧 tile 4 个符号、吞吐 ~4×
+- **传输层**：60 字节帧头 + symbol_size 负载（浏览器默认 1400）+ 4 字节 CRC，编码为**最小版本** EC-L 二维码（**1464B 帧 → V27 125×125**）；4 码模式同帧 tile 4 个符号、吞吐 ~4×
 - **协议层**：Descriptor 帧（每 16 帧，首帧即描述符）携带 OTI + 文件元数据（文件名、大小、CRC32、压缩标签）
 - **接收层**：Android（CameraX 锁定 ~60fps → 并行解码池 多线程 ZXing-C++ + 中心 ROI 裁剪 → 串行 JNI 摄入）；Windows（OpenCvSharp DirectShow 采集 → 并行解码池 多线程 ZXing.Net → 串行 P/Invoke 摄入）
 
@@ -143,7 +146,7 @@ AirFerry/
 
 ## 致谢
 
-- [RaptorQR](https://github.com/infrost/RaptorQR)（MIT，© 2026 Haixiang）— 同样基于 Rust→WASM RaptorQ 喷泉码管线与并行二维码播放的离线光学传输工具。AirFerry v1.0.1 在「Rust 核心编译到 WASM + 浏览器二维码视频流」这一架构方向上参考了它的先行探索。
+- [RaptorQR](https://github.com/infrost/RaptorQR)（MIT，© 2026 Haixiang）— 同样基于 Rust→WASM RaptorQ 喷泉码管线与并行二维码播放的离线光学传输工具。AirFerry 在「Rust 核心编译到 WASM + 浏览器二维码视频流」这一架构方向上参考了它的先行探索。
 - [cberner/raptorq](https://github.com/cberner/raptorq) — 本项目核心依赖的 RFC 6330 RaptorQ Rust 实现。
 
 ## 友情链接

@@ -271,6 +271,21 @@ public partial class ScanViewModel : ObservableObject, IDisposable
             result ??= StageSingleFile(bytes, displayName, originalSize,
                 expectedCrc, crcKnown, receivedCrc);
         }
+        else if (FileNameUtil.IsTextLikeName(
+                     string.IsNullOrEmpty(displayName) ? "received_file" : displayName)
+                 && FileNameUtil.FitsTextUi(bytes.LongLength))
+        {
+            // Single text-like document (readme.md, notes.json, …): open the
+            // copy/share UI only when the payload is valid UTF-8 and small enough
+            // for the in-memory text view. Still stage a temp file so save-as
+            // can use the original name.
+            string? text = FileNameUtil.DecodeUtf8Strict(bytes);
+            result = text is not null
+                ? StageTextLikeFile(bytes, displayName, originalSize,
+                    expectedCrc, crcKnown, receivedCrc, text)
+                : StageSingleFile(bytes, displayName, originalSize,
+                    expectedCrc, crcKnown, receivedCrc);
+        }
         else
         {
             result = StageSingleFile(bytes, displayName, originalSize,
@@ -299,6 +314,18 @@ public partial class ScanViewModel : ObservableObject, IDisposable
             ReceivedCrc32: receivedCrc,
             Bundle: null,
             BundleDir: null);
+    }
+
+    /// <summary>
+    /// Stage a text-like single file (both on-disk path for archive/save and
+    /// in-memory <see cref="RecoveryResult.Text"/> for the copy UI).
+    /// </summary>
+    private RecoveryResult StageTextLikeFile(byte[] bytes, string displayName,
+        ulong originalSize, ulong expectedCrc, bool crcKnown, ulong receivedCrc, string text)
+    {
+        RecoveryResult file = StageSingleFile(bytes, displayName, originalSize,
+            expectedCrc, crcKnown, receivedCrc);
+        return file with { Text = text };
     }
 
     private RecoveryResult? StageBundle(byte[] bytes, ulong expectedCrc,

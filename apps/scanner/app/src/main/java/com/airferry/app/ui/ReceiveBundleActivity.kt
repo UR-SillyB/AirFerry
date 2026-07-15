@@ -8,6 +8,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -23,10 +24,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.FileProvider
+import com.airferry.app.scan.TextLike
 import java.io.File
 
 private val BgDark = Color(0xFF0F172A)
@@ -167,10 +168,17 @@ class ReceiveBundleActivity : ComponentActivity() {
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 items(files, key = { it.filePath }) { f ->
-                    FileRow(f, onSave = {
-                        pendingSaveIndex = files.indexOf(f)
-                        saveOne.launch(f.name)
-                    }, onShare = { shareOne(f) })
+                    val looksText = TextLike.isTextLikeName(f.name)
+                    FileRow(
+                        f = f,
+                        looksText = looksText,
+                        onOpenText = { openAsText(f) },
+                        onSave = {
+                            pendingSaveIndex = files.indexOf(f)
+                            saveOne.launch(f.name)
+                        },
+                        onShare = { shareOne(f) },
+                    )
                 }
             }
 
@@ -218,9 +226,17 @@ class ReceiveBundleActivity : ComponentActivity() {
     }
 
     @Composable
-    private fun FileRow(f: FileInfo, onSave: () -> Unit, onShare: () -> Unit) {
+    private fun FileRow(
+        f: FileInfo,
+        looksText: Boolean,
+        onOpenText: () -> Unit,
+        onSave: () -> Unit,
+        onShare: () -> Unit,
+    ) {
         Card(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .then(if (looksText) Modifier.clickable(onClick = onOpenText) else Modifier),
             shape = RoundedCornerShape(12.dp),
             colors = CardDefaults.cardColors(containerColor = CardBg)
         ) {
@@ -229,14 +245,64 @@ class ReceiveBundleActivity : ComponentActivity() {
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Column(modifier = Modifier.weight(1f)) {
-                    Text(f.name, color = TextPrimary, fontSize = 14.sp, fontWeight = FontWeight.Medium, maxLines = 1)
-                    Text(formatSize(f.size), color = TextSecondary, fontSize = 12.sp)
+                    Text(
+                        if (looksText) "📝 ${f.name}" else f.name,
+                        color = TextPrimary,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Medium,
+                        maxLines = 1,
+                    )
+                    Text(
+                        if (looksText) "${formatSize(f.size)} · 点开可复制" else formatSize(f.size),
+                        color = TextSecondary,
+                        fontSize = 12.sp,
+                    )
+                }
+                if (looksText) {
+                    TextButton(onClick = onOpenText) { Text("复制", color = Success, fontSize = 13.sp) }
                 }
                 TextButton(onClick = onSave) { Text("保存", color = Accent, fontSize = 13.sp) }
                 TextButton(onClick = onShare) { Text("分享", color = Success, fontSize = 13.sp) }
             }
         }
     }
+
+    /**
+     * Open a bundle entry as a text message (copy / share / save .txt).
+     * Used for sender-side "添加文字" items materialised as named .txt files
+     * inside ETBUNDL1 — no ETTEXTv1 magic on the wire for mixed batches.
+     */
+    private fun openAsText(info: FileInfo) {
+        val src = File(info.filePath)
+        if (!src.exists()) {
+            Toast.makeText(this, "文件不可用", Toast.LENGTH_SHORT).show()
+            return
+        }
+        try {
+            if (!TextLike.fitsTextUi(src.length())) {
+                Toast.makeText(this, "文件过大，请用「保存」后用其他应用打开", Toast.LENGTH_SHORT).show()
+                return
+            }
+            val bytes = src.readBytes()
+            val text = TextLike.decodeUtf8Strict(bytes)
+            if (text == null) {
+                Toast.makeText(this, "该文件不是有效的 UTF-8 文本", Toast.LENGTH_SHORT).show()
+                return
+            }
+            startActivity(
+                Intent(this, ReceiveTextActivity::class.java).apply {
+                    putExtra("TEXT", text)
+                    putExtra("FILE_PATH", info.filePath)
+                    putExtra("FILE_NAME", info.name)
+                    // Per-entry CRC is not tracked for bundle members; mark unknown.
+                    putExtra("CRC32_UNKNOWN", true)
+                }
+            )
+        } catch (e: Exception) {
+            Toast.makeText(this, "无法作为文字打开: ${e.message}", Toast.LENGTH_LONG).show()
+        }
+    }
+
 
     private fun saveToUri(uri: Uri, info: FileInfo?) {
         val src = info?.let { File(it.filePath) } ?: return

@@ -94,4 +94,44 @@ public class FileNameUtilTests
         // COM10+ are NOT reserved (only COM1-9).
         Assert.Equal("COM10", FileNameUtil.Sanitize("COM10"));
     }
+
+    [Theory]
+    [InlineData("notes.txt", true)]
+    [InlineData("readme.MD", true)]
+    [InlineData("data.json", true)]
+    [InlineData("path/to/code.rs", true)]
+    [InlineData("photo.png", false)]
+    [InlineData("archive.zip", false)]
+    [InlineData("noext", false)]
+    [InlineData(".gitignore", false)]
+    public void IsTextLikeName_MatchesCommonExtensions(string name, bool expected)
+    {
+        Assert.Equal(expected, FileNameUtil.IsTextLikeName(name));
+    }
+
+    [Fact]
+    public void DecodeUtf8Strict_AcceptsValidUtf8()
+    {
+        byte[] bytes = System.Text.Encoding.UTF8.GetBytes("你好 AirFerry");
+        Assert.Equal("你好 AirFerry", FileNameUtil.DecodeUtf8Strict(bytes));
+    }
+
+    [Fact]
+    public void DecodeUtf8Strict_RejectsInvalidUtf8()
+    {
+        // Lone continuation byte — invalid UTF-8.
+        byte[] bad = [0x80, 0x41];
+        Assert.Null(FileNameUtil.DecodeUtf8Strict(bad));
+    }
+
+    [Fact]
+    public void DecodeUtf8Strict_RejectsOversize()
+    {
+        byte[] big = new byte[FileNameUtil.MaxTextUiBytes + 1];
+        // Fill with valid ASCII so only the size gate trips.
+        Array.Fill(big, (byte)'a');
+        Assert.Null(FileNameUtil.DecodeUtf8Strict(big));
+        Assert.False(FileNameUtil.FitsTextUi(big.LongLength));
+        Assert.True(FileNameUtil.FitsTextUi(FileNameUtil.MaxTextUiBytes));
+    }
 }

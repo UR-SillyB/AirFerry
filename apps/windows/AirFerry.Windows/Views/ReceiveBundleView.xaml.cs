@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Input;
 using System.Windows.Media;
 using AirFerry.Windows.Bundle;
 using AirFerry.Windows.Models;
@@ -14,7 +15,9 @@ namespace AirFerry.Windows.Views;
 /// <summary>
 /// Multi-file bundle receive page — mirrors Android's
 /// <c>ReceiveBundleActivity</c>: lists each unpacked file with name + size,
-/// offers "save all" (sequential SaveFileDialogs) / "share all" / "rescan".
+/// offers "save all" / "share all" / "rescan". Double-click (or Enter) on a
+/// .txt entry opens <see cref="ReceiveTextView"/> so mixed-batch text can be
+/// copied (sender materialises "添加文字" as named .txt inside ETBUNDL1).
 /// </summary>
 public partial class ReceiveBundleView : Page
 {
@@ -26,6 +29,8 @@ public partial class ReceiveBundleView : Page
         InitializeComponent();
         _result = result;
         FileListView.ItemsSource = _rows;
+        FileListView.MouseDoubleClick += FileListView_MouseDoubleClick;
+        FileListView.KeyDown += FileListView_KeyDown;
         Loaded += (_, _) => Populate();
     }
 
@@ -38,7 +43,13 @@ public partial class ReceiveBundleView : Page
         }
         foreach (BundleFile f in _result.Bundle)
         {
-            _rows.Add(new BundleFileRow(f.Name, FormatSize((ulong)f.Data.Length)));
+            bool looksText = FileNameUtil.IsTextLikeName(f.Name);
+            _rows.Add(new BundleFileRow(
+                f.Name,
+                looksText
+                    ? $"{FormatSize((ulong)f.Data.Length)} · 双击可复制"
+                    : FormatSize((ulong)f.Data.Length),
+                looksText));
         }
         if (!_result.Crc32Known)
         {
@@ -54,6 +65,68 @@ public partial class ReceiveBundleView : Page
             CrcStatusText.Text = $"共 {_result.Bundle.Count} 个文件 · ✗ 校验失败";
             CrcStatusText.Foreground = new SolidColorBrush(Color.FromRgb(0xEF, 0x44, 0x44));
         }
+    }
+
+    private void FileListView_MouseDoubleClick(object sender, MouseButtonEventArgs e)
+    {
+        if (FileListView.SelectedItem is BundleFileRow row)
+        {
+            OpenTextIfPossible(row.Name);
+        }
+    }
+
+    private void FileListView_KeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key == Key.Enter && FileListView.SelectedItem is BundleFileRow row)
+        {
+            OpenTextIfPossible(row.Name);
+            e.Handled = true;
+        }
+    }
+
+    private void OpenTextIfPossible(string name)
+    {
+        if (!FileNameUtil.IsTextLikeName(name) || _result.Bundle is null)
+        {
+            return;
+        }
+        BundleFile? match = null;
+        foreach (BundleFile f in _result.Bundle)
+        {
+            if (f.Name == name)
+            {
+                match = f;
+                break;
+            }
+        }
+        if (match is null)
+        {
+            return;
+        }
+        if (!FileNameUtil.FitsTextUi(match.Data.LongLength))
+        {
+            MessageBox.Show("文件过大，请用「全部保存」后用其他应用打开。", "AirFerry",
+                MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+        string? text = FileNameUtil.DecodeUtf8Strict(match.Data);
+        if (text is null)
+        {
+            MessageBox.Show("该文件不是有效的 UTF-8 文本，无法复制预览。", "AirFerry",
+                MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+        // Per-entry CRC is not tracked for bundle members.
+        var textResult = new RecoveryResult(
+            SingleFilePath: null,
+            SingleFileSize: null,
+            ExpectedCrc32: null,
+            Crc32Known: false,
+            ReceivedCrc32: null,
+            Bundle: null,
+            BundleDir: null,
+            Text: text);
+        NavigationService?.Navigate(new ReceiveTextView(textResult, suggestedFileName: name));
     }
 
     private async void SaveAll_Click(object sender, RoutedEventArgs e)
@@ -108,5 +181,5 @@ public partial class ReceiveBundleView : Page
     };
 
     /// <summary>Row model for the file list GridView.</summary>
-    public sealed record BundleFileRow(string Name, string SizeText);
+    public sealed record BundleFileRow(string Name, string SizeText, bool LooksText = false);
 }

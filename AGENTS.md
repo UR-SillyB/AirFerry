@@ -262,7 +262,33 @@ npm run preview        # 本地预览构建产物
 2. **JNI `.so` 必须先于 APK 构建**：`cargo ndk ... build` 产出 `libtransfer_engine.so` 到 `jniLibs/` 后，`./gradlew` 才能打包进 APK。**`build-all.sh` 的 `scanner`/`all`/`release` 子命令会自动先跑 cargo-ndk**（见 §2.5），所以走脚本不会踩坑；但**若单独手动跑 `./gradlew`**（不经脚本），必须自己先跑 cargo-ndk，否则 APK 会带过期/缺失的 `.so`、扫码端运行时 `UnsatisfiedLinkError` 闪退。
 3. **C ABI DLL 必须先于 C# 构建**：`cargo build --features cffi` 产出 `transfer_engine.dll` 到 `runtime/` 后，`dotnet build` 才能打包进 exe 同目录。**`build-windows.ps1`/`build-all.sh windows` 会自动先跑 cargo**（见 §2.5），但**若单独手动跑 `dotnet build`**，必须自己先跑 cargo，否则运行时第一个 P/Invoke 调用 `DllNotFoundException`。
 4. **`dist` 子命令不重新构建**：它假设 `apps/sender/build/` 与 APK 已就绪（Windows zip 可选），只做复制/签名/打包。缺 sender/scanner 产物会 `error` 退出；缺 Windows 产物则 `warn` 跳过（因为 Windows 端只能在 Windows 上构建）。
-5. **版本号四处同步**：`build-all.sh` 的发布文件名版本取自 `apps/sender/package.json`，但 APK 自身的 `versionName`（`build.gradle.kts`）、Rust crate 版本（`Cargo.toml`）、Windows exe 版本（`AirFerry.Windows.csproj` `<Version>`）需手动保持一致。改版本时四处一起改：`package.json`（→ 文件名）+ `build.gradle.kts`（→ APK 内嵌）+ `Cargo.toml`（→ 核心库）+ `AirFerry.Windows.csproj`（→ exe 内嵌）。
+5. **版本号同步（发版必查）**：`build-all.sh` 的发布文件名版本取自 `apps/sender/package.json`；下列**全部**须同一版本号：
+   - `apps/sender/package.json` `version` + `manifest.version`（→ 扩展/打包文件名）
+   - `apps/scanner/app/build.gradle.kts` `versionName`（+ 通常 `versionCode++`）（→ APK 内嵌）
+   - `Cargo.toml` `[workspace.package] version`（→ 核心库）
+   - `apps/windows/AirFerry.Windows/AirFerry.Windows.csproj` `<Version>`（→ exe 内嵌）
+   - `.github/workflows/windows.yml` `jobs.windows-pack.env.VER`（→ CI 产出的 Windows zip 名与 `gh release upload` 的 tag）
+   - 建议同步 `apps/web/package.json` `version`（展示用，不进 `build-all.sh` 文件名）
+
+### 2.9 Windows 发版（GitHub Actions workflow）
+
+> macOS/Linux **不能**本地编 WPF。正式 Windows 产物走 CI：`.github/workflows/windows.yml`。
+
+| Job | Runner | 触发 | 作用 |
+|-----|--------|------|------|
+| `rust-cffi` | ubuntu | push/PR（core/windows 路径）+ `workflow_dispatch` | `cargo test/build --features cffi` |
+| `csharp-tests` | ubuntu | 同上 | `dotnet test` 协议层（`AirFerry.Windows.Tests`，无 P/Invoke） |
+| `windows-build` | windows-latest | 同上 | cargo cffi DLL → 拷 `runtime/` → `dotnet build` WPF |
+| `windows-pack` | windows-latest | **仅** `workflow_dispatch`（且前三 job 通过） | `dotnet publish` 单文件 → `airferry-windows-x64-v${VER}.zip` → `gh release upload v${VER}` |
+
+**发版步骤（Windows 端）**：
+
+1. 把上表版本（含 `windows.yml` 的 `VER`）改到目标版本（如 `1.1.1`），提交并推 `main`。
+2. 本地（或其它 CI）先打好 sender/APK/web 并创建/上传 GitHub Release tag `v{VER}`（若尚无 tag，workflow 会 **draft** 创建，之后可补 notes/其它 asset）。
+3. GitHub → Actions → **windows** → **Run workflow**（`workflow_dispatch`）。
+4. 跑完后 Release 上应有 `airferry-windows-x64-v{VER}.zip`（`--clobber` 可覆盖同名 asset）。
+
+本地 Windows 机仍可用 `.\scripts\build-windows.ps1 -Pack` 等价打包到 `dist/`，但**默认发布路径是 workflow**。
 
 ---
 
@@ -273,17 +299,17 @@ npm run preview        # 本地预览构建产物
 | 关注点 | 位置 | 说明 |
 |--------|------|------|
 | 编码器（源符号 O(1) + 按需修复） | `core/raptorq-core/src/encoder.rs:63,73` | `source_symbol` / `repair_symbols` |
-| 解码器（任意顺序符号 + 块满即解） | `core/raptorq-core/src/decoder.rs:64` | `add_symbol`，含 ESI/载荷越界守卫(line 78) |
+| 解码器（任意顺序符号 + 块满即解） | `core/raptorq-core/src/decoder.rs`（`add_symbol`） | 含 ESI/载荷越界守卫 |
 | **安全闸门** OTI 校验 | `core/raptorq-core/src/meta.rs:97` | `ObjectMeta::validate`——接收前必跑，防 panic-on-abort |
-| **帧解析热点** | `core/qr-protocol/src/frame.rs:122` | `Frame::from_bytes`：magic/version/双层 CRC 校验 |
-| 帧封装 | `core/qr-protocol/src/frame.rs:71,109` | `build` / `to_bytes` |
+| **帧解析热点** | `core/qr-protocol/src/frame.rs`（`from_bytes`） | magic/version/双层 CRC 校验 |
+| 帧封装 | `core/qr-protocol/src/frame.rs`（`build` / `to_bytes`） | |
 | 会话 ID 派生（FNV-1a 128） | `core/qr-protocol/src/session.rs:23` | `derive`——必须与 TS 端位一致 |
 | 压缩分发 + 解压炸弹防护 | `core/qr-protocol/src/compress.rs:68,97` | `compress_with` / `decompress_with_limit` |
-| QR 矩阵（动态最小版本） | `core/qr-protocol/src/qr_render.rs:74` | `encode`：fast_qr 后端，576B帧→V16，1088B帧→V23 |
-| **发送端帧流入口** | `core/transfer-engine/src/sender.rs:164` | `next_frame`：每16帧插描述符，首帧即描述符 |
-| 无限新鲜修复符号 | `core/transfer-engine/src/sender.rs:235` | `next_symbol_id`：源一遍→无限新修复 |
-| **接收端摄入入口** | `core/transfer-engine/src/receiver.rs:147` | `ingest`：缓存引导→描述符确认 OTI→喂解码器 |
-| 描述符载荷解析 | `core/transfer-engine/src/descriptor.rs:178` | `parse_payload`：v1/v2/v3 + v2/v3 消歧 |
+| QR 矩阵（动态最小版本） | `core/qr-protocol/src/qr_render.rs`（`encode` / `min_version_for`） | fast_qr；1464B(T=1400)→V27，1088B(T=1024)→V23，576B(T=512)→V16 |
+| **发送端帧流入口** | `core/transfer-engine/src/sender.rs`（`next_frame`） | 每16帧插描述符，首帧即描述符 |
+| 无限新鲜修复符号 | `core/transfer-engine/src/sender.rs`（`next_symbol_id`） | 源一遍→无限新修复 |
+| **接收端摄入入口** | `core/transfer-engine/src/receiver.rs`（`pub fn ingest`） | 缓存引导→描述符确认 OTI→喂解码器 |
+| 描述符载荷解析 | `core/transfer-engine/src/descriptor.rs`（`parse_payload`） | v1/v2/v3 + v2/v3 消歧 |
 | 进度快照 | `core/transfer-engine/src/progress.rs` | `Progress` / `Stats` |
 | 断点状态序列化 | `core/transfer-engine/src/resume.rs` + `receiver.rs` | `ResumeState`（serde-gated JSON）；`ReceiverSession::save_state` / `restore` |
 | **JNI 绑定（Android）** | `core/transfer-engine/src/jni.rs:68` | `receiverIngest` 返回**packed jlong**（非 JSON，见 SPEC）；`receiverLastAssembleError` 暴露组装/解压失败原因 |
@@ -294,19 +320,22 @@ npm run preview        # 本地预览构建产物
 
 | 关注点 | 位置 | 说明 |
 |--------|------|------|
-| 主应用（4 页路由） | `apps/sender/src/options.tsx:92` | select→params→play→stats |
+| 主应用（4 页路由） | `apps/sender/src/options.tsx`（`export default function App`） | select→params→play→stats |
 | **图标点击直跳（MV2/MV3 兼容）** | `apps/sender/src/background/index.ts` | `chrome.action.onClicked`/`browserAction.onClicked` → 新标签页打开 options。**无 `default_popup`**（popup.tsx 已删），listener 才会触发；有 popup 时 onClicked 永不触发 |
 | popup（仅启动器） | ~~`apps/sender/src/popup.tsx`~~ | **已删除**——图标点击改为直接跳转，不再弹小窗 |
-| **QR 渲染循环** | `apps/sender/src/components/QrStream.tsx:37` | Canvas2D rAF 驱动 `next_qr`/`next_qr_multi` |
-| 单次 putImageData 绘制 | `apps/sender/src/components/QrStream.tsx:239` | `drawMatrix`：避免逐模块 fillRect |
-| **文字传输魔数（ETTEXTv1）** | `apps/sender/src/wasm/text.ts` | `buildTextPayload`（文字→[magic][UTF-8]）/ `isTextPayload`；与 `bundle.ts` 的 ETBUNDL1 并列，**descriptor 不变** |
-| **三算法选优压缩** | `apps/sender/src/wasm/compress.ts:277` | `preparePayload`：raw/zstd/xz，早期退出阈值 **70%** |
-| 压缩 worker（离主线程） | `apps/sender/src/workers/compress.worker.ts` | 读→压缩→CRC32→会话 ID。文件走 `processFiles`，文字走 `processText`，共用 `finalizeAndPost` |
+| **QR 渲染循环** | `apps/sender/src/components/QrStream.tsx`（`QrStream` / rAF loop） | Canvas2D rAF 驱动 `next_qr_into`/`next_qr_multi_into` |
+| 单次 putImageData 绘制 | `apps/sender/src/components/QrStream.tsx`（`drawMatrix`） | 模块展开为像素后每码一次 putImageData |
+| **文字传输魔数（ETTEXTv1）** | `apps/sender/src/wasm/text.ts` | `buildTextPayload`/`isTextPayload`；与 `bundle.ts` 的 ETBUNDL1 并列。**单条纯文字**走 ETTEXTv1（收端 `ReceiveText` 可复制/分享/存 .txt）；**混发**时文字以命名 `.txt` 进 ETBUNDL1 |
+| **三算法选优压缩** | `apps/sender/src/wasm/compress.ts`（`preparePayload`） | raw/zstd/xz，早期退出阈值 **70%** |
+| 压缩 worker（离主线程） | `apps/sender/src/workers/compress.worker.ts` | 读→压缩→CRC32→会话 ID。选择页点「发送」：`1×text` → `processText`；否则 `processFiles`（文字物化为 `.txt` File） |
 | WASM 加载器 | `apps/sender/src/wasm/loader.ts:14` | `ensureWasm` 一次性初始化 |
 | 会话 ID（TS 端，镜像 Rust） | `apps/sender/src/wasm/session.ts:17` | `deriveSessionId` |
 | 多文件容器 | `apps/sender/src/wasm/bundle.ts` | 打包格式（ETBUNDL1） |
-| 4 个页面 | `apps/sender/src/pages/*.tsx` | FileSelect / Params / Play / Stats。FileSelect 顶部有「文件/文字」Tab 切换 |
-| **文字草稿（IndexedDB）** | `apps/sender/src/storage/textDrafts.ts` + `FileSelectPage.tsx` TextTab | 命名保存（原文不 trim，与单条发送一致）；载入后可「更新草稿」；「一起发送」→ `draftsToFiles`（按保存时间正序 + `dedupeDraftFilenamesForBundle` 重名后缀）→ `processFiles`/ETBUNDL1。单条「发送当前这一条」仍走 `processText`/ETTEXTv1 |
+| 4 个页面 | `apps/sender/src/pages/*.tsx` | FileSelect / Params / Play / Stats |
+| **选择页（统一列表）** | `apps/sender/src/pages/FileSelectPage.tsx` + `options.tsx` + `types.PendingItem` | 无 Tab：添加文件（追加）+ 添加文字（弹窗，**保留 content**）；**仅**点「发送」才 stage。改列表/回步骤 1 会作废在途压缩（epoch）。`1×text`→ETTEXTv1；否则→`processFiles`/ETBUNDL1 |
+| 文字文件名规范化 | `apps/sender/src/storage/textDrafts.ts` | 仅 `normalizeDraftFilename`（IndexedDB 草稿已移除） |
+| **文本类可复制** | Android `TextLike.kt` / Windows `FileNameUtil.IsTextLikeName` | 扩展名启发式（txt/md/json/csv/源码…）：单文件、打包条目、历史列表均可进 `ReceiveText` 复制/分享/存盘。ETTEXTv1 仍优先 |
+
 | manifest 前/后处理 | `prepare-plasmo-icon.cjs` + `fix-manifest.cjs` | 前者从 icon128 生成 git-ignored 的 `assets/icon.png`（clean build 必需）；后者写入各尺寸图标/MV2 CSP/Firefox id，并兜底删 `default_popup` |
 
 ### 3.3 Android 扫码端
@@ -324,8 +353,9 @@ npm run preview        # 本地预览构建产物
 | **ZXing-C++ JNI（native）** | `app/src/main/cpp/scan_jni.cpp:52` | `decodeInView`：TryHarder+TryInvert |
 | 多文件包解包 | `app/.../scan/BundleParser.kt` | 恢复后拆包（ETBUNDL1） |
 | **文字载荷解析** | `app/.../scan/TextParser.kt` | `isText`/`parse`（ETTEXTv1 → UTF-8）；字节级镜像 TS `text.ts` 与 C# `TextParser.cs` |
-| UI | `app/.../ui/{ReceiveDetail,ReceiveText,ReceiveBundle,FileList,Settings}Activity.kt` | 详情/文字/列表/设置。`ScanActivity.recoverAndStage` 按 text→bundle→单文件顺序分流 |
-| **文字接收页（可复制/分享/存 .txt）** | `app/.../ui/ReceiveTextActivity.kt` | 文字接收后落盘为 `received/文字消息.txt` + `.meta`（第 5 行 `kind=text`）进历史记录；剪贴板 `ClipboardManager` + `ACTION_SEND` text/plain。FileListActivity 见 `kind=text` 跳本页（否则跳 ReceiveDetail） |
+| **文本类启发式** | `app/.../scan/TextLike.kt` | 扩展名 + `decodeUtf8Strict`；与 Windows `FileNameUtil.IsTextLikeName` 对齐 |
+| UI | `app/.../ui/{ReceiveDetail,ReceiveText,ReceiveBundle,FileList,Settings}Activity.kt` | 详情/文字/列表/设置。`recoverAndStage`：ETTEXTv1 → bundle → TextLike 单文件 → 普通文件 |
+| **文字接收页（可复制/分享/存 .txt）** | `app/.../ui/ReceiveTextActivity.kt` | ETTEXTv1 或文本类文件/打包条目。历史：`kind=text` **或** TextLike 扩展名 → 本页；剪贴板 + `ACTION_SEND` text/plain + 存 .txt |
 
 ### 3.4 Windows 扫码端
 
@@ -370,16 +400,17 @@ npm run preview        # 本地预览构建产物
 | 症状 | 首查 | 可能原因 |
 |------|------|---------|
 | 点扩展图标仍弹小窗（而非直跳 options） | `apps/sender/src/background/index.ts` + `fix-manifest.cjs` | manifest 残留 `default_popup`（popup 优先级高于 `onClicked`）；或 `src/popup.tsx` 误被恢复（Plasmo 据此重新注入 popup）。删 popup.tsx + `fix-manifest.cjs` 兜底删 `default_popup` 是触发 `onClicked` 的前提 |
-| 文字传输收端当文件保存 | `TextParser.kt`/`TextParser.cs` + `text.ts` | 收端不认 ETTEXTv1 魔数 → 落到单文件兜底分支（向后兼容，存成 .txt 仍可打开）；确认魔数 8 字节位级一致 |
-| 收端卡「恢复中 0%」 | `descriptor.rs:178 parse_payload` + `receiver.rs:147 ingest` | OTI 未确认（`meta_confirmed=false`）；描述符解析失败 |
-| 收端崩溃（扫码即崩） | `meta.rs:97 validate` + `receiver.rs:208-222` 守卫 | 恶意/越界坐标未在入解码器前拦截（panic=abort 下致命） |
-| 进度越往后越慢 | `sender.rs:235 next_symbol_id` | 必须是「源一遍→无限新鲜修复」，不能循环有限计划 |
-| 帧被静默丢弃 | `frame.rs:122 from_bytes` | magic/version/双层 CRC 校验失败 |
-| 恢复出空文件 | `descriptor.rs` v2/v3 消歧(line 173) + `compressed_size_known` | v3 尾部被误读为 v2 补零 |
+| 文字传输收端当文件保存 | `TextParser` + `TextLike`/`IsTextLikeName` + `options.onSend` | 仅「列表里只有 1 条 text」才 ETTEXTv1。混发文字是 `.txt` 条目——点开仍可进 `ReceiveText`（扩展名启发式）。非法 UTF-8 的「文本扩展名」回退文件页。若单条文字也落成文件，查是否误走了 `itemsToFiles` |
+| 拖文件就跳进参数页 | `FileSelectPage` + `options.onSend` | 选择只改 pending `items`；必须点「发送」才 stage。若又变成选完即跳，检查是否误把 `onItemsChange` 接回了立即压缩 |
+| 收端卡「恢复中 0%」 | `descriptor::parse_payload` + `ReceiverSession::ingest` | OTI 未确认（`meta_confirmed=false`）；描述符解析失败 |
+| 收端崩溃（扫码即崩） | `ObjectMeta::validate` + receiver 摄入守卫 | 恶意/越界坐标未在入解码器前拦截（panic=abort 下致命） |
+| 进度越往后越慢 | `sender::next_symbol_id` | 必须是「源一遍→无限新鲜修复」，不能循环有限计划 |
+| 帧被静默丢弃 | `Frame::from_bytes` | magic/version/双层 CRC 校验失败 |
+| 恢复出空文件 | `descriptor` v2/v3 消歧 + `compressed_size_known` | v3 尾部被误读为 v2 补零 |
 | 解压 OOM / 崩溃 | `compress.rs:97 decompress_with_limit` | 炸弹上限未封顶到 `original_size` |
 | JNI 摄入竞态/UAF | `QrDecodePool.ingestLock` + `ScanActivity` `ingestStopped` | 句柄非线程安全，未串行化 |
-| 摄像头读不出码 | `qr_render.rs:74 encode`（版本选择）+ `scan_jni.cpp:64`（TryHarder） | 版本过高致模块过密；或 16KiB 页未对齐致 .so 加载失败 |
-| 压缩总是走 raw（100%） | `compress.ts:163 initZstdFromBytes` | worker 内 zstd WASM 未加载成功 |
+| 摄像头读不出码 | `qr_render::encode`（版本选择）+ `scan_jni` TryHarder | 版本过高致模块过密；或 16KiB 页未对齐致 .so 加载失败 |
+| 压缩总是走 raw（100%） | `compress.ts` `initZstdFromBytes` | worker 内 zstd WASM 未加载成功 |
 | **网页端压缩走 raw（100%）** | `apps/web/public/wasm-zstd.wasm` + `prepare-wasm.cjs` | `public/wasm-zstd.wasm` 缺失（未跑 `prebuild`），worker fetch 404 → 回退 raw。重新跑 `npm run build`（会触发 `prebuild`→prepare-wasm） |
 | **网页端启动报 transfer_engine.js 找不到** | `apps/sender/wasm-pkg/` | web 复用 sender 的 Rust WASM，首次构建前需 `cd apps/sender && npm run wasm`。`prepare-wasm.cjs` 会校验并报清晰错误 |
 | **`release`/`dist` 产物缺 web zip** | `apps/web/dist/` | `pack_dist` 用 warn 模式（非中断）：`apps/web/dist/` 缺失时跳过 web zip。先跑 `./scripts/build-all.sh web` 再 `dist`/`release` |
@@ -403,33 +434,24 @@ npm run preview        # 本地预览构建产物
    - **Rust 核心库**（`core/qr-protocol/src/compress.rs:25,48`）：Zstd **level 22**（`DEFAULT_LEVEL`）、Xz **level 6 + EXTREME**（`XZ_PRESET`）。
    - 两端用不同级别是**有意的**：发送端追求压缩启动快（Lv1），接收端只做解压、用高 ratio（见 `compress.rs:42-44` 的 NOTE）。两端产物是标准 zstd/xz 流，互操作正确。引用压缩参数时**必须分清是 TS 端还是 Rust 端**，不要合并描述。
 
-3. **版本号/Release 混用**：四处版本均为 `1.0.0`（`apps/sender/package.json`、`apps/scanner/app/build.gradle.kts` versionName、`Cargo.toml` workspace version、`apps/windows/AirFerry.Windows/AirFerry.Windows.csproj` `<Version>`），但 README 与 dist 历史里出现过 v1.0.0/v1.1.0 混用。改版本时四处同步，且 `scripts/build-all.sh` 的 release 打包文件名需同时改。
+3. **版本号/Release 混用（历史教训）**：README/dist/workflow 曾出现 v1.0.0/v1.0.1/v1.1.0 漂移（含 `windows.yml` 的 `VER` 滞后）。**当前权威版本 `1.1.1`**（versionCode=6）。改版本时按 §2.8 第 5 条 + §2.9 全表同步，勿只改 `package.json`。
 
-4. **高速录制模式为死代码**：`HighSpeedCaptureController.kt`、Settings 里的高速开关、`docs/architecture.md`/`data-flow.md` 的「实验性高速录制」段落——**当前代码中已禁用**（`ScanActivity` onCreate 中 `highSpeedEnabled = false`，UI 分支 `if (highSpeed)` 永不渲染）。文档仍当可用功能描述。
+4. **`derive_meta_from_totals` 已废弃**：`receiver.rs` 内仍保留 JNI/ABI 兼容符号，**新代码勿调用**（其 OTI 构建在大文件上会 assert）。现代路径：从描述符帧拿权威 OTI。
 
-5. **`derive_meta_from_totals` 已废弃**：`receiver.rs:422`，仅保留 JNI ABI 兼容，**新代码勿调用**（其 OTI 构建在大文件上会 assert）。现代路径：从描述符帧拿权威 OTI。
-
-6. **wasm-bindgen 双轨制（MV2=0.2.92 旧版 / MV3=0.2.125 新版）**：`core/transfer-engine/Cargo.toml` **默认仍钉死 `=0.2.92`**（js-sys/web-sys `=0.3.69`），**不要**改回宽松的 `"0.2"` / `"0.3"`——任何 `cargo update` 都会把默认 lockfile 漂移到 0.2.93+ 并破坏 MV2 构建。MV3 走另一条路：`apps/sender/scripts/build-wasm.cjs` 在构建 `wasm-pkg-simd/` 时**临时**把 Cargo.toml 改写成 `=0.2.125`（js-sys/web-sys `=0.3.102`）+ `RUSTFLAGS=+simd128`。脚本在改写前按字节快照 Cargo.toml/Cargo.lock，构建完在 `finally` 中逐字节恢复，**不会用 Git 覆盖构建前已有的未提交修改**。
+5. **wasm-bindgen 双轨制（MV2=0.2.92 旧版 / MV3=0.2.125 新版）**：`core/transfer-engine/Cargo.toml` **默认仍钉死 `=0.2.92`**（js-sys/web-sys `=0.3.69`），**不要**改回宽松的 `"0.2"` / `"0.3"`——任何 `cargo update` 都会把默认 lockfile 漂移到 0.2.93+ 并破坏 MV2 构建。MV3 走另一条路：`apps/sender/scripts/build-wasm.cjs` 在构建 `wasm-pkg-simd/` 时**临时**把 Cargo.toml 改写成 `=0.2.125`（js-sys/web-sys `=0.3.102`）+ `RUSTFLAGS=+simd128`。脚本在改写前按字节快照 Cargo.toml/Cargo.lock，构建完在 `finally` 中逐字节恢复，**不会用 Git 覆盖构建前已有的未提交修改**。
    - **为什么是双轨**：wasm-bindgen 0.2.93+ 默认开 reference-types proposal（`externref` 值类型），仅 Chrome 96+ 支持；Chrome 87/88 会在 `WebAssembly.instantiateStreaming()` 报 `CompileError: invalid value type 'externref'`。Chrome 87 是 MV2 的兼容目标。MV3 同时启用新版 externref（JS↔WASM 引用传递）+ SIMD（`+simd128` target-feature）。SIMD 本身与 wasm-bindgen 版本正交——0.2.92 也能开——但新版 externref 必须升 wasm-bindgen，MV3 默认把两者一起给。
-   - **⚠️ 实测性能结论（不要据此期待提速）**：对当前 `next_qr_into` 全链路（RaptorQ 取符号 + Frame 序列化 + QR Reed-Solomon 编码 + 矩阵构建）的 Node benchmark（V25/1400B symbol、5000 帧）：
-     - **SIMD vs 标量**：0.95×（**轻微变慢**）。`raptorq` crate 为纯标量 Rust，无 `std::arch::wasm32::*` SIMD intrinsics，`+simd128` 对它毫无作用。QR 编码现用 `fast_qr` crate（已替代旧 `qrcode`，Reed-Solomon 路径 ~7-9× 提速，见下条），但 `fast_qr` 同样无 wasm32 SIMD intrinsics。`+simd128` 只让 wasm 大 ~8KB（312KB vs 304KB）并因指令缓存压力略慢。
+   - **⚠️ 实测性能结论（不要据此期待提速）**：对当前 `next_qr_into` 全链路（RaptorQ + Frame + QR RS + 矩阵）的 Node benchmark（T=1400、5000 帧）：
+     - **SIMD vs 标量**：约 0.95×（**轻微变慢**）。`raptorq` / `fast_qr` 均无 wasm32 SIMD intrinsics；`+simd128` 主要增大 wasm。
      - **新版 wasm-bindgen externref**：对 `&mut [u8]` 传递无明显收益。
-     - **原真实瓶颈 QR 编码已大幅缓解**：旧 `qrcode` crate 单帧 ~4.8ms、占每帧 ~98%（V25/1400B benchmark），现已换用 `fast_qr`（~7-9× 快），QR 编码不再是主导瓶颈。剩余提速方向：降 symbol size（低 QR 版本）、多线程并行编码（需 SharedArrayBuffer + COOP/COEP）、或 RaptorQ GF(256) SIMD。
-   - **那为什么还保留双产物 + SIMD**：① 双产物解决「MV2 兼容老 Chrome + MV3 用新工具链」的根本诉求（externref 错误的根治方案）；② 为未来引入 SIMD 化的库（RaptorQ 用 GF(256) SIMD）保留构建基础设施——届时去掉/保留 `+simd128` 即可即时生效。
-   - **产物分流**：`wasm-pkg-legacy/`（MV2 用，无 SIMD/externref）+ `wasm-pkg-simd/`（MV3 用，两者都有）。`build-all.cjs` 按 `target.endsWith('mv3')` 把对应目录复制到 `wasm-pkg/` 后 plasmo build。loader.ts 的 import 路径固定 `../../wasm-pkg/`，靠 swap 目录名切换。
-   - **升级现代版**：改 `build-wasm.cjs` 顶部的 `MODERN = { wasmBindgen, jsSys, webSys }` 三元组，三者必须同期发版、版本号匹配（见 crates.io）。改完跑 `npm run wasm`，确认 Cargo 文件与运行前逐字节一致。
-   - **症状定位**：若扩展在新 Chrome 正常、在旧 Chrome（87/88）报 `CompileError: invalid value type 'externref'`，即 MV2 产物意外用了新版 wasm-bindgen——检查 `build-all.cjs` 是否按 MV2/MV3 正确 swap。
+     - **原真实瓶颈 QR 编码已大幅缓解**：旧 `qrcode` 单帧占主导，现 `fast_qr` ~7-9×。剩余方向：降 symbol size、并行编码（需 SAB+COOP/COEP）、或 RaptorQ GF(256) SIMD。
+   - **那为什么还保留双产物 + SIMD**：① MV2 兼容老 Chrome + MV3 新工具链；② 为未来 SIMD 库铺路。
+   - **产物分流**：`wasm-pkg-legacy/`（MV2）+ `wasm-pkg-simd/`（MV3）；`build-all.cjs` 按目标 swap 到 `wasm-pkg/`。
+   - **升级现代版**：改 `build-wasm.cjs` 顶部 `MODERN` 三元组，跑 `npm run wasm`，确认 Cargo 文件与运行前逐字节一致。
+   - **症状定位**：旧 Chrome 报 `invalid value type 'externref'` → MV2 误用了新版 wasm-bindgen。
 
-7. **WASM 零拷贝 API**：`SenderSessionWasm` 同时提供 `next_qr`/`next_qr_multi`（返回 `Vec<u8>`，wasm-bindgen 深拷贝成新 `Uint8Array`）和 `next_qr_into`/`next_qr_multi_into`（写入调用方提供的 `&mut [u8]`，无分配）。**热路径（`QrStream.tsx` 的 rAF 循环）用 `_into` 变体**——组件用 `useRef` 预分配最大尺寸 buffer（V40=177²=31329 字节）跨帧复用。保留旧变体是为了备用路径/调试。**注意**：`_into` 写入的 subarray 视图只在当帧有效（下一帧会被覆盖），`drawMatrix` 必须在同一 tick 内 putImageData 完毕。
-   - **⚠️ 实测性能结论**：零拷贝 vs 返回 `Vec` 实测 **0.99×（持平）**。换用 `fast_qr` 后 QR 编码已不再是压倒性主导（旧 `qrcode` 单帧 ~4.8ms 占 ~98%），`Vec<u8>` → `Uint8Array` 的深拷贝（V25=13689 字节）仍相对可忽略。保留 `_into` 的真实价值不是单帧提速，而是**消除每帧的堆分配**（4码×60fps = 240 次/秒），降低 GC 压力（benchmark 测不到 GC 抖动，但长时间运行下 GC stall 会导致 rAF 周期性掉帧）。
-   - **drawMatrix 像素填充**：当前是逐像素 `pixels[i] = black` 写（跳过白模块）。曾尝试用 `Uint32Array.set(blackRow, offset)` 批量复制整行黑模块，**实测 0.5×（慢一倍）**——`TypedArray.set` 对 modulePx=4~7 的小块有调用开销（边界检查 + memcpy setup），拐点在 modulePx ≥ 16。已回退，勿再尝试此「优化」。
+6. **WASM 零拷贝 API**：热路径用 `next_qr_into` / `next_qr_multi_into`（`QrStream.tsx` 预分配 buffer）。`drawMatrix` 后须同 tick `putImageData`。零拷贝主要消除每帧堆分配/GC 压力，单帧吞吐与返回 `Vec` 接近持平。
 
-8. **网页端（apps/web）零代码复用 sender**：web 工程通过 Vite alias `@/ → ../sender/src/` **直接跨工程 import** `apps/sender/src/options.tsx` 的 `App`，所有页面/组件/worker/wasm 模块都来自 sender，**不复制任何业务代码**。改 sender 业务代码，web 端自动同步。
-   - **环境自适应（关键接入点）**：sender 源码里有两处扩展 API 调用，均已做环境判断，**扩展和网页共用同一份源文件**：
-     - `options.tsx:42` zstd 预加载 IIFE：`typeof chrome !== "undefined" && chrome.runtime?.getURL` 为真走扩展路径，否则走 `new URL("wasm-zstd.wasm", document.baseURI)`。
-     - `compress.ts:186` worker 内 zstd 加载 fallback：`new URL("wasm-zstd.wasm", self.location.href)`。
-   - **WASM 依赖关系**：web 构建复用 `apps/sender/wasm-pkg/`（Rust WASM），不自己编译 Rust。`apps/web/scripts/prepare-wasm.cjs`（`predev`/`prebuild`）校验存在性 + 拷贝 `wasm-zstd.wasm` 到 `public/`。
-   - **不要在 web 里 fork 业务代码**：若要改发送逻辑，改 `apps/sender/src/`（单一事实源），两端同步生效。web 的 `src/main.tsx` 只应是 mount 入口，不承载业务逻辑。
+7. **网页端（apps/web）零代码复用 sender**：Vite alias `@/ → ../sender/src/` 跨工程 import；环境自适应见 `options.tsx`（chrome / document.baseURI / standalone）与 worker 内 zstd fallback。**不要在 web 里 fork 业务代码**。
 
 ---
 
