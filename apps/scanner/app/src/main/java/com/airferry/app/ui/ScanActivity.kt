@@ -739,47 +739,36 @@ class ScanActivity : ComponentActivity() {
         val crcKnown = session.crc32Known()
         val receivedCrc = crc32OfBytes(truncBytes)
 
-        // Text payload → decode UTF-8, archive it as a .txt (so it shows up in
-        // the received-files history like a file does), then route to the text
-        // detail screen. Detected BEFORE the bundle check: the two magics never
-        // collide ("ETTEXTv1" vs "ETBUNDL1"), but checking text first keeps the
-        // intent explicit.
+        // Content-addressed store: one blob per unique content; detail/share/list
+        // all use the blob path (no recovered_* + received/ double-write).
+        val store = com.airferry.app.scan.ContentStore
+
+        // Text payload → ETTEXTv1. Detected BEFORE the bundle check.
         if (TextParser.isText(truncBytes)) {
             val text = TextParser.parse(truncBytes)
             if (text != null) {
-                // Stage to cacheDir like a single file (the detail screen reads
-                // from here), and ALSO archive to received/ + .meta so the text
-                // shows up in the history (FileListActivity). The .meta carries
-                // kind=text so the history can re-open it in ReceiveTextActivity
-                // (with copy/share) instead of the generic file detail screen.
                 updateRecoveryStage("正在保存文字…")
-                val safeName = com.airferry.app.scan.FileNameUtil.sanitize(TEXT_RECEIVED_NAME)
-                val tmp = java.io.File(cacheDir, "recovered_$safeName")
-                tmp.writeText(text, Charsets.UTF_8)
-                // 文字归档的 .meta 必须存「纯文本字节」的 CRC —— 因为重新打开时
-                // FileListActivity 读回的是去掉魔数后的 .txt 内容，重算 CRC 用的是
-                // 纯文本字节。若存描述符的 CRC（含魔数载荷），重开会校验失败。
-                // contentCrc 是确定性的（同一份文本恒等），故存档视为「已知」。
                 val contentBytes = text.toByteArray(Charsets.UTF_8)
                 val contentCrc = crc32OfBytes(contentBytes)
-                val archiveName = archiveText(tmp, contentCrc)
+                val crcHex = java.lang.Long.toHexString(contentCrc)
+                val put = store.putBytes(
+                    this, TEXT_RECEIVED_NAME, contentBytes,
+                    crcHex = crcHex, crcUnknown = false, kind = "text",
+                )
                 clearRecoveryStage()
                 return Intent(this, ReceiveTextActivity::class.java).apply {
                     putExtra("TEXT", text)
-                    putExtra("FILE_PATH", tmp.absolutePath)
-                    putExtra("FILE_NAME", archiveName)
-                    // Match history re-open: CRC is over plain UTF-8 bytes, not the
-                    // ET-text wire payload (see archiveText / FileListActivity).
+                    putExtra("FILE_PATH", put.path.absolutePath)
+                    putExtra("FILE_NAME", put.entry.name)
+                    putExtra("ENTRY_ID", put.entry.id)
                     putExtra("CRC32", contentCrc)
                     putExtra("CRC32_RECEIVED", contentCrc)
                     putExtra("CRC32_UNKNOWN", false)
                 }
             }
-            // If parsing failed, fall through and treat as a single file so the
-            // user still gets something rather than a dead end.
         }
 
-        // Multi-file bundle → unpack and route to the bundle detail screen.
+        // Multi-file bundle → one ContentStore entry per member, shared bundleId.
         if (BundleParser.isBundle(truncBytes)) {
             val bundle = BundleParser.parse(truncBytes)
             if (bundle != null && bundle.files.isNotEmpty()) {
@@ -787,145 +776,84 @@ class ScanActivity : ComponentActivity() {
                 val paths = ArrayList<String>()
                 val names = ArrayList<String>()
                 val sizes = ArrayList<String>()
+                val entryIds = ArrayList<String>()
+                val ts = java.text.SimpleDateFormat("MMdd_HHmmss", java.util.Locale.getDefault())
+                    .format(java.util.Date())
+                val bundleId = java.util.UUID.randomUUID().toString()
+                val bundleTitle = "发送_$ts"
                 for ((idx, f) in bundle.files.withIndex()) {
                     updateRecoveryStage("正在保存文件 (${idx + 1}/$totalFiles)…")
-                    val safeName = com.airferry.app.scan.FileNameUtil.sanitize(f.name)
-                    val tmp = java.io.File(cacheDir, "recovered_$safeName")
-                    tmp.writeBytes(f.data)
-                    paths.add(tmp.absolutePath)
+                    val put = store.putBytes(
+                        this, f.name, f.data,
+                        crcHex = "unknown", crcUnknown = true, kind = "file",
+                        bundleId = bundleId, bundleTitle = bundleTitle,
+                    )
+                    paths.add(put.path.absolutePath)
                     names.add(f.name)
                     sizes.add(f.data.size.toString())
+                    entryIds.add(put.entry.id)
                 }
-                updateRecoveryStage("正在归档…")
-                copyBundleToReceivedDir(paths, names, sizes)
                 clearRecoveryStage()
                 return Intent(this, ReceiveBundleActivity::class.java).apply {
                     putStringArrayListExtra("FILE_PATHS", paths)
                     putStringArrayListExtra("FILE_NAMES", names)
                     putStringArrayListExtra("FILE_SIZES", sizes)
+                    putStringArrayListExtra("ENTRY_IDS", entryIds)
                     putExtra("CRC32", expectedCrc)
                     putExtra("CRC32_RECEIVED", receivedCrc)
-                    // Use the authoritative known-flag, NOT `expectedCrc == 0L`:
-                    // CRC32 can legitimately be 0.
                     putExtra("CRC32_UNKNOWN", !crcKnown)
                 }
             }
-            // If parsing failed, fall through and treat as a single file so the
-            // user still gets something rather than a dead end.
         }
 
-        // Single-file path. Preserve the original name + extension in the temp
-        // file (was recovered_<ts>.bin, which dropped the extension).
-        // Text-like names (txt/md/json/…) open the copy/share text UI; others go
-        // to the generic file detail screen. ETTEXTv1 already handled above.
+        // Single-file path (or text-like). Canonical store path only.
         updateRecoveryStage("正在保存文件…")
         val finalName = if (displayName.isNotEmpty()) displayName else "received_file"
-        val safeName = com.airferry.app.scan.FileNameUtil.sanitize(finalName)
-        val tmp = java.io.File(cacheDir, "recovered_$safeName")
-        tmp.writeBytes(truncBytes)
+        val contentCrc = crc32OfBytes(truncBytes)
+        val crcHex = if (crcKnown) java.lang.Long.toHexString(expectedCrc) else java.lang.Long.toHexString(contentCrc)
+        val crcUnknown = !crcKnown
+
         if (com.airferry.app.scan.TextLike.isTextLikeName(finalName) &&
             com.airferry.app.scan.TextLike.fitsTextUi(truncBytes.size)
         ) {
-            // Strict UTF-8 only (invalid sequences → file detail, not silent
-            // U+FFFD corruption). Oversize text-like files also fall through so
-            // we never load multi-MB logs into a single String. CRC uses the
-            // on-disk/recovered bytes so re-open CRC matches file content.
             val text = com.airferry.app.scan.TextLike.decodeUtf8Strict(truncBytes)
             if (text != null) {
-                val contentCrc = crc32OfBytes(truncBytes)
-                // Prefer the original display name for the archive (.md/.json keep
-                // their extension); fall back to 文字消息.txt only for bare names.
                 val archiveLabel =
                     if (finalName.contains('.')) finalName else TEXT_RECEIVED_NAME
-                archiveTextAs(tmp, archiveLabel, contentCrc)
+                val put = store.putBytes(
+                    this, archiveLabel, truncBytes,
+                    crcHex = java.lang.Long.toHexString(contentCrc),
+                    crcUnknown = false,
+                    kind = "text",
+                )
                 clearRecoveryStage()
                 return Intent(this, ReceiveTextActivity::class.java).apply {
                     putExtra("TEXT", text)
-                    putExtra("FILE_PATH", tmp.absolutePath)
+                    putExtra("FILE_PATH", put.path.absolutePath)
                     putExtra("FILE_NAME", finalName)
-                    // Descriptor CRC when known (matches wire payload); else on-disk.
+                    putExtra("ENTRY_ID", put.entry.id)
                     putExtra("CRC32", if (crcKnown) expectedCrc else contentCrc)
                     putExtra("CRC32_RECEIVED", contentCrc)
                     putExtra("CRC32_UNKNOWN", !crcKnown)
                 }
             }
-            // Non-UTF-8 → fall through to file detail.
         }
+
+        val put = store.putBytes(
+            this, finalName, truncBytes,
+            crcHex = crcHex, crcUnknown = crcUnknown, kind = "file",
+        )
         clearRecoveryStage()
         return Intent(this, ReceiveDetailActivity::class.java).apply {
-            putExtra("FILE_PATH", tmp.absolutePath)
+            putExtra("FILE_PATH", put.path.absolutePath)
             putExtra("FILE_SIZE", if (originalSize > 0) originalSize else truncBytes.size.toLong())
             putExtra("FILE_NAME", finalName)
+            putExtra("ENTRY_ID", put.entry.id)
             putExtra("CRC32", expectedCrc)
             putExtra("CRC32_RECEIVED", receivedCrc)
             putExtra("CRC32_UNKNOWN", !crcKnown)
-        }
-    }
-
-    /** Persist every unpacked bundle file under a single subdirectory "发送_<ts>". */
-    private fun copyBundleToReceivedDir(paths: List<String>, names: List<String>, sizes: List<String>) {
-        try {
-            val parent = java.io.File(getExternalFilesDir(null), "received")
-            if (!parent.exists()) parent.mkdirs()
-            // Create a timestamped subdirectory so all files from one bundle
-            // stay grouped instead of scattered individually in received/.
-            val ts = java.text.SimpleDateFormat("MMdd_HHmmss", java.util.Locale.getDefault())
-                .format(java.util.Date())
-            val bundleDir = java.io.File(parent, "发送_$ts")
-            bundleDir.mkdirs()
-            for (i in paths.indices) {
-                val src = java.io.File(paths[i])
-                if (!src.exists()) continue
-                val name = names.getOrElse(i) { src.name }
-                val target = com.airferry.app.scan.FileNameUtil.uniqueTarget(bundleDir, name)
-                src.copyTo(target, overwrite = true)
-                val size = sizes.getOrElse(i) { "0" }
-                java.io.File(bundleDir, "${target.name}.meta").writeText("$name\n$size\nunknown\ntrue")
-            }
-        } catch (e: Exception) {
-            android.util.Log.w("ScanActivity", "bundle archive failed", e)
-        }
-    }
-
-    /**
-     * Archive a recovered text transfer into `received/` as a `.txt` + a `.meta`
-     * sidecar, mirroring how single files are archived. This is what makes text
-     * show up in the file-list history (FileListActivity scans `received/`).
-     *
-     * The `.meta` carries a 5th line `kind=text` so the history can re-open the
-     * entry in [ReceiveTextActivity] (copy / share) instead of the generic file
-     * detail screen. Returns the on-disk archive filename (unique'd).
-     *
-     * [contentCrc] is the CRC32 of the PLAIN TEXT bytes (not the magic-bearing
-     * payload) — it's deterministic, so we always store it as a KNOWN crc. The
-     * re-open path recomputes CRC over the same plain-text .txt and matches.
-     */
-    private fun archiveText(src: java.io.File, contentCrc: Long): String =
-        archiveTextAs(src, TEXT_RECEIVED_NAME, contentCrc)
-
-    /**
-     * Archive a recovered text-like transfer into `received/` as the given
-     * [displayName] + `.meta` with `kind=text`, so history re-opens it in
-     * [ReceiveTextActivity].
-     */
-    private fun archiveTextAs(src: java.io.File, displayName: String, contentCrc: Long): String {
-        return try {
-            val parent = java.io.File(getExternalFilesDir(null), "received")
-            if (!parent.exists()) parent.mkdirs()
-            val target = com.airferry.app.scan.FileNameUtil.uniqueTarget(parent, displayName)
-            src.copyTo(target, overwrite = true)
-            // .meta: name / size / crcHex / crcUnknown / kind
-            // Line 4 is the `crcUnknown` flag (true = no crc). Line 5 kind=text
-            // is optional for old readers.
-            val crcStr = java.lang.Long.toHexString(contentCrc)
-            val size = src.length().toString()
-            java.io.File(parent, "${target.name}.meta").writeText(
-                "$displayName\n$size\n$crcStr\nfalse\nkind=text"
-            )
-            target.name
-        } catch (e: Exception) {
-            android.util.Log.w("ScanActivity", "text archive failed", e)
-            displayName
+            // Already archived into ContentStore — do not copy again.
+            putExtra("RESAVE", true)
         }
     }
 

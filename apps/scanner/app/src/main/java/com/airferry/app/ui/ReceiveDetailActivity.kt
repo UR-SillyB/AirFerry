@@ -214,34 +214,22 @@ class ReceiveDetailActivity : ComponentActivity() {
     }
 
     /**
-     * Share the recovered file directly via ACTION_SEND without requiring
-     * the user to save it first.  Copies the temp file (recovered_*.<ext>)
-     * to a correctly-named file so the share target sees the real filename,
-     * then uses FileProvider to securely expose it.
-     *
-     * EXTRA_TITLE carries the *original* filename (with spaces / Chinese
-     * intact) so receiving apps (WeChat / QQ / mail) that derive their
-     * display name from this field show it correctly.
+     * Share the canonical ContentStore blob via FileProvider (no share/ copy).
+     * EXTRA_TITLE carries the original display name for WeChat / QQ / mail.
      */
     private fun shareFile() {
         try {
             val src = recoveredFile ?: return
-            // Copy to a correctly-named file so the receiving app shows the
-            // real filename (spaces + CJK preserved) instead of a temp name.
-            val safeName = com.airferry.app.scan.FileNameUtil.sanitize(fileName)
-            val shareDir = File(cacheDir, "share")
-            if (!shareDir.exists()) shareDir.mkdirs()
-            // Fixed name + overwrite: re-sharing the same file must not become name(1).ext
-            val shareFile = com.airferry.app.scan.FileNameUtil.shareStagingFile(shareDir, safeName)
-            src.copyTo(shareFile, overwrite = true)
-
+            if (!src.exists()) {
+                Toast.makeText(this, "没有可分享的文件", Toast.LENGTH_SHORT).show()
+                return
+            }
+            // Share the canonical store blob directly (no cache/share copy).
             val authority = "${packageName}.fileprovider"
-            val uri = FileProvider.getUriForFile(this, authority, shareFile)
+            val uri = FileProvider.getUriForFile(this, authority, src)
             val shareIntent = Intent(Intent.ACTION_SEND).apply {
                 type = "application/octet-stream"
                 putExtra(Intent.EXTRA_STREAM, uri)
-                // Original name (un-sanitized) as the display title — keeps
-                // Chinese + spaces for apps that read EXTRA_TITLE.
                 putExtra(Intent.EXTRA_TITLE, fileName)
                 putExtra(Intent.EXTRA_TEXT, fileName)
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
@@ -252,25 +240,27 @@ class ReceiveDetailActivity : ComponentActivity() {
         }
     }
 
+    /**
+     * Legacy path: only used when reopening old flows that still pass a
+     * non-store temp file without RESAVE. New scans put RESAVE=true after
+     * ContentStore.putBytes so this is a no-op for modern transfers.
+     */
     private fun copyToReceivedDir() {
         try {
             val src = recoveredFile ?: return
-            val dir = File(getExternalFilesDir(null), "received")
-            if (!dir.exists()) dir.mkdirs()
-            // Use the real filename (no timestamp prefix); dedupe with (1)(2)
-            // on collision so the on-disk name matches what the user sent.
-            val target = com.airferry.app.scan.FileNameUtil.uniqueTarget(dir, fileName)
-            src.copyTo(target, overwrite = true)
-            // Store the CRC32 of the ACTUAL bytes on disk. This is exactly what
-            // the re-open path recomputes, so the history always shows a
-            // consistent "✓ 通过" instead of a ghost "未知" caused by an
-            // old/desynced descriptor crc-known flag (which can read false even
-            // for a complete, verifiable file). The fresh-receive screen still
-            // verifies the descriptor's CRC against the recovered bytes; the
-            // .meta only needs to be self-consistent for re-opening.
-            val onDiskCrc = ScanActivity.crc32OfBytes(src.readBytes())
-            val crcStr = java.lang.Long.toHexString(onDiskCrc)
-            File(dir, "${target.name}.meta").writeText("$fileName\n$fileSize\n$crcStr\nfalse")
+            // Already under ContentStore blobs — nothing to archive.
+            val storeRoot = com.airferry.app.scan.ContentStore.root(this).canonicalPath
+            if (src.canonicalPath.startsWith(storeRoot)) return
+
+            val put = com.airferry.app.scan.ContentStore.putBytes(
+                this, fileName, src.readBytes(),
+                crcHex = java.lang.Long.toHexString(
+                    ScanActivity.crc32OfBytes(src.readBytes())
+                ),
+                crcUnknown = false,
+                kind = "file",
+            )
+            recoveredFile = put.path
         } catch (e: Exception) {
             android.util.Log.w("ReceiveDetailActivity", "copyToReceivedDir failed", e)
         }

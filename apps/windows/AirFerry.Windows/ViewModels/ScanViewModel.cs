@@ -301,13 +301,12 @@ public partial class ScanViewModel : ObservableObject, IDisposable
     private RecoveryResult StageSingleFile(byte[] bytes, string displayName,
         ulong originalSize, ulong expectedCrc, bool crcKnown, ulong receivedCrc)
     {
-        Directory.CreateDirectory(TempDir);
         string finalName = string.IsNullOrEmpty(displayName) ? "received_file" : displayName;
-        string safe = FileNameUtil.Sanitize(finalName);
-        string tmp = FileNameUtil.UniqueTarget(TempDir, safe);
-        File.WriteAllBytes(tmp, bytes);
+        string crcHex = crcKnown ? expectedCrc.ToString("x") : "unknown";
+        ContentStore.PutResult put = ContentStore.PutBytes(
+            finalName, bytes, crcHex, crcUnknown: !crcKnown, kind: "file");
         return new RecoveryResult(
-            SingleFilePath: tmp,
+            SingleFilePath: put.Path,
             SingleFileSize: originalSize > 0 ? originalSize : (ulong)bytes.Length,
             ExpectedCrc32: expectedCrc,
             Crc32Known: crcKnown,
@@ -317,15 +316,23 @@ public partial class ScanViewModel : ObservableObject, IDisposable
     }
 
     /// <summary>
-    /// Stage a text-like single file (both on-disk path for archive/save and
-    /// in-memory <see cref="RecoveryResult.Text"/> for the copy UI).
+    /// Stage a text-like single file into ContentStore and keep text for the copy UI.
     /// </summary>
     private RecoveryResult StageTextLikeFile(byte[] bytes, string displayName,
         ulong originalSize, ulong expectedCrc, bool crcKnown, ulong receivedCrc, string text)
     {
-        RecoveryResult file = StageSingleFile(bytes, displayName, originalSize,
-            expectedCrc, crcKnown, receivedCrc);
-        return file with { Text = text };
+        string finalName = string.IsNullOrEmpty(displayName) ? "文字消息.txt" : displayName;
+        ContentStore.PutResult put = ContentStore.PutBytes(
+            finalName, bytes, crcHex: "unknown", crcUnknown: true, kind: "text");
+        return new RecoveryResult(
+            SingleFilePath: put.Path,
+            SingleFileSize: originalSize > 0 ? originalSize : (ulong)bytes.Length,
+            ExpectedCrc32: expectedCrc,
+            Crc32Known: crcKnown,
+            ReceivedCrc32: receivedCrc,
+            Bundle: null,
+            BundleDir: null,
+            Text: text);
     }
 
     private RecoveryResult? StageBundle(byte[] bytes, ulong expectedCrc,
@@ -336,17 +343,20 @@ public partial class ScanViewModel : ObservableObject, IDisposable
         {
             return null;
         }
-        Directory.CreateDirectory(TempDir);
+        string bundleId = Guid.NewGuid().ToString("N");
+        string bundleTitle = $"发送_{DateTime.Now:MMdd_HHmmss}";
         var staged = new List<BundleFile>(bundle.Files.Count);
         int idx = 0;
         foreach (BundleFile f in bundle.Files)
         {
             idx++;
             RecoveryStageText = $"正在保存文件 ({idx}/{bundle.Files.Count})…";
-            string safe = FileNameUtil.Sanitize(f.Name);
-            string tmp = FileNameUtil.UniqueTarget(TempDir, safe);
-            File.WriteAllBytes(tmp, f.Data);
+            ContentStore.PutResult put = ContentStore.PutBytes(
+                f.Name, f.Data, kind: "file",
+                bundleId: bundleId, bundleTitle: bundleTitle);
+            // Keep in-memory bytes for the bundle UI; disk is content-addressed.
             staged.Add(new BundleFile(f.Name, f.Data));
+            _ = put;
         }
         return new RecoveryResult(
             SingleFilePath: null,
@@ -383,31 +393,35 @@ public partial class ScanViewModel : ObservableObject, IDisposable
         LossRatioText = $"{p.LossRatio * 100:F1}%";
     }
 
-    /// <summary>Archive a recovered single file into <see cref="ReceivedDir"/>.</summary>
+    /// <summary>
+    /// Ensure <paramref name="sourcePath"/> is in ContentStore (idempotent if already a blob).
+    /// Returns the canonical blob path.
+    /// </summary>
     public static string ArchiveSingleFile(string sourcePath, string displayName)
     {
-        Directory.CreateDirectory(ReceivedDir);
-        string target = FileNameUtil.UniqueTarget(ReceivedDir, displayName);
-        if (File.Exists(sourcePath))
+        if (File.Exists(sourcePath) &&
+            sourcePath.StartsWith(ContentStore.RootDir, StringComparison.OrdinalIgnoreCase))
         {
-            File.Copy(sourcePath, target, overwrite: true);
+            return sourcePath;
         }
-        return target;
+        byte[] bytes = File.Exists(sourcePath) ? File.ReadAllBytes(sourcePath) : [];
+        return ContentStore.PutBytes(displayName, bytes).Path;
     }
 
-    /// <summary>Archive a bundle into a timestamped subdir of <see cref="ReceivedDir"/>.</summary>
+    /// <summary>Archive a bundle into ContentStore (content-addressed members).</summary>
     public static string ArchiveBundle(IReadOnlyList<BundleFile> files)
     {
-        Directory.CreateDirectory(ReceivedDir);
-        string ts = DateTime.Now.ToString("MMdd_HHmmss");
-        string dir = Path.Combine(ReceivedDir, $"发送_{ts}");
-        Directory.CreateDirectory(dir);
+        string bundleId = Guid.NewGuid().ToString("N");
+        string bundleTitle = $"发送_{DateTime.Now:MMdd_HHmmss}";
+        string? first = null;
         foreach (BundleFile f in files)
         {
-            string target = FileNameUtil.UniqueTarget(dir, f.Name);
-            File.WriteAllBytes(target, f.Data);
+            var put = ContentStore.PutBytes(
+                f.Name, f.Data, kind: "file",
+                bundleId: bundleId, bundleTitle: bundleTitle);
+            first ??= put.Path;
         }
-        return dir;
+        return first ?? ContentStore.RootDir;
     }
 
     public void Dispose()

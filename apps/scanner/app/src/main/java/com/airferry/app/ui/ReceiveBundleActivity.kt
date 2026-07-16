@@ -294,7 +294,6 @@ class ReceiveBundleActivity : ComponentActivity() {
                     putExtra("TEXT", text)
                     putExtra("FILE_PATH", info.filePath)
                     putExtra("FILE_NAME", info.name)
-                    // Per-entry CRC is not tracked for bundle members; mark unknown.
                     putExtra("CRC32_UNKNOWN", true)
                 }
             )
@@ -316,7 +315,7 @@ class ReceiveBundleActivity : ComponentActivity() {
         }
     }
 
-    /** Share a single file via ACTION_SEND. */
+    /** Share a single file via ACTION_SEND (canonical blob path, no share copy). */
     private fun shareOne(info: FileInfo) {
         val src = File(info.filePath)
         if (!src.exists()) {
@@ -324,16 +323,10 @@ class ReceiveBundleActivity : ComponentActivity() {
             return
         }
         try {
-            val shareDir = File(cacheDir, "share").also { if (!it.exists()) it.mkdirs() }
-            // Fixed name + overwrite so re-share keeps the original filename.
-            val shareFile = com.airferry.app.scan.FileNameUtil.shareStagingFile(shareDir, info.name)
-            src.copyTo(shareFile, overwrite = true)
-            val uri = FileProvider.getUriForFile(this, "${packageName}.fileprovider", shareFile)
+            val uri = FileProvider.getUriForFile(this, "${packageName}.fileprovider", src)
             val intent = Intent(Intent.ACTION_SEND).apply {
                 type = "application/octet-stream"
                 putExtra(Intent.EXTRA_STREAM, uri)
-                // Original name (Chinese + spaces intact) for apps that read
-                // EXTRA_TITLE / EXTRA_TEXT to derive the display name.
                 putExtra(Intent.EXTRA_TITLE, info.name)
                 putExtra(Intent.EXTRA_TEXT, info.name)
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
@@ -344,18 +337,15 @@ class ReceiveBundleActivity : ComponentActivity() {
         }
     }
 
-    /** Share the whole bundle via ACTION_SEND_MULTIPLE. */
+    /** Share the whole bundle via ACTION_SEND_MULTIPLE (direct blob URIs). */
     private fun shareAll() {
         try {
-            val shareDir = File(cacheDir, "share").also { if (!it.exists()) it.mkdirs() }
             val uris = ArrayList<Uri>()
             val names = ArrayList<String>()
             for (f in files) {
                 val src = File(f.filePath)
                 if (!src.exists()) continue
-                val shareFile = com.airferry.app.scan.FileNameUtil.shareStagingFile(shareDir, f.name)
-                src.copyTo(shareFile, overwrite = true)
-                uris.add(FileProvider.getUriForFile(this, "${packageName}.fileprovider", shareFile))
+                uris.add(FileProvider.getUriForFile(this, "${packageName}.fileprovider", src))
                 names.add(f.name)
             }
             if (uris.isEmpty()) {
@@ -365,8 +355,6 @@ class ReceiveBundleActivity : ComponentActivity() {
             val intent = Intent(Intent.ACTION_SEND_MULTIPLE).apply {
                 type = "application/octet-stream"
                 putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris)
-                // Title: the joined names (or a count) so receiving apps have a
-                // display string instead of a raw FileProvider URI slug.
                 putExtra(Intent.EXTRA_TITLE, if (names.size == 1) names[0] else "${names.size} 个文件")
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }

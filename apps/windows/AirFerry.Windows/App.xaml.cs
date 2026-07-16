@@ -1,4 +1,5 @@
 using System.Windows;
+using AirFerry.Windows.Bundle;
 
 namespace AirFerry.Windows;
 
@@ -11,4 +12,16 @@ namespace AirFerry.Windows;
 /// </summary>
 public partial class App : Application
 {
+    protected override void OnStartup(StartupEventArgs e)
+    {
+        base.OnStartup(e);
+        try
+        {
+            ContentStore.MigrateLegacyReceivedIfNeeded();
+        }
+        catch
+        {
+            // Non-fatal
+        }
+    }
 }
