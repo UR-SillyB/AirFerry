@@ -172,7 +172,7 @@ apps/scanner/
 │   │   ├── TextLike.kt           # 文本类扩展名启发式 + 严格 UTF-8
 │   │   └── FileNameUtil.kt       # 接收文件命名（去重 / 目录）
 │   └── ui/
-│       ├── ScanActivity.kt       # 扫描页（ImageAnalysis 1920×1080）
+│       ├── ScanActivity.kt       # 扫描页（ImageAnalysis 1920×1080；FLAG_KEEP_SCREEN_ON 防长传息屏）
 │       ├── ReceiveDetailActivity.kt
 │       ├── ReceiveTextActivity.kt    # 文字/文本类复制页
 │       ├── ReceiveBundleActivity.kt  # 多文件；.txt 等可点开复制

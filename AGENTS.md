@@ -342,7 +342,7 @@ npm run preview        # 本地预览构建产物
 
 | 关注点 | 位置 | 说明 |
 |--------|------|------|
-| Activity / 管线编排 | `app/.../ui/ScanActivity.kt:60` | owns 管线、相机绑定、摄入线程 |
+| Activity / 管线编排 | `app/.../ui/ScanActivity.kt:61` | owns 管线、相机绑定、摄入线程；`onCreate` 设 `FLAG_KEEP_SCREEN_ON` 防长传息屏 |
 | CameraX 生产者（非阻塞） | `app/.../scan/QrStreamAnalyzer.kt:16` | 拷贝 Y 平面入队后立即 close |
 | **并行解码 + 串行摄入** | `app/.../scan/QrDecodePool.kt:27` | N worker(2-6) + `ingestLock` 串行化 |
 | 多码 ROI 解码追踪 | `app/.../scan/QrDecodePool.kt:277` | `decodeMultiTracked` |
@@ -411,6 +411,7 @@ npm run preview        # 本地预览构建产物
 | 解压 OOM / 崩溃 | `compress.rs:97 decompress_with_limit` | 炸弹上限未封顶到 `original_size` |
 | JNI 摄入竞态/UAF | `QrDecodePool.ingestLock` + `ScanActivity` `ingestStopped` | 句柄非线程安全，未串行化 |
 | 摄像头读不出码 | `qr_render::encode`（版本选择）+ `scan_jni` TryHarder | 版本过高致模块过密；或 16KiB 页未对齐致 .so 加载失败 |
+| 长时间扫码后息屏/锁屏 | `ScanActivity.onCreate` `FLAG_KEEP_SCREEN_ON` | 扫码页必须 `window.addFlags(FLAG_KEEP_SCREEN_ON)`；仅窗口可见时生效，离开 Activity 自动恢复系统超时 |
 | 压缩总是走 raw（100%） | `compress.ts` `initZstdFromBytes` | worker 内 zstd WASM 未加载成功 |
 | **网页端压缩走 raw（100%）** | `apps/web/public/wasm-zstd.wasm` + `prepare-wasm.cjs` | `public/wasm-zstd.wasm` 缺失（未跑 `prebuild`），worker fetch 404 → 回退 raw。重新跑 `npm run build`（会触发 `prebuild`→prepare-wasm） |
 | **网页端启动报 transfer_engine.js 找不到** | `apps/sender/wasm-pkg/` | web 复用 sender 的 Rust WASM，首次构建前需 `cd apps/sender && npm run wasm`。`prepare-wasm.cjs` 会校验并报清晰错误 |

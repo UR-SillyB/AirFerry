@@ -5,6 +5,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.hardware.camera2.CaptureRequest
 import android.os.Bundle
+import android.view.WindowManager
 import android.widget.Toast
 import android.util.Log
 import android.util.Range
@@ -133,6 +134,14 @@ class ScanActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // Keep the screen on for the whole scan session. Transfers can run for
+        // many minutes; without this the system timeout dims/locks the screen,
+        // stops the camera preview, and aborts an in-progress receive.
+        // FLAG_KEEP_SCREEN_ON only applies while this window is visible — no
+        // WAKE_LOCK permission needed, and leaving the activity restores normal
+        // timeout automatically.
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
         // JNI self-test
         val jniOk = try {
