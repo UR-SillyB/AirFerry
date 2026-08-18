@@ -8,8 +8,8 @@ using AirFerry.Windows.Bundle;
 using AirFerry.Windows.Models;
 using AirFerry.Windows.Services;
 using AirFerry.Windows.ViewModels;
+using AirFerry.Windows.Controls;
 using Microsoft.Win32;
-using Wpf.Ui.Controls;
 
 namespace AirFerry.Windows.Views;
 
@@ -18,7 +18,8 @@ namespace AirFerry.Windows.Views;
 /// <c>ReceiveBundleActivity</c>: lists each unpacked file with name + size,
 /// offers "save all" / "open folder" / "rescan". Double-click (or Enter) on a
 /// .txt entry opens <see cref="ReceiveTextView"/> so mixed-batch text can be
-/// copied (sender materialises "添加文字" as named .txt inside ETBUNDL1).
+/// copied (sender materialises "添加文字" as a named .txt FILE entry in the
+/// AF2 Manifest).
 /// </summary>
 public partial class ReceiveBundleView : Page
 {
@@ -48,8 +49,8 @@ public partial class ReceiveBundleView : Page
             _rows.Add(new BundleFileRow(
                 f.Name,
                 looksText
-                    ? $"{FormatSize((ulong)f.Data.Length)} · 双击可复制"
-                    : FormatSize((ulong)f.Data.Length),
+                    ? $"{FormatSize((ulong)f.Size)} · 双击可复制"
+                    : FormatSize((ulong)f.Size),
                 looksText));
         }
         if (!_result.Crc32Known)
@@ -108,28 +109,39 @@ public partial class ReceiveBundleView : Page
         {
             return;
         }
-        if (!FileNameUtil.FitsTextUi(match.Data.LongLength))
+        if (!FileNameUtil.FitsTextUi(match.Size))
         {
             await UiMessages.InfoAsync("文件过大，请用「全部保存」后用其他应用打开。");
             return;
         }
-        string? text = FileNameUtil.DecodeUtf8Strict(match.Data);
-        if (text is null)
+        try
         {
-            await UiMessages.InfoAsync("该文件不是有效的 UTF-8 文本，无法复制预览。");
-            return;
+            // Path-backed members read the ContentStore blob on demand; the
+            // blob may already be gone (e.g. 清空所有 in the file list).
+            byte[] preview = await Task.Run(() => match.Data);
+            string? text = FileNameUtil.DecodeUtf8Strict(preview);
+            if (text is null)
+            {
+                await UiMessages.InfoAsync("该文件不是有效的 UTF-8 文本，无法复制预览。");
+                return;
+            }
+            // Per-entry CRC is not tracked for bundle members.
+            var textResult = new RecoveryResult(
+                SingleFilePath: null,
+                SingleFileSize: null,
+                ExpectedCrc32: null,
+                Crc32Known: false,
+                ReceivedCrc32: null,
+                Bundle: null,
+                BundleDir: null,
+                Text: text);
+            NavigationService?.Navigate(new ReceiveTextView(textResult, suggestedFileName: name));
         }
-        // Per-entry CRC is not tracked for bundle members.
-        var textResult = new RecoveryResult(
-            SingleFilePath: null,
-            SingleFileSize: null,
-            ExpectedCrc32: null,
-            Crc32Known: false,
-            ReceivedCrc32: null,
-            Bundle: null,
-            BundleDir: null,
-            Text: text);
-        NavigationService?.Navigate(new ReceiveTextView(textResult, suggestedFileName: name));
+        catch (Exception ex)
+        {
+            // async void 中逃逸的异常会绕过所有上层处理器直接崩溃进程，必须就地兜底。
+            await UiMessages.ErrorAsync($"读取文件失败（源文件可能已被清理）: {ex.Message}");
+        }
     }
 
     private async void SaveAll_Click(object sender, RoutedEventArgs e)
@@ -154,8 +166,8 @@ public partial class ReceiveBundleView : Page
             Directory.CreateDirectory(dir);
             foreach (BundleFile f in _result.Bundle)
             {
-                string target = FileNameUtil.UniqueTarget(dir, f.Name);
-                await Task.Run(() => File.WriteAllBytes(target, f.Data));
+                string target = FileNameUtil.UniqueRelativeTarget(dir, f.Name);
+                await Task.Run(() => f.CopyTo(target));
                 saved++;
             }
             // Members were already indexed atomically when recovery completed.
@@ -181,8 +193,7 @@ public partial class ReceiveBundleView : Page
         {
             // ContentStore members are extensionless SHA-256 blobs. Export a
             // temporary, logically named directory before handing it to Explorer.
-            string dir = ShareExport.ExportFiles(
-                _result.Bundle.Select(f => (f.Name, f.Data)));
+            string dir = ShareExport.ExportFiles(_result.Bundle);
             var startInfo = new ProcessStartInfo("explorer.exe")
             {
                 UseShellExecute = true,

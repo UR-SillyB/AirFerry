@@ -1,10 +1,10 @@
 /**
  * AirFerry web receiver — entry point.
  *
- * Thin shell mirroring main.tsx: mounts the shared ReceivePage from the sender
- * source. All receive logic (camera capture, QR decode, ingest, decompress,
- * parse, result rendering) lives in `apps/sender/src/pages/ReceivePage.tsx`,
- * reused here via the `@/` cross-project alias.
+ * Thin shell mirroring main.tsx: mounts ReceivePage from `src/pages/`.
+ * All receive logic (camera capture, QR decode, ingest, decompress, parse,
+ * result rendering) lives in `src/pages/ReceivePage.tsx`, shared with the
+ * browser extension via the same `@/` alias.
  */
 import { StrictMode } from "react"
 import { createRoot } from "react-dom/client"

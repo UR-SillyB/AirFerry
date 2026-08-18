@@ -1,0 +1,57 @@
+{
+  "version": 2,
+  "state_revision": 12,
+  "archive_revision": "sha256:fd5e8a484f201f8ea17b30d935848b30f4cb384794dae0d8b91f10aad8d38cbd",
+  "generated_at": "unix:1787037838",
+  "current_session": {
+    "number": 4,
+    "path": "docs/history-session/4.md",
+    "reason": "当前 ChatGPT 会话档案"
+  },
+  "current_focus": "再审计一遍呢",
+  "recent_changes": [
+    "apps/web/src/types.ts",
+    "apps/web/src/workers/compress.worker.ts",
+    "apps/web/src/workers/receive-storage.ts",
+    "apps/web/src/workers/receive.worker.ts",
+    "apps/web/test/receive-storage.test.mjs",
+    "apps/web/test/sender-path.test.mjs",
+    "apps/scanner/app/src/main/java/com/airferry/app/scan/SafTreeExporter.kt",
+    "apps/scanner/app/src/main/java/com/airferry/app/ui/ReceiveBundleActivity.kt",
+    "apps/scanner/app/src/main/java/com/airferry/app/ui/FileListActivity.kt",
+    "core/transfer-engine/src/receiver.rs",
+    "apps/scanner/app/src/main/java/com/airferry/app/ui/ScanActivity.kt",
+    "apps/windows/AirFerry.Windows/ViewModels/ScanViewModel.cs"
+  ],
+  "open_items": [
+    "No new deterministic P1/P2 found in the final static pass. Full Rust/Web/Android/Windows compile/test execution remains unverified in this connector environment because toolchains are unavailable on PATH / disallowed outside the workspace.",
+    "Run the repository interop/test matrix on a host/CI with Cargo, Node/npm, a real JDK, and .NET SDK available.",
+    "Real Chromium OPFS File/Blob lifetime integration testing remains valuable even though reset cleanup now has a grace period and fake-OPFS regressions cover the intended ownership semantics.",
+    "Fix the deterministic Web compile error before any further build/release.",
+    "Add a multi-chunk regression for pre-Manifest poisoned chunk reverify to catch completed_count double decrement.",
+    "Serialize all receive-worker state mutations through one promise queue/mutex, including assemble/reset/init.",
+    "Make save-path sanitization reserve generated candidates and cover all Windows-invalid filename characters.",
+    "Harden ledger creation/appends and malformed candidate fallback; add rollback to PutBytesBatch.",
+    "Use release-time ownership/tombstone for Web OPFS cleanup rather than backing-file mtime.",
+    "Prioritize P0 Web compile fix, then receiver completed_count and Web worker serialization before addressing P2 durability/path hygiene.",
+    "真实 Chromium OPFS Blob backing-file 生命周期集成测试仍未补；不属于本轮两处状态机修复。",
+    "当前工作树仍包含用户此前的大批未提交修改，本轮没有重置或覆盖其他改动。"
+  ],
+  "references": [
+    {
+      "number": 3,
+      "path": "docs/history-session/3.md",
+      "reason": "最近历史档案；可按需读取原文"
+    },
+    {
+      "number": 2,
+      "path": "docs/history-session/2.md",
+      "reason": "最近历史档案；可按需读取原文"
+    },
+    {
+      "number": 1,
+      "path": "docs/history-session/1.md",
+      "reason": "最近历史档案；可按需读取原文"
+    }
+  ]
+}

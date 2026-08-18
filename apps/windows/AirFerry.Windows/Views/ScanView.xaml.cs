@@ -28,13 +28,19 @@ public partial class ScanView : Page
     private int _previewRenderScheduled;
     private int _activationEpoch;
     private volatile bool _pageActive;
-    private bool _suppressToggleEvents;
 
-    public ScanView(ScanSource source, string? resumeRootId = null)
+    /// <param name="continuous">Continuous mode chosen on the device-select page.</param>
+    /// <param name="continuousDir">Folder to save into when continuous.</param>
+    public ScanView(ScanSource source,
+        bool continuous = false, string? continuousDir = null)
     {
         _source = source;
         InitializeComponent();
-        _vm = new ScanViewModel(resumeRootId);
+        _vm = new ScanViewModel();
+        if (continuous && !string.IsNullOrWhiteSpace(continuousDir))
+        {
+            _vm.SetContinuousDir(continuousDir);
+        }
         _vm.TransferCompleted += OnTransferCompleted;
         _vm.PreviewFrameReady += OnPreviewFrameReady;
         ContinuousList.ItemsSource = _vm.ContinuousItems;
@@ -104,13 +110,15 @@ public partial class ScanView : Page
         _vm.StartScan(source);
         _progressTimer.Start();
         SetStopButton(_vm.IsScanning ? "停止" : "重试",
-            _vm.IsScanning ? Wpf.Ui.Controls.SymbolRegular.Stop24 : Wpf.Ui.Controls.SymbolRegular.ArrowClockwise24);
+            _vm.IsScanning ? "\xE71A" : "\xE72C");
     }
 
-    private void SetStopButton(string text, Wpf.Ui.Controls.SymbolRegular symbol)
+    /// <summary>Swaps the stop/retry button's label and Segoe MDL2 glyph
+    /// (stop E71A / retry E72C / continue E768).</summary>
+    private void SetStopButton(string text, string glyph)
     {
-        StopButton.Content = text;
-        StopButton.Icon = new Wpf.Ui.Controls.SymbolIcon { Symbol = symbol };
+        StopButtonText.Text = text;
+        StopButtonIcon.Text = glyph;
     }
 
     private void OnPreviewFrameReady(PreviewFrame frame)
@@ -314,7 +322,7 @@ public partial class ScanView : Page
                 if (_pageActive)
                 {
                     SyncUiFromViewModel();
-                    SetStopButton("继续", Wpf.Ui.Controls.SymbolRegular.Play24);
+                    SetStopButton("继续", "\xE768");
                 }
             }
             else
@@ -333,37 +341,6 @@ public partial class ScanView : Page
     private void FileList_Click(object sender, RoutedEventArgs e)
     {
         NavigationService?.Navigate(new FileListView());
-    }
-
-    private void ContinuousToggle_Checked(object sender, RoutedEventArgs e)
-    {
-        if (_suppressToggleEvents)
-        {
-            return;
-        }
-        string? dir = PickContinuousFolder();
-        if (dir is null)
-        {
-            // Cancelled the folder picker — revert the toggle without
-            // re-entering this handler.
-            _suppressToggleEvents = true;
-            ContinuousToggle.IsChecked = false;
-            _suppressToggleEvents = false;
-            return;
-        }
-        Services.AppSettings.SetContinuousSaveDir(dir);
-        _vm.SetContinuousDir(dir);
-        UpdateContinuousUi();
-    }
-
-    private void ContinuousToggle_Unchecked(object sender, RoutedEventArgs e)
-    {
-        if (_suppressToggleEvents)
-        {
-            return;
-        }
-        _vm.DisableContinuous();
-        UpdateContinuousUi();
     }
 
     private void ContinuousChange_Click(object sender, RoutedEventArgs e)
@@ -418,11 +395,11 @@ public partial class ScanView : Page
     {
         bool on = _vm.ContinuousMode;
         string dir = _vm.ContinuousSaveDir;
-        ContinuousDirText.Text = on && dir.Length > 0 ? $"保存至 {dir}" : string.Empty;
-        ContinuousDirText.Visibility = on ? Visibility.Visible : Visibility.Collapsed;
+        bool hasFeed = _vm.ContinuousItems.Count > 0;
+        ContinuousCard.Visibility = on || hasFeed ? Visibility.Visible : Visibility.Collapsed;
+        ContinuousDirText.Text = on && dir.Length > 0 ? $"持续接收 · 保存至 {dir}" : string.Empty;
         ContinuousChangeButton.Visibility = on ? Visibility.Visible : Visibility.Collapsed;
         ContinuousOpenButton.Visibility = on ? Visibility.Visible : Visibility.Collapsed;
-        bool hasFeed = _vm.ContinuousItems.Count > 0;
         ContinuousSummaryText.Text = _vm.ContinuousSummaryText;
         ContinuousSummaryText.Visibility = on || hasFeed ? Visibility.Visible : Visibility.Collapsed;
         ContinuousListScroll.Visibility = on || hasFeed ? Visibility.Visible : Visibility.Collapsed;

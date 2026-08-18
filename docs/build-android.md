@@ -60,7 +60,7 @@ EOF
 
 `ScanActivity` 启动自检在创建/销毁一个 receiver 之前，先调用
 `NativeBridge.nativeAbiVersion()` 并断言其 `>= NativeBridge.NATIVE_ABI_VERSION`
-（= `1`，对应 `AIRFERRY_NATIVE_ABI_VERSION`，描述支持 descriptor-v5 分段接收）。
+（= `2`，对应 `AIRFERRY_NATIVE_ABI_VERSION`，即 AF2 快照化 FFI 版本）。
 
 旧 `.so` 要么没有该符号（调用抛 `UnsatisfiedLinkError`）要么报更低版本——两种
 情况都会在加载相机前直接进入 `ErrorScreen`「原生库版本过旧」，而**不会**让
@@ -198,8 +198,7 @@ apps/scanner/
         │   │   ├── QrStreamAnalyzer.kt   # CameraX 分析器（生产者）
         │   │   ├── QrDecodePool.kt       # 并行解码池 + 串行 JNI 摄入
 │   │   ├── ReceiverSessionManager.kt
-│   │   ├── BundleParser.kt       # ETBUNDL1 多文件容器解析
-│   │   ├── TextParser.kt         # ETTEXTv1
+│   │   ├── ContentStore.kt       # 内容库存储（entries 索引 + blob 引用计数）
 │   │   ├── TextLike.kt           # 文本类扩展名启发式 + 严格 UTF-8
 │   │   └── FileNameUtil.kt       # 接收文件命名（去重 / 目录）
 │   └── ui/

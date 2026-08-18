@@ -1,37 +1,22 @@
-<ui:FluentWindow x:Class="AirFerry.Windows.Views.MainWindow"
-                 xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-                 xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-                 xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
-                 xmlns:ctrl="clr-namespace:AirFerry.Windows.Controls"
-                 Title="AirFerry"
-                 Width="780" Height="760"
-                 MinWidth="680" MinHeight="640"
-                 WindowStartupLocation="CenterScreen"
-                 ExtendsContentIntoTitleBar="True"
-                 WindowBackdropType="None"
-                 Icon="pack://application:,,,/Assets/app.ico">
-    <!-- WPF-UI 4.x: FluentWindow has no TitleBar property element; the TitleBar
-         is the first child of the window content. Below it, the Frame hosts the
-         page flow — Pages navigate via Page.NavigationService, which resolves
-         to this Frame. The journal chrome stays hidden; every page draws its
-         own back button. -->
-    <Grid>
-        <Grid.RowDefinitions>
-            <RowDefinition Height="Auto" />
-            <RowDefinition Height="*" />
-        </Grid.RowDefinitions>
-        <ui:TitleBar Grid.Row="0" Title="AirFerry">
-            <ui:TitleBar.Icon>
-                <!-- WPF-UI 4.3.0 has no built-in raster icon for the TitleBar
-                     (Symbol/Font glyphs only); Controls/ImageIcon.cs fills the
-                     gap with the AirFerry logo. -->
-                <ctrl:ImageIcon Source="pack://application:,,,/Assets/app.ico" />
-            </ui:TitleBar.Icon>
-        </ui:TitleBar>
-        <Frame Grid.Row="1"
-               x:Name="RootFrame"
-               Source="DeviceSelectView.xaml"
-               NavigationUIVisibility="Hidden"
-               JournalOwnership="OwnsJournal" />
-    </Grid>
-</ui:FluentWindow>
+<hc:Window x:Class="AirFerry.Windows.Views.MainWindow"
+           xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+           xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+           xmlns:hc="https://handyorg.github.io/handycontrol"
+           Title="AirFerry"
+           Width="780" Height="760"
+           MinWidth="680" MinHeight="640"
+           WindowStartupLocation="CenterScreen"
+           NonClientAreaHeight="36"
+           Icon="pack://application:,,,/Assets/app.ico">
+    <!-- hc:Window supplies the chrome: icon + title in the non-client area
+         (ShowIcon/ShowTitle default true) and min/max/close caption buttons
+         from its WindowWin10 template. Do NOT set WindowStyle=None or
+         AllowsTransparency — WindowChrome is applied internally. Below the
+         title bar, the Frame hosts the page flow — Pages navigate via
+         Page.NavigationService, which resolves to this Frame. The journal
+         chrome stays hidden; every page draws its own back button. -->
+    <Frame x:Name="RootFrame"
+           Source="DeviceSelectView.xaml"
+           NavigationUIVisibility="Hidden"
+           JournalOwnership="OwnsJournal" />
+</hc:Window>

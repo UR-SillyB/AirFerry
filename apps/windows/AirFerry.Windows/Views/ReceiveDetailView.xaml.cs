@@ -6,8 +6,8 @@ using AirFerry.Windows.Bundle;
 using AirFerry.Windows.Models;
 using AirFerry.Windows.Services;
 using AirFerry.Windows.ViewModels;
+using AirFerry.Windows.Controls;
 using Microsoft.Win32;
-using Wpf.Ui.Controls;
 
 namespace AirFerry.Windows.Views;
 
@@ -99,7 +99,7 @@ public partial class ReceiveDetailView : Page
             ScanViewModel.ArchiveSingleFile(src, displayName);
             // Inline confirmation on the button itself — a modal "已保存"
             // dialog interrupts the post-receive flow for no reason.
-            SaveButton.Content = "已保存 ✓";
+            SaveButton.Content = "已保存";
             SaveButton.IsEnabled = false;
         }
         catch (Exception ex)
@@ -127,7 +127,8 @@ public partial class ReceiveDetailView : Page
                 : "received_file";
             // Never expose the extensionless SHA-256 ContentStore blob. Explorer
             // receives a temporary copy carrying the logical filename instead.
-            string exported = ShareExport.ExportFile(src, displayName);
+            // The copy can be a full GB-scale file — keep it off the UI thread.
+            string exported = await Task.Run(() => ShareExport.ExportFile(src, displayName));
             var startInfo = new ProcessStartInfo("explorer.exe")
             {
                 UseShellExecute = true,

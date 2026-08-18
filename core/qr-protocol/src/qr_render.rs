@@ -212,31 +212,17 @@ mod tests {
     #[test]
     fn encodes_all_sender_symbol_sizes() {
         // Every symbol size the sender exposes as a speed preset must render at
-        // the expected minimal QR version/side. This guards the capacity table
-        // ↔ `fast_qr` version hand-off for the full preset range.
-        use crate::Frame;
+        // the expected minimal QR version/side. (AF2 wire frame adds 30 B overhead).
         // (symbol_size, expected_side)  — side = 21 + 4*(v-1)
         let cases: [(usize, usize); 5] = [
             (512, 81),   // V16
-            (896, 105),  // V22
+            (896, 101),  // V21 (926 B total, slimmed from v1's 960 B)
             (1008, 109), // V23
             (1024, 109), // V23
             (1400, 125), // V27
         ];
         for &(sym_size, expected_side) in &cases {
-            let frame = Frame::build(
-                0u128,
-                0,  // flags
-                1,  // sbn
-                1,  // esi
-                1,  // total_blocks
-                10, // total_symbols
-                sym_size as u32,
-                1,       // frame_index
-                1234567, // timestamp_ms
-                &vec![0u8; sym_size],
-            );
-            let bytes = frame.to_bytes();
+            let bytes = vec![0x42u8; sym_size + 30]; // AF2 wire frame total bytes
             let m = encode(&bytes).unwrap();
             assert_eq!(
                 m.size,

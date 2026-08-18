@@ -60,6 +60,17 @@ object ContentStore {
         val bundleTitle: String? = null,
     )
 
+    data class PutFileRequest(
+        val displayName: String,
+        val file: File,
+        val crcHex: String = "unknown",
+        val crcUnknown: Boolean = true,
+        val kind: String = "file",
+        val bundleId: String? = null,
+        val bundleTitle: String? = null,
+        val expectedSize: Long? = null,
+    )
+
     fun root(ctx: Context): File {
         val base = ctx.getExternalFilesDir(null) ?: ctx.filesDir
         return File(base, DIR_NAME).also { if (!it.exists()) it.mkdirs() }
@@ -135,7 +146,9 @@ object ContentStore {
             }
             val entry = Entry(
                 id = UUID.randomUUID().toString(),
-                name = FileNameUtil.sanitize(request.displayName).ifBlank { "received_file" },
+                name = if (request.bundleId != null)
+                    FileNameUtil.sanitizeRelativePath(request.displayName)
+                else FileNameUtil.sanitize(request.displayName).ifBlank { "received_file" },
                 hash = hash,
                 size = request.bytes.size.toLong(),
                 crcHex = request.crcHex,
@@ -149,6 +162,83 @@ object ContentStore {
             results.add(PutResult(entry, blob, deduped))
         }
         saveIndex(ctx, all)
+        return results
+    }
+
+    /**
+     * Archive a bundle of pre-staged files with ONE index write instead of a
+     * per-entry commit (which is both O(n²) in index rewrites and leaves a
+     * truncated bundle in history when entry k of n fails mid-loop).
+     *
+     * The index is only saved after every member has been hashed and moved
+     * into the blob tree, so a mid-batch failure leaves history untouched;
+     * blobs moved by the failed batch that no pre-existing entry references
+     * are deleted in the failure unwind (no orphan space leak, retry-safe).
+     * Callers own leftover staged files when the batch throws.
+     */
+    @Synchronized
+    fun putFileBatch(ctx: Context, requests: List<PutFileRequest>): List<PutResult> {
+        if (requests.isEmpty()) return emptyList()
+        val all = loadIndex(ctx).toMutableList()
+        val priorHashes = all.mapTo(HashSet()) { it.hash }
+        val results = ArrayList<PutResult>(requests.size)
+        val movedBlobs = ArrayList<File>()
+        val createdAt = System.currentTimeMillis()
+        try {
+            for (request in requests) {
+                val file = request.file
+                if (!file.isFile) throw java.io.FileNotFoundException(file.absolutePath)
+                val sourceLength = file.length()
+                require(request.expectedSize == null || sourceLength == request.expectedSize) {
+                    "staged file length differs from descriptor: ${file.name}"
+                }
+                val hash = sha256Hex(file)
+                val blob = blobPath(ctx, hash)
+                val deduped = blob.exists() && blob.length() == sourceLength &&
+                    try { sha256Hex(blob) == hash } catch (_: Exception) { false }
+                if (!deduped) {
+                    blob.parentFile?.mkdirs()
+                    moveFileAtomic(file, blob)
+                    movedBlobs.add(blob)
+                    if (!blob.isFile || blob.length() != sourceLength) {
+                        throw java.io.IOException("content blob length changed during publish")
+                    }
+                }
+                val entry = Entry(
+                    id = UUID.randomUUID().toString(),
+                    name = if (request.bundleId != null)
+                        FileNameUtil.sanitizeRelativePath(request.displayName)
+                    else FileNameUtil.sanitize(request.displayName).ifBlank { "received_file" },
+                    hash = hash,
+                    size = sourceLength,
+                    crcHex = request.crcHex,
+                    crcUnknown = request.crcUnknown,
+                    kind = request.kind,
+                    createdAt = createdAt,
+                    bundleId = request.bundleId,
+                    bundleTitle = request.bundleTitle,
+                )
+                all.add(entry)
+                results.add(PutResult(entry, blob, deduped))
+            }
+            saveIndex(ctx, all)
+        } catch (t: Throwable) {
+            // Pre-commit failure unwind: blobs moved by THIS batch that no
+            // pre-existing entry references are orphans — delete them so the
+            // failure leaks no space and the batch is retryable from scratch.
+            for (blob in movedBlobs) {
+                if (blob.name !in priorHashes) {
+                    try { blob.delete() } catch (_: Exception) {}
+                }
+            }
+            throw t
+        }
+        // Index publication is the commit point. Remove staged files that a
+        // dedupe hit left behind (the non-dedup path already moved them).
+        for (i in results.indices) {
+            val f = requests[i].file
+            if (f.isFile && f.canonicalPath != results[i].path.canonicalPath) f.delete()
+        }
         return results
     }
 
@@ -210,7 +300,9 @@ object ContentStore {
         }
         val entry = Entry(
             id = stableEntryId ?: UUID.randomUUID().toString(),
-            name = FileNameUtil.sanitize(displayName).ifBlank { "received_file" },
+            name = if (bundleId != null)
+                FileNameUtil.sanitizeRelativePath(displayName)
+            else FileNameUtil.sanitize(displayName).ifBlank { "received_file" },
             hash = hash,
             size = blob.length(),
             crcHex = crcHex,

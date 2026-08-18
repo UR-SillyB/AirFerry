@@ -15,22 +15,88 @@ namespace AirFerry.Windows.Views;
 public partial class DeviceSelectView : Page
 {
     private IReadOnlyList<ScanSourceOption> _sources = Array.Empty<ScanSourceOption>();
-    private readonly string? _resumeRootId;
+    private string? _continuousDir;
+    private bool _suppressToggleEvents;
 
-    public DeviceSelectView() : this(null)
+    public DeviceSelectView()
     {
+        InitializeComponent();
+        _continuousDir = AppSettings.ContinuousSaveDir;
+        _suppressToggleEvents = true;
+        ContinuousToggle.IsChecked = AppSettings.ContinuousOn;
+        _suppressToggleEvents = false;
+        UpdateContinuousUi();
+        Loaded += (_, _) => RefreshDevices();
     }
 
-    public DeviceSelectView(string? resumeRootId)
+    private void ContinuousToggle_Checked(object sender, RoutedEventArgs e)
     {
-        _resumeRootId = resumeRootId;
-        InitializeComponent();
-        if (_resumeRootId is not null)
+        if (_suppressToggleEvents)
         {
-            ResumeBar.Message = $"继续任务 {_resumeRootId[..8]}…：扫码时会忽略其他文件";
-            ResumeBar.Visibility = Visibility.Visible;
+            return;
         }
-        Loaded += (_, _) => RefreshDevices();
+        if (string.IsNullOrEmpty(_continuousDir))
+        {
+            string? dir = PickContinuousFolder();
+            if (dir is null)
+            {
+                // Cancelled the folder picker — revert the toggle without
+                // re-entering this handler.
+                _suppressToggleEvents = true;
+                ContinuousToggle.IsChecked = false;
+                _suppressToggleEvents = false;
+                return;
+            }
+            _continuousDir = dir;
+            AppSettings.SetContinuousSaveDir(dir);
+        }
+        AppSettings.SetContinuousOn(true);
+        UpdateContinuousUi();
+    }
+
+    private void ContinuousToggle_Unchecked(object sender, RoutedEventArgs e)
+    {
+        if (_suppressToggleEvents)
+        {
+            return;
+        }
+        AppSettings.SetContinuousOn(false);
+        UpdateContinuousUi();
+    }
+
+    private void ContinuousPick_Click(object sender, RoutedEventArgs e)
+    {
+        string? dir = PickContinuousFolder();
+        if (dir is null)
+        {
+            return;
+        }
+        _continuousDir = dir;
+        AppSettings.SetContinuousSaveDir(dir);
+        UpdateContinuousUi();
+    }
+
+    private string? PickContinuousFolder()
+    {
+        var dlg = new Microsoft.Win32.OpenFolderDialog
+        {
+            Title = "选择持续接收的保存文件夹",
+        };
+        if (!string.IsNullOrEmpty(_continuousDir) && System.IO.Directory.Exists(_continuousDir))
+        {
+            dlg.InitialDirectory = _continuousDir;
+        }
+        return dlg.ShowDialog() == true ? dlg.FolderName : null;
+    }
+
+    private void UpdateContinuousUi()
+    {
+        bool on = ContinuousToggle.IsChecked == true;
+        ContinuousDirText.Text = on && !string.IsNullOrEmpty(_continuousDir)
+            ? $"保存至 {_continuousDir}"
+            : string.Empty;
+        ContinuousDirText.Visibility = on ? Visibility.Visible : Visibility.Collapsed;
+        ContinuousPickButton.Visibility = on ? Visibility.Visible : Visibility.Collapsed;
     }
 
     private void RefreshDevices()
@@ -60,9 +126,7 @@ public partial class DeviceSelectView : Page
         }
         StartButton.IsEnabled = true;
         SelectedInfo.Text = $"已选择：{source.FriendlyName}";
-        StartButton.Content = source.IsScreenCapture
-            ? (_resumeRootId is null ? "选择屏幕并开始扫码" : "选择屏幕并继续恢复")
-            : (_resumeRootId is null ? "开始扫码" : "继续恢复");
+        StartButton.Content = source.IsScreenCapture ? "选择屏幕并开始扫码" : "开始扫码";
     }
 
     private async void StartScan_Click(object sender, RoutedEventArgs e)
@@ -75,6 +139,20 @@ public partial class DeviceSelectView : Page
         DeviceList.IsEnabled = false;
         try
         {
+            bool continuous = ContinuousToggle.IsChecked == true;
+            if (continuous && string.IsNullOrEmpty(_continuousDir))
+            {
+                // Checked but no folder picked yet (e.g. first ever run) —
+                // prompt now; cancelling aborts the start.
+                string? dir = PickContinuousFolder();
+                if (dir is null)
+                {
+                    return;
+                }
+                _continuousDir = dir;
+                AppSettings.SetContinuousSaveDir(dir);
+                UpdateContinuousUi();
+            }
             ScanSource? source = selected.IsScreenCapture
                 ? await RegionPicker.PickAsync()
                 : selected.CreateImmediateSource();
@@ -82,7 +160,8 @@ public partial class DeviceSelectView : Page
             {
                 return;
             }
-            NavigationService?.Navigate(new ScanView(source, _resumeRootId));
+            NavigationService?.Navigate(new ScanView(
+                source, continuous, _continuousDir));
         }
         catch (Exception ex)
         {

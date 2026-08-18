@@ -20,12 +20,12 @@
     "isolatedModules": true,
     "noEmit": true,
     "types": [
-      "chrome"
+      "chrome",
+      "node"
     ],
-    "baseUrl": ".",
     "paths": {
       "@/*": [
-        "../sender/src/*"
+        "./src/*"
       ],
       "@airferry-wasm/*": [
         "./wasm-pkg/*"
@@ -34,16 +34,15 @@
   },
   "include": [
     "src",
-    "../sender/src"
+    "vite.config.ts",
+    "vite.receiver.config.ts",
+    "vite.standalone.config.ts"
   ],
   "exclude": [
     "node_modules",
     "dist",
-    "wasm-pkg",
-    "../sender/wasm-pkg-legacy",
-    "../sender/wasm-pkg-simd",
-    "../sender/node_modules",
-    "../sender/build",
-    "../sender/.plasmo"
+    "dist-receiver",
+    "dist-standalone",
+    "build"
   ]
 }

@@ -15,13 +15,15 @@ object NativeBridge {
     /**
      * Native ABI / protocol capability version (see
      * `AIRFERRY_NATIVE_ABI_VERSION` in `core/transfer-engine/src/jni.rs`).
-     * The current library ships version `1` (descriptor-v5 segmented /
-     * large-file receive path). A stale `.so` either lacks this symbol
-     * (calling it throws `UnsatisfiedLinkError`) or reports an older version —
-     * either way the host must refuse to run instead of silently "staying
-     * synchronising" on >32 MiB transfers.
+     * - 1: legacy v1 (pre-AF2) segmented / large-file receive path.
+     * - 2: the 16 per-field receiver getters were replaced by the single
+     *   [receiverSnapshotJson] (`ReceiverSnapshotV2`).
+     * - 3: bounded-memory incremental §13 final verification.
+     * A stale `.so` either lacks this symbol (calling it throws
+     * `UnsatisfiedLinkError`) or reports an older version — either way the
+     * host must refuse to run instead of silently "staying synchronising".
      */
-    const val NATIVE_ABI_VERSION = 1
+    const val NATIVE_ABI_VERSION = 3
 
     /** Report the native ABI / protocol capability version. */
     external fun nativeAbiVersion(): Int
@@ -29,10 +31,7 @@ object NativeBridge {
     /** Create a receiver session. Returns an opaque pointer (Long). */
     external fun receiverCreate(
         sessionIdLo: Long,
-        sessionIdHi: Long,
-        totalBlocks: Int,
-        totalSymbols: Int,
-        symbolSize: Int
+        sessionIdHi: Long
     ): Long
 
     /**
@@ -52,6 +51,16 @@ object NativeBridge {
     external fun receiverProgressJson(handle: Long): ByteArray?
 
     external fun receiverIsComplete(handle: Long): Int
+
+    /**
+     * Single-JSON receiver snapshot (`ReceiverSnapshotV2`): every AF2
+     * snapshot field (name/sizes/CRC/codec, session id, manifest/chunk
+     * metadata) in ONE atomic call, replacing the former 16 per-field
+     * getters. Parse with `JSONObject`.
+     * Null only on a null handle / string failure.
+     */
+    external fun receiverSnapshotJson(handle: Long): String?
+
     /**
      * Recover the assembled file as a freshly-allocated `byte[]`, or an empty
      * array / null if not complete. Single atomic call (replaces the old
@@ -60,111 +69,45 @@ object NativeBridge {
      */
     external fun receiverAssembleBytes(handle: Long): ByteArray?
 
-    /** Non-empty when the last assemble failed after decode completed (e.g. decompress). */
-    external fun receiverLastAssembleError(handle: Long): String
+    /** Reassemble chunk `index` bytes. */
+    external fun receiverAssembleChunk(handle: Long, index: Int): ByteArray?
 
     /**
-     * Reassemble the transmitted bytes exactly as received (trimmed to
-     * `compressed_size`), **without** decompressing. For descriptor-v5
-     * compressed-stream segments this yields the segment's compressed bytes,
-     * which Kotlin concatenates and decompresses once after the whole set
-     * arrives. Empty byte[] when decoding is incomplete.
+     * Index of the chunk completed by the most recent ChunkReady frame, or -1.
+     * Pair with [receiverAssembleChunk] + [receiverForgetChunk] to persist
+     * chunks incrementally and keep native memory bounded by one chunk.
      */
-    external fun receiverAssembleRawBytes(handle: Long): ByteArray?
-
-    /** Compression-algorithm tag of the confirmed descriptor (0=None,1=Zstd,2=Xz). */
-    external fun receiverCompression(handle: Long): Int
-
-    /** This object's transmitted (compressed) payload length. */
-    external fun receiverCompressedSize(handle: Long): Long
-
-    /** Whole decompressed original size (same across segments of a root). */
-    external fun receiverOriginalSize(handle: Long): Long
+    external fun receiverLastChunkIndex(handle: Long): Int
 
     /**
-     * Decompress `data` according to `compression` (0=None,1=Zstd,2=Xz),
-     * bounded by `maxOutput`. Used to decompress the concatenated compressed
-     * stream of a segmented transfer exactly once. Empty byte[] on failure.
+     * Release a persisted chunk from native memory (eviction). Returns true
+     * when the chunk was resident. Completion tracking is unaffected.
      */
-    external fun decompressBytes(
-        data: ByteArray,
-        compression: Int,
-        maxOutput: Long
-    ): ByteArray?
+    external fun receiverForgetChunk(handle: Long, index: Int): Boolean
+
+    /** Verify a staged raw chunk against the ROOT-bound Manifest table (§11). */
+    external fun receiverVerifyChunk(handle: Long, index: Int, rawBytes: ByteArray): Boolean
+
+    /** Run §13 ⑧⑨ integrity chain over the reassembled canonical stream. */
+    external fun receiverVerifyFinalStream(handle: Long, streamBytes: ByteArray): Boolean
+
+    /** Begin bounded-memory §13 ⑧⑨ final verification. */
+    external fun receiverFinalVerifyBegin(handle: Long): Boolean
+
+    /** Feed the next contiguous canonical-stream block. */
+    external fun receiverFinalVerifyFeed(handle: Long, streamBytes: ByteArray): Boolean
+
+    /** Finish bounded-memory §13 ⑧⑨ final verification. */
+    external fun receiverFinalVerifyFinish(handle: Long): Boolean
+
+    /** Restore receiver from stored ROOT frame bytes + completed chunk indices (§12 resume). */
+    external fun receiverResume(handle: Long, rootFrameBytes: ByteArray, completedIndices: IntArray): Boolean
 
     /**
-     * Stream-decompress the concatenated compressed stream at `inputPath` to
-     * `outputPath` (zstd/xz streaming decoder) while computing CRC32 + SHA-256
-     * incrementally — neither input nor output is held wholly in memory, so very
-     * large files are recoverable in bounded RAM. Returns true only when the
-     * decompressed size, CRC32 (when [crcKnown]) and SHA-256 (`expectedShaHex`,
-     * lowercase hex) all match the descriptor; on any failure the partial
-     * output file is removed.
+     * Evict one chunk from both ledgers after a spill re-verification failure
+     * (§11/§12): the sender's next epoch re-supplies it.
      */
-    external fun decompressStreamToFile(
-        inputPath: String,
-        outputPath: String,
-        compression: Int,
-        maxOutput: Long,
-        expectedSize: Long,
-        expectedCrc: Long,
-        crcKnown: Boolean,
-        expectedShaHex: String
-    ): Boolean
+    external fun receiverInvalidateChunk(handle: Long, index: Int): Boolean
 
     external fun receiverDestroy(handle: Long)
-
-    // ---- File metadata (populated from descriptor frames) ----
-
-    /** Original filename (UTF-8), or empty if not yet received. */
-    external fun receiverFileName(handle: Long): String
-
-    /** Original file size in bytes, or 0 if not yet received. */
-    external fun receiverFileSize(handle: Long): Long
-
-    /**
-     * CRC32 of the original file as an unsigned 32-bit value carried in a
-     * `Long` (0..=0xFFFFFFFF), or 0 if not yet received. Returned as Long so
-     * the full unsigned range survives the JNI boundary (Kotlin `Int` is
-     * signed and would flip high-bit CRC values negative).
-     */
-    external fun receiverCrc32(handle: Long): Long
-
-    /**
-     * 1 if the descriptor supplied a real CRC32 the receiver should verify,
-     * 0 if the CRC is unknown (v1 descriptor / not yet received). Use this
-     * instead of `receiverCrc32() == 0L` to decide whether to verify: CRC32
-     * can legitimately be 0, and the old `== 0L` sentinel mislabelled such
-     * files as "unverified".
-     */
-    external fun receiverCrc32Known(handle: Long): Int
-
-    // ---- descriptor-v5 segment metadata (large-transfer child objects) ----
-
-    /** 1 if the confirmed descriptor was a v5 large-transfer child object. */
-    external fun receiverIsSegmented(handle: Long): Int
-
-    /** Zero-based index of this segment within the root transfer (0 if not segmented). */
-    external fun receiverSegmentIndex(handle: Long): Int
-
-    /** Total segment count of the root transfer (1 if not segmented). */
-    external fun receiverSegmentCount(handle: Long): Int
-
-    /** Root (whole-file) original size in bytes (0 if not segmented). */
-    external fun receiverRootOriginalSize(handle: Long): Long
-
-    /** Original (uncompressed) offset of this segment in the root file (0 if not segmented). */
-    external fun receiverOriginalOffset(handle: Long): Long
-
-    /** Root session id low 64 bits (whole transfer id), or 0 if not segmented. */
-    external fun receiverRootSessionIdLo(handle: Long): Long
-
-    /** Root session id high 64 bits, or 0 if not segmented. */
-    external fun receiverRootSessionIdHi(handle: Long): Long
-
-    /** SHA-256 (raw 32 bytes) of this segment's uncompressed bytes, or null if not segmented. */
-    external fun receiverRawSha256(handle: Long): ByteArray?
-
-    /** SHA-256 (raw 32 bytes) of the complete root file, or null if not segmented. */
-    external fun receiverRootSha256(handle: Long): ByteArray?
 }

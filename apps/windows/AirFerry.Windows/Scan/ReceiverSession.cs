@@ -1,3 +1,4 @@
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
 using AirFerry.Windows.Native;
@@ -6,24 +7,15 @@ namespace AirFerry.Windows.Scan;
 
 /// <summary>
 /// High-level receiver session manager — the Windows equivalent of Android's
-/// <c>ReceiverSessionManager.kt</c>. Wraps the Rust C ABI and drives the same
-/// state machine: lazy-init from the first descriptor frame, then a forced
-/// re-init if the session-mismatch streak climbs without ever accepting a
-/// symbol.
+/// <c>ReceiverSessionManager.kt</c>. Frames pass straight through to the Rust
+/// C-ABI receiver, which owns the entire AF2 state machine (frame validation,
+/// ROOT lock / 3-ROOT debounce re-lock, object routing, OTI integrity).
 /// </summary>
 /// <remarks>
 /// <para>
-/// The native receiver is <b>only</b> initialized from a descriptor frame
-/// (<see cref="FrameHeader.FlagDescriptor"/>). Ordinary data frames are
-/// silently dropped until a descriptor arrives. This prevents a corrupted
-/// first QR decode (which only passes magic+version but may carry a garbage
-/// session_id) from permanently locking out every subsequent correct frame.
-/// </para>
-/// <para>
-/// Once initialized, a persistent session-mismatch streak with zero accepted
-/// symbols triggers a forced re-init from the next descriptor that arrives —
-/// covering the edge-case where the first descriptor itself was corrupted but
-/// a later one is clean.
+/// No wire-format parsing happens on the C# side (SPEC §9: hosts must not
+/// mirror the wire protocol). The packed <see cref="IngestStatus"/> word and
+/// the snapshot JSON are the only native surfaces consumed here.
 /// </para>
 /// <para>
 /// Every access to the native handle is serialized by this wrapper. Callers may
@@ -35,91 +27,178 @@ public sealed class ReceiverSession : IDisposable
 {
     private readonly object _gate = new();
     private IntPtr _handle = IntPtr.Zero;
-    private ulong _sessionIdLo;
-    private ulong _sessionIdHi;
-    private uint _symbolSize;
     private bool _initialized;
-    private int _estimatedTotalSymbols;
-    private int _mismatchStreak;
-    private bool _everAccepted;
+    private bool _destroyed;
+    private Snapshot? _cachedSnapshot;
 
     public bool IsInitialized { get { lock (_gate) return _initialized; } }
-    public int EstimatedTotalSymbols { get { lock (_gate) return _estimatedTotalSymbols; } }
-    public uint SymbolSizeBytes { get { lock (_gate) return _symbolSize; } }
+    /// <summary>Estimated total symbols from the locked transfer (0 before ROOT).</summary>
+    public int EstimatedTotalSymbols
+    {
+        get
+        {
+            var snap = GetSnapshot();
+            if (!snap.MetaConfirmed || snap.SymbolSize == 0) return 0;
+            return (int)Math.Min(int.MaxValue,
+                (snap.TotalRawSize + snap.SymbolSize - 1) / snap.SymbolSize);
+        }
+    }
+
+    /// <summary>Begin bounded-memory §13 ⑧⑨ final verification.</summary>
+    public bool FinalVerifyBegin()
+    {
+        lock (_gate)
+        {
+            return _initialized && _handle != IntPtr.Zero &&
+                NativeBridge.ReceiverFinalVerifyBegin(_handle) == 1;
+        }
+    }
+
+    /// <summary>Feed the next contiguous canonical-stream block.</summary>
+    public bool FinalVerifyFeed(byte[] streamBytes)
+    {
+        lock (_gate)
+        {
+            if (!_initialized || _handle == IntPtr.Zero || streamBytes is null)
+            {
+                return false;
+            }
+            return NativeBridge.ReceiverFinalVerifyFeed(
+                _handle, streamBytes, (nuint)streamBytes.Length) == 1;
+        }
+    }
+
+    /// <summary>Finish bounded-memory §13 ⑧⑨ final verification.</summary>
+    public bool FinalVerifyFinish()
+    {
+        lock (_gate)
+        {
+            return _initialized && _handle != IntPtr.Zero &&
+                NativeBridge.ReceiverFinalVerifyFinish(_handle) == 1;
+        }
+    }
+    /// <summary>Wire symbol size T reported by Rust (0 before lock).</summary>
+    public uint SymbolSizeBytes { get { var snap = GetSnapshot(); return snap.SymbolSize; } }
 
     /// <summary>
-    /// Ingest a decoded QR payload. Returns a lightweight
-    /// <see cref="IngestStatus"/> (no JSON) so the hot ingest path doesn't
-    /// allocate/parse a string per frame; call <see cref="Progress"/> on the
-    /// UI refresh cadence for the full snapshot.
+    /// Ingest a decoded QR payload. Direct passthrough to the native AF2 receiver
+    /// engine, which holds the single source-of-truth state machine (frame validation,
+    /// 3-ROOT debounce, object routing, and OTI integrity).
     /// </summary>
     public IngestStatus? Ingest(byte[] frameBytes)
     {
         lock (_gate)
         {
-        FrameHeader? header = FrameHeader.Parse(frameBytes);
-        if (header is null)
-        {
-            return null;
-        }
-        FrameHeader h = header.Value;
-
-        // Cache estimated total symbols from the first frame for approximate
-        // UI progress before the descriptor arrives.
-        if (_estimatedTotalSymbols == 0 && h.TotalSymbols > 0)
-        {
-            _estimatedTotalSymbols = (int)h.TotalSymbols;
-        }
-
-        bool isDescriptor = h.IsDescriptor;
-
-        // --- Lazy init: only from descriptor frames ---
-        // Until a descriptor arrives the authoritative OTI is unknown; feeding
-        // data frames to a guessed decoder (the old path) corrupted multi-block
-        // recovery. Drop them silently and wait.
-        if (!_initialized)
-        {
-            if (!isDescriptor)
-            {
-                return null; // wait for a descriptor
-            }
-            CreateReceiver(h);
-            if (!_initialized)
+            if (frameBytes is null || frameBytes.Length == 0)
             {
                 return null;
             }
-        }
 
-        // --- Session-mismatch re-init ---
-        // If the streak is high and we never accepted anything, the first
-        // descriptor was likely corrupt → destroy and re-init on the next
-        // descriptor (the next Ingest call re-enters the lazy-init block above).
-        if (_initialized && !isDescriptor && _mismatchStreak >= 3 && !_everAccepted)
-        {
-            Destroy();
-            return null;
-        }
+            // A destroyed session must not silently re-create a native receiver
+            // nobody owns (leak) — a straggler decode flush after teardown used
+            // to hit this.
+            if (_destroyed)
+            {
+                return null;
+            }
 
-        ulong word = NativeBridge.ReceiverIngest(_handle, frameBytes, (nuint)frameBytes.Length);
-        IngestStatus? status = IngestStatus.Unpack(word);
-        if (status is null)
-        {
-            return null; // error sentinel: rejected frame, nothing to do.
-        }
-        IngestStatus s = status.Value;
+            if (!_initialized)
+            {
+                CreateReceiver();
+                if (!_initialized)
+                {
+                    return null;
+                }
+            }
 
-        // Track mismatch streak for the re-init heuristic above.
-        if (s.MismatchStreak >= 3)
-        {
-            _mismatchStreak = s.MismatchStreak;
-        }
-        else if (s.Accepted)
-        {
-            _everAccepted = true;
-            _mismatchStreak = 0;
-        }
+            ulong word = NativeBridge.ReceiverIngest(_handle, frameBytes, (nuint)frameBytes.Length);
+            IngestStatus? status = IngestStatus.Unpack(word);
+            if (status is null)
+            {
+                return null; // error sentinel: rejected frame, nothing to do.
+            }
+            IngestStatus s = status.Value;
 
-        return s;
+            if (s.Relocked)
+            {
+                // A foreign transfer owns the session: clear the stale snapshot
+                // cache. (Never infer this from Accepted && ReceivedSymbols == 0
+                // — that signature also matches the first accepted META of a
+                // §12-resumed session.)
+                _cachedSnapshot = null;
+            }
+
+            return s;
+        }
+    }
+
+    private void CreateReceiver()
+    {
+        _handle = NativeBridge.ReceiverCreate(0, 0);
+        _initialized = _handle != IntPtr.Zero;
+        _cachedSnapshot = null;
+    }
+
+    /// <summary>Verify a staged raw chunk against the ROOT-bound Manifest table (§11).</summary>
+    public bool VerifyChunk(uint index, byte[] rawBytes)
+    {
+        lock (_gate)
+        {
+            if (!_initialized || _handle == IntPtr.Zero || rawBytes is null)
+            {
+                return false;
+            }
+            return NativeBridge.ReceiverVerifyChunk(_handle, index, rawBytes, (nuint)rawBytes.Length) == 1;
+        }
+    }
+
+    /// <summary>Run §13 ⑧⑨ integrity chain over the reassembled canonical stream.</summary>
+    public bool VerifyFinalStream(byte[] streamBytes)
+    {
+        lock (_gate)
+        {
+            if (!_initialized || _handle == IntPtr.Zero || streamBytes is null)
+            {
+                return false;
+            }
+            return NativeBridge.ReceiverVerifyFinalStream(_handle, streamBytes, (nuint)streamBytes.Length) == 1;
+        }
+    }
+
+    /// <summary>
+    /// Evict one chunk from both ledgers after a spill re-verification
+    /// failure (§11/§12): the sender's next epoch re-supplies it.
+    /// </summary>
+    public bool InvalidateChunk(uint index)
+    {
+        lock (_gate)
+        {
+            if (!_initialized || _handle == IntPtr.Zero)
+            {
+                return false;
+            }
+            return NativeBridge.ReceiverInvalidateChunk(_handle, index) == 1;
+        }
+    }
+
+    /// <summary>Restore session from stored ROOT frame bytes + completed chunk indices (§12 resume).</summary>
+    public bool Resume(byte[] rootFrameBytes, uint[] completedIndices)
+    {
+        lock (_gate)
+        {
+            if (_destroyed)
+            {
+                return false;
+            }
+            if (!_initialized)
+            {
+                CreateReceiver();
+            }
+            if (!_initialized || _handle == IntPtr.Zero || rootFrameBytes is null || completedIndices is null)
+            {
+                return false;
+            }
+            return NativeBridge.ReceiverResume(_handle, rootFrameBytes, (nuint)rootFrameBytes.Length, completedIndices, (nuint)completedIndices.Length) == 1;
         }
     }
 
@@ -175,110 +254,156 @@ public sealed class ReceiverSession : IDisposable
         }
     }
 
-    /// <summary>Original filename from the descriptor, or empty.</summary>
+    // ── AF2 snapshot (ReceiverSnapshotV2) ────────────────────────────────────
+    //
+    // The former 16 per-field P/Invoke getters were folded into ONE
+    // `airferry_receiver_snapshot_json` call (native ABI v2). The public
+    // per-field methods below keep their shapes so callers are unchanged, but
+    // read a cached snapshot: snapshot fields are immutable once
+    // `meta_confirmed` is true, so the cache refreshes only until confirmation
+    // and freezes afterwards — one P/Invoke + one JSON parse per session
+    // instead of 16 per UI refresh.
+
+    /// <summary>Parsed <c>ReceiverSnapshotV2</c> fields.</summary>
+    public sealed class Snapshot
+    {
+        public bool MetaConfirmed;
+        public string TransferIdHex = "";
+        public string ContentIdHex = "";
+        public ulong TotalRawSize;
+        public uint EntryCount;
+        public uint ChunkCount;
+        public uint ChunkRawSize;
+        public uint SymbolSize;
+        public IReadOnlyList<ManifestEntryDto> Entries = Array.Empty<ManifestEntryDto>();
+        /// <summary>v1-magic frames rejected so far; &gt; 0 ⇒ the peer runs protocol 1.</summary>
+        public uint LegacyPeerFrames;
+        /// <summary>Canonical ROOT frame bytes (for the §12 resume ledger).</summary>
+        public byte[] RootFrameBytes = Array.Empty<byte>();
+    }
+
+    /// <summary>One AF2 Manifest entry (kind/path/savePath/offset/size).</summary>
+    public sealed record ManifestEntryDto(int Kind, string Path, string SavePath, ulong Offset, ulong Size);
+
+    /// <summary>Current snapshot (cached once the manifest has entries).</summary>
+    public Snapshot GetSnapshot()
+    {
+        lock (_gate)
+        {
+            if (!_initialized)
+            {
+                return new Snapshot();
+            }
+            // Freeze only once the Manifest is decoded. `meta_confirmed` in
+            // the AF2 snapshot merely means the ROOT locked — freezing there
+            // (a v1-era refactor) pins Entries = [] for the whole session and
+            // staging falls back to one nameless concatenated file.
+            if (_cachedSnapshot is { MetaConfirmed: true, Entries.Count: > 0 } cached)
+            {
+                return cached;
+            }
+            IntPtr ptr = NativeBridge.ReceiverSnapshotJson(_handle);
+            if (ptr == IntPtr.Zero)
+            {
+                return _cachedSnapshot ?? new Snapshot();
+            }
+            try
+            {
+                string json = Marshal.PtrToStringUTF8(ptr) ?? "";
+                using var doc = System.Text.Json.JsonDocument.Parse(
+                    json, new System.Text.Json.JsonDocumentOptions { AllowTrailingCommas = true });
+                var root = doc.RootElement;
+                var snap = new Snapshot
+                {
+                    MetaConfirmed = root.TryGetProperty("meta_confirmed", out var mc) && mc.GetBoolean(),
+                    TransferIdHex = root.TryGetProperty("transfer_id_hex", out var tid) ? tid.GetString() ?? "" : "",
+                    ContentIdHex = root.TryGetProperty("content_id_hex", out var cid) ? cid.GetString() ?? "" : "",
+                    TotalRawSize = root.TryGetProperty("total_raw_size", out var trs) ? trs.GetUInt64() : 0UL,
+                    EntryCount = root.TryGetProperty("entry_count", out var ec) ? (uint)ec.GetUInt64() : 0u,
+                    ChunkCount = root.TryGetProperty("chunk_count", out var cc) ? (uint)cc.GetUInt64() : 0u,
+                    ChunkRawSize = root.TryGetProperty("chunk_raw_size", out var crs) ? (uint)crs.GetUInt64() : 0u,
+                    SymbolSize = root.TryGetProperty("symbol_size", out var ss) ? (uint)ss.GetUInt64() : 0u,
+                    LegacyPeerFrames = root.TryGetProperty("legacy_peer_frames", out var lpf) ? (uint)lpf.GetUInt64() : 0u,
+                    RootFrameBytes = root.TryGetProperty("root_frame_hex", out var rfh)
+                        ? HexToBytes(rfh.GetString() ?? "") : Array.Empty<byte>(),
+                };
+                if (root.TryGetProperty("entries", out var entriesEl) &&
+                    entriesEl.ValueKind == System.Text.Json.JsonValueKind.Array)
+                {
+                    var list = new List<ManifestEntryDto>(entriesEl.GetArrayLength());
+                    foreach (var e in entriesEl.EnumerateArray())
+                    {
+                        var path = e.TryGetProperty("path", out var p) ? p.GetString() ?? "" : "";
+                        list.Add(new ManifestEntryDto(
+                            e.TryGetProperty("kind", out var k) ? k.GetInt32() : 1,
+                            path,
+                            // §7.2 save-time sanitized name (may equal path).
+                            e.TryGetProperty("save_path", out var sp) ? sp.GetString() ?? path : path,
+                            e.TryGetProperty("offset", out var o) ? o.GetUInt64() : 0UL,
+                            e.TryGetProperty("size", out var s) ? s.GetUInt64() : 0UL));
+                    }
+                    snap.Entries = list;
+                }
+                _cachedSnapshot = snap;
+                return snap;
+            }
+            catch (System.Text.Json.JsonException)
+            {
+                return _cachedSnapshot ?? new Snapshot();
+            }
+            finally
+            {
+                NativeBridge.FreeString(ptr);
+            }
+        }
+    }
+
+    private static byte[] HexToBytes(string s)
+    {
+        if (s.Length == 0 || s.Length % 2 != 0)
+        {
+            return Array.Empty<byte>();
+        }
+        var b = new byte[s.Length / 2];
+        for (int i = 0; i < b.Length; i++)
+        {
+            b[i] = Convert.ToByte(s.Substring(i * 2, 2), 16);
+        }
+        return b;
+    }
+
     public string FileName()
     {
-        lock (_gate)
-        {
-        if (!_initialized)
-        {
-            return string.Empty;
-        }
-        return ReadCString(NativeBridge.ReceiverFileName);
-        }
+        var snap = GetSnapshot();
+        var nonDir = snap.Entries.Where(e => e.Kind != 3).ToList();
+        if (nonDir.Count == 1) return nonDir[0].Path;
+        if (nonDir.Count > 1) return $"多文件传输包 ({nonDir.Count} 项)";
+        if (snap.EntryCount > 1) return $"多文件传输包 ({snap.EntryCount} 项)";
+        return "文件传输";
     }
+    public ulong FileSize() => GetSnapshot().TotalRawSize;
+    public bool IsSegmented() => GetSnapshot().ChunkCount > 1;
+    public uint SegmentIndex() => 0u;
+    public uint SegmentCount() => Math.Max(GetSnapshot().ChunkCount, 1u);
+    public ulong RootOriginalSize() => GetSnapshot().TotalRawSize;
 
-    /// <summary>Original file size, or 0.</summary>
-    public ulong FileSize()
-    {
-        lock (_gate) return _initialized ? NativeBridge.ReceiverFileSize(_handle) : 0UL;
-    }
-
-    /// <summary>Expected CRC32 (unsigned 32-bit in a ulong), or 0.</summary>
-    public ulong Crc32()
-    {
-        lock (_gate) return _initialized ? NativeBridge.ReceiverCrc32(_handle) : 0UL;
-    }
-
-    /// <summary>
-    /// True if the descriptor supplied a real CRC32 (so the receiver should
-    /// verify it). Use this — NOT <c>Crc32() == 0</c> — to decide whether to
-    /// verify: CRC32 can legitimately be 0.
-    /// </summary>
-    public bool Crc32Known()
-    {
-        lock (_gate) return _initialized && NativeBridge.ReceiverCrc32Known(_handle) == 1;
-    }
-
-    // ── descriptor-v5 segment metadata (large-transfer child objects) ───────
-
-    /// <summary>1 if the confirmed descriptor was a v5 large-transfer child object.</summary>
-    public bool IsSegmented()
-    {
-        lock (_gate) return _initialized && NativeBridge.ReceiverIsSegmented(_handle) == 1;
-    }
-
-    /// <summary>Zero-based index of this segment within the root transfer (0 if not segmented).</summary>
-    public uint SegmentIndex()
-    {
-        lock (_gate) return _initialized ? NativeBridge.ReceiverSegmentIndex(_handle) : 0u;
-    }
-
-    /// <summary>Total segment count of the root transfer (1 if not segmented).</summary>
-    public uint SegmentCount()
-    {
-        lock (_gate) return _initialized ? NativeBridge.ReceiverSegmentCount(_handle) : 1u;
-    }
-
-    /// <summary>Root (whole-file) original size in bytes (0 if not segmented).</summary>
-    public ulong RootOriginalSize()
-    {
-        lock (_gate) return _initialized ? NativeBridge.ReceiverRootOriginalSize(_handle) : 0UL;
-    }
-
-    /// <summary>Original (uncompressed) offset of this segment in the root file (0 if not segmented).</summary>
-    public ulong OriginalOffset()
-    {
-        lock (_gate) return _initialized ? NativeBridge.ReceiverOriginalOffset(_handle) : 0UL;
-    }
-
-    /// <summary>Root session id low 64 bits (whole transfer id), or 0 if not segmented.</summary>
-    public ulong RootSessionIdLo()
-    {
-        lock (_gate) return _initialized ? NativeBridge.ReceiverRootSessionIdLo(_handle) : 0UL;
-    }
-
-    /// <summary>Root session id high 64 bits, or 0 if not segmented.</summary>
-    public ulong RootSessionIdHi()
-    {
-        lock (_gate) return _initialized ? NativeBridge.ReceiverRootSessionIdHi(_handle) : 0UL;
-    }
-
-    /// <summary>32-byte SHA-256 of this segment's uncompressed bytes, or empty if not segmented.</summary>
-    public byte[] RawSha256()
+    public byte[]? AssembleChunk(uint index)
     {
         lock (_gate)
         {
-            if (!_initialized) return Array.Empty<byte>();
-            var len = NativeBridge.ReceiverRawSha256(_handle, null, 0);
-            if (len == 0) return Array.Empty<byte>();
-            var buf = new byte[len];
-            NativeBridge.ReceiverRawSha256(_handle, buf, len);
-            return buf;
-        }
-    }
-
-    /// <summary>32-byte SHA-256 of the complete root file, or empty if not segmented.</summary>
-    public byte[] RootSha256()
-    {
-        lock (_gate)
-        {
-            if (!_initialized) return Array.Empty<byte>();
-            var len = NativeBridge.ReceiverRootSha256(_handle, null, 0);
-            if (len == 0) return Array.Empty<byte>();
-            var buf = new byte[len];
-            NativeBridge.ReceiverRootSha256(_handle, buf, len);
-            return buf;
+            if (!_initialized) return null;
+            int ok = NativeBridge.ReceiverAssembleChunk(_handle, index, out IntPtr buf, out nuint len);
+            if (ok == 0 || buf == IntPtr.Zero || len == 0) return null;
+            try
+            {
+                byte[] data = new byte[(int)len];
+                Marshal.Copy(buf, data, 0, (int)len);
+                return data;
+            }
+            finally
+            {
+                NativeBridge.BufferFree(buf, len);
+            }
         }
     }
 
@@ -296,56 +421,15 @@ public sealed class ReceiverSession : IDisposable
     {
         lock (_gate)
         {
-        if (!_initialized)
-        {
-            return null;
-        }
-        int ok = NativeBridge.ReceiverAssemble(_handle, out IntPtr buf, out nuint len);
-        if (ok == 0 || buf == IntPtr.Zero || len == 0)
-        {
-            return null;
-        }
-        if (len > int.MaxValue)
-        {
-            NativeBridge.BufferFree(buf, len);
-            return null;
-        }
-        try
-        {
-            // Copy the whole recovered object (may include trailing zero pad).
-            byte[] all = new byte[(int)len];
-            Marshal.Copy(buf, all, 0, (int)len);
-            ulong original = NativeBridge.ReceiverFileSize(_handle);
-            // Trim zero-padding back to the true length. If the descriptor
-            // didn't carry a size (0), keep the whole recovered buffer.
-            int truncLen = original > 0 && original <= len
-                ? (int)original : (int)len;
-            if (truncLen == all.Length)
+            if (!_initialized)
             {
-                return all;
+                return null;
             }
-            Array.Resize(ref all, truncLen);
-            return all;
-        }
-        finally
-        {
-            // Always release the Rust allocation, even on exception.
-            NativeBridge.BufferFree(buf, len);
-        }
-        }
-    }
-
-    /// <summary>
-    /// Reassemble this segment's transmitted (compressed) bytes as received,
-    /// without decompression. Returns the raw bytes, or null when incomplete.
-    /// </summary>
-    public byte[]? AssembleRaw()
-    {
-        lock (_gate)
-        {
-            if (!_initialized) return null;
-            int ok = NativeBridge.ReceiverAssembleRaw(_handle, out IntPtr buf, out nuint len);
-            if (ok == 0 || buf == IntPtr.Zero || len == 0) return null;
+            int ok = NativeBridge.ReceiverAssemble(_handle, out IntPtr buf, out nuint len);
+            if (ok == 0 || buf == IntPtr.Zero || len == 0)
+            {
+                return null;
+            }
             if (len > int.MaxValue)
             {
                 NativeBridge.BufferFree(buf, len);
@@ -364,79 +448,70 @@ public sealed class ReceiverSession : IDisposable
         }
     }
 
-    /// <summary>Compression-algorithm tag of the confirmed descriptor.</summary>
-    public byte Compression()
-    {
-        lock (_gate) return _initialized ? NativeBridge.ReceiverCompression(_handle) : (byte)0;
-    }
+    /// <summary>
+    /// AF2 carries no whole-stream CRC32 on the wire (integrity is BLAKE3
+    /// per chunk / manifest), so this is always "unknown" — kept for the
+    /// recovery pipeline's v1-shaped AssembledPayload contract.
+    /// </summary>
+    public ulong Crc32() => 0UL;
 
-    /// <summary>This object's transmitted (compressed) payload length.</summary>
-    public ulong CompressedSize()
-    {
-        lock (_gate) return _initialized ? NativeBridge.ReceiverCompressedSize(_handle) : 0UL;
-    }
+    /// <summary>See <see cref="Crc32"/> — always false under AF2.</summary>
+    public bool Crc32Known() => false;
 
-    /// <summary>Whole decompressed original size (same across segments of a root).</summary>
-    public ulong OriginalSize()
-    {
-        lock (_gate) return _initialized ? NativeBridge.ReceiverOriginalSize(_handle) : 0UL;
-    }
-
-    /// <summary>Session id as a lowercase hex string (high||low, 32 chars).</summary>
-    public string SessionIdHex()
+    /// <summary>
+    /// Index of the chunk completed by the most recent ChunkReady frame, or -1.
+    /// </summary>
+    public int LastChunkIndex()
     {
         lock (_gate)
         {
-            string lo = _sessionIdLo.ToString("x16");
-            string hi = _sessionIdHi.ToString("x16");
-            return hi + lo;
+            if (!_initialized || _handle == IntPtr.Zero) return -1;
+            return NativeBridge.ReceiverLastChunkIndex(_handle);
         }
     }
 
-    /// <summary>Create (or re-create) the native receiver from a parsed header.</summary>
-    private void CreateReceiver(FrameHeader h)
+    /// <summary>Release a persisted chunk from native memory (eviction).</summary>
+    public bool ForgetChunk(uint index)
     {
-        _sessionIdLo = h.SessionIdLo;
-        _sessionIdHi = h.SessionIdHi;
-        _symbolSize = h.SymbolSize > 0 ? h.SymbolSize : 1024;
-        _handle = NativeBridge.ReceiverCreate(_sessionIdLo, _sessionIdHi);
-        _initialized = _handle != IntPtr.Zero;
-        _mismatchStreak = 0;
-        _everAccepted = false;
+        lock (_gate)
+        {
+            if (!_initialized || _handle == IntPtr.Zero) return false;
+            return NativeBridge.ReceiverForgetChunk(_handle, index) != 0;
+        }
     }
 
     /// <summary>
-    /// Shared helper for the two-pass length protocol used by
-    /// <c>ReceiverFileName</c> / <c>ReceiverProgressJson</c>.
+    /// Drain the chunk completed by the frame just ingested: hand it to
+    /// <paramref name="sink"/> and evict it from native memory (bounded-memory
+    /// ledger). Call on the ingest thread right after Ingest reported
+    /// ChunkReady. The gate Monitor is reentrant, so the nested
+    /// snapshot/chunk calls under the same gate are safe.
     /// </summary>
-    private delegate nuint StringReader(IntPtr handle, byte[]? buf, nuint cap);
-
-    private string ReadCString(StringReader reader)
+    public void DrainLastChunk(Action<int, int, byte[]> sink)
     {
-        nuint needed = reader(_handle, null, 0);
-        if (needed == 0)
-        {
-            return string.Empty;
-        }
-        if (needed > int.MaxValue)
-        {
-            return string.Empty;
-        }
-        byte[] buf = new byte[(int)needed];
-        nuint written = reader(_handle, buf, (nuint)buf.Length);
-        if (written == 0)
-        {
-            return string.Empty;
-        }
-        // The buffer is NUL-terminated; the last byte is the NUL.
-        int len = (int)written - 1;
-        return len > 0 ? Encoding.UTF8.GetString(buf, 0, len) : string.Empty;
+        int index = LastChunkIndex();
+        if (index < 0) return;
+        byte[]? bytes = AssembleChunk((uint)index);
+        if (bytes is null) return;
+        int chunkRawSize = unchecked((int)GetSnapshot().ChunkRawSize);
+        sink(index, chunkRawSize, bytes);
+        ForgetChunk((uint)index);
     }
+
+    /// <summary>This object's transmitted payload length.</summary>
+    public ulong CompressedSize() => GetSnapshot().TotalRawSize;
+
+    /// <summary>Whole decompressed original size.</summary>
+    public ulong OriginalSize() => GetSnapshot().TotalRawSize;
+
+    /// <summary>Transfer id as a lowercase hex string ("" before ROOT lock).</summary>
+    public string SessionIdHex() => GetSnapshot().TransferIdHex;
 
     public void Destroy()
     {
         lock (_gate)
         {
+        _destroyed = true;
         if (_initialized && _handle != IntPtr.Zero)
         {
             NativeBridge.ReceiverDestroy(_handle);

@@ -4,8 +4,8 @@ using System.Windows;
 using System.Windows.Controls;
 using AirFerry.Windows.Models;
 using AirFerry.Windows.Services;
+using AirFerry.Windows.Controls;
 using Microsoft.Win32;
-using Wpf.Ui.Controls;
 
 namespace AirFerry.Windows.Views;
 
@@ -87,7 +87,7 @@ public partial class ReceiveTextView : Page
             File.WriteAllText(dlg.FileName, _result.Text ?? "", new UTF8Encoding(false));
             // Inline confirmation on the button itself — a modal "已保存"
             // dialog interrupts the post-receive flow for no reason.
-            SaveButton.Content = "已保存 ✓";
+            SaveButton.Content = "已保存";
             SaveButton.IsEnabled = false;
         }
         catch (Exception ex)

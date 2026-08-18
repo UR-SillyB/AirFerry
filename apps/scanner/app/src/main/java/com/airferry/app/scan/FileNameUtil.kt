@@ -42,13 +42,38 @@ object FileNameUtil {
         // can't smuggle directory separators / traversal through; then strip
         // illegal chars and leading dots.
         val base = name.substringAfterLast('/').substringAfterLast('\\')
-        val cleaned = base
+        val stripped = base
             .replace(Regex("[/\\\\:*?\"<>|\\p{Cntrl}]"), "_")
             .trim()
-            .takeLast(200)
+        // Truncate to 200 chars, but never split a UTF-16 surrogate pair at
+        // the cut: an orphan low surrogate would land on disk / in share
+        // intents as U+FFFD (mirrors FileNameUtil.cs on Windows).
+        val cleaned = if (stripped.length > 200) {
+            var start = stripped.length - 200
+            if (Character.isLowSurrogate(stripped[start])) start += 1
+            stripped.substring(start)
+        } else {
+            stripped
+        }
+        return cleaned
             .trim()
             .trimStart('.')
-        return cleaned.ifBlank { "received_file" }
+            .ifBlank { "received_file" }
+    }
+
+    /**
+     * Sanitize a logical bundle-relative path while preserving its directory
+     * hierarchy. Each component is independently reduced with [sanitize], so
+     * traversal (`.`/`..`), separators inside a component and control chars
+     * can never escape the logical bundle root.
+     */
+    fun sanitizeRelativePath(path: String): String {
+        val parts = path
+            .replace('\\', '/')
+            .split('/')
+            .filter { it.isNotBlank() && it != "." && it != ".." }
+            .map(::sanitize)
+        return if (parts.isEmpty()) "received_file" else parts.joinToString("/")
     }
 
     /**

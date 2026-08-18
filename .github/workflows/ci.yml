@@ -1,0 +1,236 @@
+# 全端 CI：PR 与 main push 全跑，四端矩阵任一红即阻断合并。
+#
+# 这是 todo/v2版本升级计划.md 阶段 B5 的执行载体：先覆盖现状构建，
+# 后续阶段（C/D/E）把 AF2 fixture 与新构建目标增量挂入本矩阵。
+#
+# 分工：
+#   rust    — cargo test（default + cffi + jni feature）+ clippy -D warnings
+#             + wasm32 目标编译检查 + golden vectors（含在 cargo test 内）
+#   web     — emsdk 3.1.64 固定 + FAST ZXing 构建 + typecheck/全构建
+#             （扩展 4 目标 + web 发送端/接收端/单文件版）+ 版本门禁
+#   android — :app:testDebugUnitTest + :app:assembleDebug（gradle 自动前置
+#             cargo-ndk 重编 JNI .so）
+#   windows — dotnet test（纯 net8.0 跨平台托管测试，含 golden vectors）
+#             + dotnet build（WPF 主项目编译验证；完整 native 构建在
+#             windows.yml 的 windows-build job）
+#
+# 注意：actions 尽量 pin commit SHA（与 pages.yml/windows.yml 同策略）。
+# setup-java 尚无本仓验证过的 SHA，先用 major tag，首次验证后回填。
+
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          components: clippy
+          targets: wasm32-unknown-unknown
+
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: rust-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: rust-${{ runner.os }}-
+
+      - name: Workspace tests (default features)
+        run: cargo test --workspace
+
+      - name: transfer-engine tests (cffi)
+        run: cargo test -p transfer-engine --features cffi
+
+      # 注意：jni 模块在 lib.rs 中门控为 all(feature="jni", target_os="android")，
+      # 本步在 ubuntu 上只验证 feature 组合可编译（防 feature 漂移）；真正的
+      # JNI 编译与链接由 android job 的 cargo-ndk 链路覆盖。
+      - name: transfer-engine tests (jni feature parity)
+        run: cargo test -p transfer-engine --features jni
+
+      - name: Clippy (deny warnings)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: wasm32 compile check
+        run: cargo build -p transfer-engine --target wasm32-unknown-unknown --features wasm
+
+  web:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      # cargo 工具缓存：registry/git + 已安装的 wasm-pack 二进制，
+      # 命中时 Install wasm-pack 变为 no-op（command -v 守卫）。
+      - name: Cache cargo (registry + wasm-pack binary)
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin
+          key: web-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-wasmpack0150
+          restore-keys: web-cargo-${{ runner.os }}-
+
+      - name: Install wasm-pack
+        run: command -v wasm-pack >/dev/null || cargo install wasm-pack --locked --version 0.15.0
+
+      # FAST ZXing-C++ 是接收端唯一解码后端（zxing-wasm 回退已移除）：
+      # emsdk 3.1.64 固定版，缺失/损坏产物会让构建失败而非降级。
+      - name: Setup Emscripten
+        uses: mymindstorm/setup-emsdk@6ab9eb1bda2574c4ddb79809fc9247783eaf9021 # v14
+        with:
+          version: 3.1.64
+
+      # cmake 增量缓存：zxing-c++ 的 FetchContent 下载与编译产物都在
+      # build-wasm/ 下，命中时只做增量链接（计划 B5 的 fastzxing 缓存要求）。
+      - name: Cache FAST ZXing build tree
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: core/zxing-decoder/build-wasm
+          key: fastzxing-${{ runner.os }}-emsdk3.1.64-${{ hashFiles('core/zxing-decoder/**') }}
+          restore-keys: fastzxing-${{ runner.os }}-emsdk3.1.64-
+
+      - name: Build FAST ZXing-C++ WASM
+        run: ./scripts/build-fastzxing.sh
+
+      - name: Web & Extension — install & build WASM
+        working-directory: apps/web
+        run: |
+          npm ci
+          npm run wasm
+
+      - name: Web & Extension — typecheck & test
+        working-directory: apps/web
+        run: |
+          npm run typecheck
+          npm test
+
+      - name: Web & Extension — build all targets (web sender/receiver/standalone + 4 extension targets)
+        working-directory: apps/web
+        run: npm run build:all
+
+      - name: Version gate (single source of truth)
+        run: node scripts/version.mjs check
+
+      # 产物门禁（计划 F4）：build:all 已产出 dist-standalone 等全部目标，
+      # 校验产物完整性 / manifest / FAST WASM 在位 / 无私钥泄漏。
+      - name: Dist gate
+        run: node scripts/verify-dist.mjs
+
+      - name: Package web release artifacts to dist/
+        run: ./scripts/build-all.sh dist
+
+      - name: Upload Web Artifacts (zip, crx, xpi, standalone HTML)
+        uses: actions/upload-artifact@v4
+        with:
+          name: airferry-web-dist
+          path: |
+            dist/*.zip
+            dist/*.crx
+            dist/*.xpi
+            dist/*.html
+          if-no-files-found: error
+
+  android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      # TODO(pin): 首次 CI 验证通过后回填 commit SHA（与仓库其他 action 一致）。
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          targets: aarch64-linux-android
+
+      # cargo 缓存：registry/git + cargo-ndk 二进制 + workspace target/
+      # （compileRustJni 在仓库根跑 cargo ndk build，target/ 命中可免全量重编）。
+      - name: Cache cargo (registry + cargo-ndk + target)
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin
+            target
+          key: android-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-ndk412
+          restore-keys: android-cargo-${{ runner.os }}-
+
+      - name: Install cargo-ndk
+        run: command -v cargo-ndk >/dev/null || cargo install cargo-ndk --locked --version 4.1.2
+
+      - name: Gradle cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('apps/scanner/gradle/wrapper/gradle-wrapper.properties', 'apps/scanner/app/build.gradle.kts') }}
+          restore-keys: gradle-${{ runner.os }}-
+
+      - name: Unit tests + debug APK
+        working-directory: apps/scanner
+        env:
+          ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+        # assembleDebug 的 compileRustJni 前置会自动 cargo-ndk 重编 .so，
+        # 打进 APK 的 JNI 库永远与源码同步（v1.2.0 防护）。
+        run: ./gradlew :app:testDebugUnitTest :app:assembleDebug
+
+      - name: Upload Android APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: airferry-android-apk
+          path: apps/scanner/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Managed tests (protocol layer + golden vectors, any-OS)
+        run: dotnet test apps/windows/AirFerry.Windows.Tests
+
+      - name: WPF main project compile check
+        # 仅验证托管编译（含 ABI 握手迁移后的 App/ReceiverSession）。
+        # 完整 native（Rust DLL + ZXing DLL）构建在 windows.yml 的
+        # windows-build job；csproj 的 runtime DLL Content 带 Exists 条件，
+        # 本地缺失不阻断编译。
+        run: dotnet build apps/windows/AirFerry.Windows -c Debug -p:Platform=x64

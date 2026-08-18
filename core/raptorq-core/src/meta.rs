@@ -12,8 +12,8 @@ pub const MAX_SOURCE_BLOCKS: usize = 256;
 /// QR transfer is already extremely long to play out, and it keeps the decoder's
 /// block-state allocations modest on phones and browsers.
 pub const MAX_OBJECT_BYTES: u64 = 32 * 1024 * 1024;
-/// Receiver budget for the **original (post-decompression) size**
-/// (`descriptor::FileMeta::original_size`). Kept separate from
+/// Receiver budget for the **original (post-decompression) size** — the output
+/// ceiling of the C-ABI decompression entry points. Kept separate from
 /// [`MAX_OBJECT_BYTES`] so a highly-compressible object — compressed under 32 MiB
 /// on the wire but expanding far beyond it — can still be recovered. This is a
 /// native-memory budget (Rust receiver allocates on the native heap, not the

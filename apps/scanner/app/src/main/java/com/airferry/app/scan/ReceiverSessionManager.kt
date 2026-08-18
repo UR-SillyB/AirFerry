@@ -4,371 +4,335 @@ import com.airferry.app.nativelib.NativeBridge
 import org.json.JSONObject
 
 /**
- * High-level receiver session manager.
+ * High-level receiver session manager (AF2 protocol).
  *
- * Wraps the Rust `transfer_engine` JNI. Lazily creates the native receiver
- * after the first frame reveals the session id + totals, then feeds every
- * decoded frame to it. Exposes progress as a parsed [Progress] snapshot.
- *
- * The frame wire format is parsed here (big-endian, 60-byte header + payload +
- * 4-byte footer) to extract the session metadata before the native receiver is
- * created. See qr-protocol/src/frame.rs for the authoritative layout.
+ * Wraps the Rust `transfer_engine` native library via JNI. No wire-format
+ * parsing happens on the Kotlin side (SPEC §9): frames pass straight to the
+ * native state machine, and the packed IngestStatus word / snapshot JSON are
+ * the only consumed surfaces.
  */
 class ReceiverSessionManager {
 
-    /** Parsed frame header (subset of fields needed by Kotlin). */
-    data class FrameHeader(
-        val magic: Int,
-        val version: Int,
-        val flags: Int,
-        val sessionIdLo: Long,
-        val sessionIdHi: Long,
-        val sbn: Int,
-        val esi: Int,
-        /** Advisory until descriptor confirms; u32 on wire as unsigned Long. */
-        val totalBlocks: Long,
-        val totalSymbols: Long,
-        val symbolSize: Long
-    )
-
     data class Progress(
-        val decodedSymbols: Int,
         val totalSymbols: Int,
+        val decodedSymbols: Int,
         val receivedSymbols: Int,
-        val framesSeen: Long,
-        val framesDropped: Long,
-        val framesCorrupt: Long,
         val decodedBlocks: Int,
         val totalBlocks: Int,
         val decodedFraction: Double,
         val lossRatio: Double,
-        val complete: Boolean,
+        val framesSeen: Long,
+        val framesDuplicate: Int,
+        val framesCorrupt: Int,
         val metaConfirmed: Boolean,
-        val sessionMismatchStreak: Int
+        val symbolSize: Int,
+        val complete: Boolean,
+        val mismatchStreak: Int = 0
     )
 
-    /**
-     * Lightweight per-frame status decoded from the native `receiverIngest`
-     * packed long. Carries only what the ingest path needs (completion +
-     * re-init heuristics); the full progress is fetched on demand via
-     * [progress] at the UI cadence.
-     */
+    fun progress(): Progress? {
+        if (!initialized) return null
+        val jsonBytes = NativeBridge.receiverProgressJson(handle) ?: return null
+        val nul = jsonBytes.indexOf(0)
+        val len = if (nul >= 0) nul else jsonBytes.size
+        val json = String(jsonBytes, 0, len)
+        return try {
+            val o = JSONObject(json)
+            // Track the wire symbol size T reported by Rust (it is observed
+            // from the first accepted frame; 1024 is only the pre-lock guess).
+            symbolSize = o.optInt("symbol_size", symbolSize)
+            Progress(
+                totalSymbols = o.optInt("total_symbols", 1024),
+                decodedSymbols = o.optInt("decoded_symbols", 0),
+                receivedSymbols = o.optInt("received_symbols", 0),
+                decodedBlocks = o.optInt("decoded_blocks", 0),
+                totalBlocks = o.optInt("total_blocks", 1),
+                decodedFraction = o.optDouble("decoded_fraction", 0.0),
+                lossRatio = o.optDouble("loss_ratio", 0.0),
+                framesSeen = o.optLong("frames_seen", 0L),
+                framesDuplicate = o.optInt("frames_duplicate", 0),
+                framesCorrupt = o.optInt("frames_corrupt", 0),
+                metaConfirmed = o.optBoolean("meta_confirmed", false),
+                symbolSize = o.optInt("symbol_size", 1024),
+                complete = o.optBoolean("complete", false),
+                mismatchStreak = o.optInt("session_mismatch_streak", 0)
+            )
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    fun getEstimatedTotalSymbols(): Int {
+        val snap = snapshot()
+        if (!snap.metaConfirmed || symbolSize <= 0) return 0
+        val total = (snap.totalRawSize + symbolSize - 1) / symbolSize
+        return total.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+    }
+
     data class IngestStatus(
         val complete: Boolean,
-        /** True if this frame contributed a new symbol. */
         val accepted: Boolean,
+        val manifestReady: Boolean,
+        val chunkReady: Boolean,
+        /** Bit 4: a foreign transfer took over the session. The ONLY signal
+         * the host may use to discard transfer artifacts — the historical
+         * `accepted && receivedSymbols == 0` heuristic also matched the first
+         * accepted META of a §12-resumed session (counter still zero). */
+        val relocked: Boolean,
         val mismatchStreak: Int,
         val receivedSymbols: Int
     ) {
         companion object {
-            // Mirrors the Rust pack_ingest_status layout (see jni.rs).
             private const val ERROR_RECEIVED = 0xFFFFFFFFL.toInt()
 
-            /** Decode a packed status word, or null on the error sentinel. */
             fun unpack(word: Long): IngestStatus? {
                 val bits = word.toULong()
-                // Error sentinel: received_symbols == u32::MAX.
                 if (((bits shr 32) and 0xFFFFFFFFuL).toInt() == ERROR_RECEIVED) return null
                 val complete = (bits and 1uL) != 0uL
                 val accepted = ((bits shr 1) and 1uL) != 0uL
+                val manifestReady = ((bits shr 2) and 1uL) != 0uL
+                val chunkReady = ((bits shr 3) and 1uL) != 0uL
+                val relocked = ((bits shr 4) and 1uL) != 0uL
                 val streak = ((bits shr 8) and 0xFFFFuL).toInt()
                 val received = ((bits shr 32) and 0xFFFFFFFFuL).toInt()
-                return IngestStatus(complete, accepted, streak, received)
+                return IngestStatus(complete, accepted, manifestReady, chunkReady, relocked, streak, received)
             }
         }
     }
 
     private var handle: Long = 0L
-    private var sessionIdLo: Long = 0L
-    private var sessionIdHi: Long = 0L
-    private var symbolSize: Int = 0
-    /** Expose the decoded symbol size (bytes) for UI throughput calculation. */
-    fun symbolSizeBytes(): Int = symbolSize
     private var initialized: Boolean = false
-    private var estimatedTotalSymbols: Int = 0
-    /// Consecutive mismatch count seen by Kotlin (driven from Rust streak).
-    private var mismatchStreak: Int = 0
-    /// True once at least one symbol has been accepted (no re-init after that).
-    private var everAccepted: Boolean = false
+    // Written under the ingest lock (worker) via progress(), read by the main
+    // thread for the rate display — volatile so the UI doesn't pin a stale
+    // pre-lock 1024 forever.
+    @Volatile
+    private var symbolSize: Int = 1024
+
+    /**
+     * Set by [destroy]. A decode-pool worker can still flush a straggler
+     * batch after the owning scan screen is torn down; without this flag
+     * [ingest] would re-create a native session that nobody ever destroys
+     * (Rust-side leak) and poke a dead Activity's UI thread.
+     */
+    @Volatile
+    private var destroyed: Boolean = false
 
     val isInitialized: Boolean get() = initialized
 
-    fun getEstimatedTotalSymbols(): Int = estimatedTotalSymbols
+    fun symbolSizeBytes(): Int = symbolSize
 
-    /** Parse + validate a frame's header. Returns null if not a valid ET frame. */
-    fun parseHeader(bytes: ByteArray): FrameHeader? {
-        if (bytes.size < 64) return null
-        val magic = u16be(bytes, 0)
-        if (magic != MAGIC) return null
-        val version = bytes[2].toInt() and 0xFF
-        if (version != PROTOCOL_VERSION) return null
-        val flags = bytes[3].toInt() and 0xFF
-        val sessionIdHi = u64be(bytes, 4)
-        val sessionIdLo = u64be(bytes, 12)
-        val sbn = u32be(bytes, 20)
-        val esi = u32be(bytes, 24)
-        // total_blocks / total_symbols are u32 on the wire but we only carry
-        // them through as advisory metadata (the authoritative layout comes
-        // from the descriptor). Hold them as Long so a near-2^32 value does not
-        // arrive as a negative Int and confuse downstream comparisons.
-        val totalBlocks = u32beLong(bytes, 28)
-        val totalSymbols = u32beLong(bytes, 32)
-        val symbolSize = u32beLong(bytes, 36)
-        return FrameHeader(
-            magic, version, flags, sessionIdLo, sessionIdHi,
-            sbn, esi, totalBlocks, totalSymbols, symbolSize
-        )
-    }
-
-    /** Ingest a decoded QR payload.
-     *
-     * The native receiver is **only** initialised from a descriptor frame
-     * (FLAG_DESCRIPTOR).  Ordinary data frames are silently dropped until a
-     * descriptor arrives.  This prevents a corrupted first QR decode (which
-     * only passes magic+version but has a garbage session_id) from permanently
-     * locking out every subsequent correct frame.
-     *
-     * Once initialised, a persistent session-mismatch streak with zero
-     * accepted symbols triggers a forced re-init from the next descriptor that
-     * arrives — covering the edge-case where the first descriptor itself was
-     * corrupted but a later one is clean.
-     *
-     * Returns a lightweight [IngestStatus] (no JSON) so the hot ingest path
-     * doesn't allocate/parse a string per frame. Call [progress] on the UI
-     * refresh cadence for the full snapshot.
-     */
     fun ingest(frameBytes: ByteArray): IngestStatus? {
-        val header = parseHeader(frameBytes) ?: return null
-
-        // Cache estimated total symbols from first frame for approximate progress
-        if (estimatedTotalSymbols == 0 && header.totalSymbols > 0L) {
-            estimatedTotalSymbols = header.totalSymbols.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
-        }
-
-        val isDescriptor = (header.flags and FLAG_DESCRIPTOR) != 0
-
-        // --- Lazy init: only from descriptor frames ---
-        // 未初始化时只接受 descriptor 帧（携带权威 OTI），数据帧直接丢弃等待。
-        // 这防止首个 QR 解码（仅过 magic+version 校验但 session_id 可能是垃圾）
-        // 用错误 session_id 永久锁死后续所有正确帧。
+        if (destroyed) return null
         if (!initialized) {
-            if (!isDescriptor) return null  // wait for a descriptor
-            createReceiver(header)
-            if (!initialized) return null
+            handle = NativeBridge.receiverCreate(0L, 0L)
+            initialized = handle != 0L
+            cachedSnapshot = null
         }
-
-        // --- Session-mismatch re-init ---
-        // 若 mismatch streak 过高且从未接受过任何符号，首个 descriptor 很可能
-        // 已损坏 → 销毁，等下一个 descriptor 重建（下一帧 ingest 回到上面的 lazy
-        // init 块）。此处直接 return null，本帧不继续。
-        if (initialized && !isDescriptor && mismatchStreak >= 3 && !everAccepted) {
-            destroy()
-            return null  // will re-init on next descriptor
-        }
-
-        // receiverIngest returns a packed status word (see IngestStatus). The
-        // error sentinel (null from unpack) means a rejected frame — treat as
-        // "nothing happened" without disturbing the re-init state machine.
+        if (!initialized) return null
         val status = IngestStatus.unpack(NativeBridge.receiverIngest(handle, frameBytes))
-            ?: return null
-
-        // Track mismatch streak for re-init logic above.
-        if (status.mismatchStreak >= 3) {
-            mismatchStreak = status.mismatchStreak
-        } else if (status.accepted) {
-            everAccepted = true
-            mismatchStreak = 0
+        if (status != null && status.relocked) {
+            // Relocked in native AF2: invalidate stale snapshot cache
+            cachedSnapshot = null
         }
-
         return status
-    }
-
-    /**
-     * Full progress snapshot (parsed from the on-demand JSON). Intended to be
-     * called at the UI refresh cadence (~7 Hz), NOT per-frame. Returns null if
-     * the session isn't initialized or the native call fails.
-     */
-    fun progress(): Progress? {
-        if (!initialized || handle == 0L) return null
-        val jsonBytes = NativeBridge.receiverProgressJson(handle) ?: return null
-        if (jsonBytes.isEmpty()) return null
-        val nul = jsonBytes.indexOf(0)
-        val len = if (nul >= 0) nul else jsonBytes.size
-        val json = String(jsonBytes, 0, len)
-        return parseProgress(json)
-    }
-
-    /** Create (or re-create) the native receiver from a parsed frame header. */
-    private fun createReceiver(header: FrameHeader) {
-        sessionIdLo = header.sessionIdLo
-        sessionIdHi = header.sessionIdHi
-        symbolSize = when {
-            header.symbolSize > 0L && header.symbolSize <= Int.MAX_VALUE -> header.symbolSize.toInt()
-            else -> 1024
-        }
-        val totalBlocks = header.totalBlocks.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
-        val totalSymbols = header.totalSymbols.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
-        handle = NativeBridge.receiverCreate(
-            sessionIdLo, sessionIdHi,
-            totalBlocks, totalSymbols, symbolSize
-        )
-        initialized = handle != 0L
-        mismatchStreak = 0
-        everAccepted = false
     }
 
     fun isComplete(): Boolean =
         initialized && NativeBridge.receiverIsComplete(handle) == 1
 
-    /** Original filename from the descriptor, or empty. */
-    fun fileName(): String =
-        if (initialized) NativeBridge.receiverFileName(handle) else ""
+    /** Verify a staged chunk against the ROOT-bound Manifest table (§11). */
+    fun verifyChunk(index: Int, rawBytes: ByteArray): Boolean =
+        initialized && NativeBridge.receiverVerifyChunk(handle, index, rawBytes)
 
-    /** Original file size, or 0. */
-    fun fileSize(): Long =
-        if (initialized) NativeBridge.receiverFileSize(handle) else 0L
+    /** Run §13 ⑧⑨ integrity chain over the reassembled canonical stream. */
+    fun verifyFinalStream(streamBytes: ByteArray): Boolean =
+        initialized && NativeBridge.receiverVerifyFinalStream(handle, streamBytes)
 
-    /** Expected CRC32 (unsigned 32-bit in a Long), or 0. */
-    fun crc32(): Long =
-        if (initialized) NativeBridge.receiverCrc32(handle) else 0L
+    /** Begin bounded-memory §13 ⑧⑨ final verification. */
+    fun finalVerifyBegin(): Boolean =
+        initialized && NativeBridge.receiverFinalVerifyBegin(handle)
+
+    /** Feed the next contiguous canonical-stream block. */
+    fun finalVerifyFeed(streamBytes: ByteArray): Boolean =
+        initialized && NativeBridge.receiverFinalVerifyFeed(handle, streamBytes)
+
+    /** Finish bounded-memory §13 ⑧⑨ final verification. */
+    fun finalVerifyFinish(): Boolean =
+        initialized && NativeBridge.receiverFinalVerifyFinish(handle)
+
+    /** Restore session from stored ROOT frame bytes + completed chunk indices (§12 resume). */
+    fun resume(rootFrameBytes: ByteArray, completedIndices: IntArray): Boolean {
+        if (!initialized) {
+            handle = NativeBridge.receiverCreate(0L, 0L)
+            initialized = handle != 0L
+            cachedSnapshot = null
+        }
+        return initialized && NativeBridge.receiverResume(handle, rootFrameBytes, completedIndices)
+    }
 
     /**
-     * True if the descriptor supplied a real CRC32 (so the receiver should
-     * verify it). Use this — NOT `crc32() == 0L` — to decide whether to
-     * verify: CRC32 can legitimately be 0.
+     * Evict one chunk from both ledgers after a spill re-verification failure
+     * (§11/§12): the sender's next epoch re-supplies it.
      */
-    fun crc32Known(): Boolean =
-        if (initialized) NativeBridge.receiverCrc32Known(handle) == 1 else false
+    fun invalidateChunk(index: Int): Boolean =
+        initialized && NativeBridge.receiverInvalidateChunk(handle, index)
 
-    // ---- descriptor-v5 segment metadata (large-transfer child objects) ----
+    data class ManifestEntry(
+        val kind: Int,
+        val path: String,
+        val savePath: String,
+        val offset: Long,
+        val size: Long
+    )
 
-    /** 1 if the confirmed descriptor was a v5 large-transfer child object. */
-    fun isSegmented(): Boolean =
-        if (initialized) NativeBridge.receiverIsSegmented(handle) == 1 else false
+    /** Parsed `ReceiverSnapshotV2`. */
+    data class Snapshot(
+        val metaConfirmed: Boolean,
+        val transferIdHex: String,
+        val contentIdHex: String,
+        /** Canonical ROOT frame bytes (for the §12 resume ledger). */
+        val rootFrameBytes: ByteArray = ByteArray(0),
+        val totalRawSize: Long,
+        val entryCount: Int,
+        val chunkCount: Int,
+        val chunkRawSize: Int,
+        val entries: List<ManifestEntry> = emptyList(),
+        /** v1-magic frames rejected so far; > 0 ⇒ peer runs protocol 1. */
+        val legacyPeerFrames: Int = 0
+    )
 
-    /** Zero-based index of this segment within the root transfer (0 if not segmented). */
-    fun segmentIndex(): Int =
-        if (initialized) NativeBridge.receiverSegmentIndex(handle) else 0
+    private var cachedSnapshot: Snapshot? = null
 
-    /** Total segment count of the root transfer (1 if not segmented). */
-    fun segmentCount(): Int =
-        if (initialized) NativeBridge.receiverSegmentCount(handle) else 1
+    fun snapshot(): Snapshot {
+        if (!initialized) return Snapshot(false, "", "", ByteArray(0), 0L, 0, 0, 0, emptyList(), 0)
+        cachedSnapshot?.let { snap ->
+            // Freeze only once the Manifest is decoded. `meta_confirmed` in the
+            // AF2 snapshot merely means the ROOT locked — freezing there (as a
+            // v1-era refactor did) pins `entries = []` for the whole session
+            // and staging falls back to one nameless concatenated file.
+            if (snap.metaConfirmed && snap.entries.isNotEmpty()) return snap
+        }
+        val json = NativeBridge.receiverSnapshotJson(handle)
+            ?: return cachedSnapshot
+                ?: Snapshot(false, "", "", ByteArray(0), 0L, 0, 0, 0, emptyList(), 0)
+        return try {
+            val o = JSONObject(json)
+            val rootHex = o.optString("root_frame_hex", "")
+            val entriesList = mutableListOf<ManifestEntry>()
+            val arr = o.optJSONArray("entries")
+            if (arr != null) {
+                for (i in 0 until arr.length()) {
+                    val item = arr.getJSONObject(i)
+                    val path = item.optString("path", "")
+                    entriesList.add(
+                        ManifestEntry(
+                            kind = item.optInt("kind", 1),
+                            path = path,
+                            // §7.2 save-time sanitized name (may equal path).
+                            savePath = item.optString("save_path", path),
+                            offset = item.optLong("offset", 0L),
+                            size = item.optLong("size", 0L)
+                        )
+                    )
+                }
+            }
+            val snap = Snapshot(
+                metaConfirmed = o.optBoolean("meta_confirmed", false),
+                transferIdHex = o.optString("transfer_id_hex", ""),
+                contentIdHex = o.optString("content_id_hex", ""),
+                rootFrameBytes = hexToBytes(rootHex),
+                totalRawSize = o.optLong("total_raw_size", 0L),
+                entryCount = o.optInt("entry_count", 0),
+                chunkCount = o.optInt("chunk_count", 0),
+                chunkRawSize = o.optInt("chunk_raw_size", 0),
+                entries = entriesList,
+                legacyPeerFrames = o.optInt("legacy_peer_frames", 0)
+            )
+            cachedSnapshot = snap
+            snap
+        } catch (_: Exception) {
+            cachedSnapshot
+                ?: Snapshot(false, "", "", ByteArray(0), 0L, 0, 0, 0, emptyList(), 0)
+        }
+    }
 
-    /** Root (whole-file) original size in bytes (0 if not segmented). */
-    fun rootOriginalSize(): Long =
-        if (initialized) NativeBridge.receiverRootOriginalSize(handle) else 0L
+    private fun hexToBytes(s: String): ByteArray {
+        if (s.length % 2 != 0) return ByteArray(0)
+        return ByteArray(s.length / 2) { i ->
+            ((Character.digit(s[i * 2], 16) shl 4) +
+                Character.digit(s[i * 2 + 1], 16)).toByte()
+        }
+    }
 
-    /** Offset of this segment within the **compressed** stream (index × SEGMENT_RAW_BYTES; 0 if not segmented). */
-    fun originalOffset(): Long =
-        if (initialized) NativeBridge.receiverOriginalOffset(handle) else 0L
+    fun fileName(): String {
+        val snap = snapshot()
+        val nonDir = snap.entries.filter { it.kind != 3 }
+        if (nonDir.size == 1) return nonDir[0].path
+        if (nonDir.size > 1) return "多文件传输包 (${nonDir.size} 项)"
+        if (snap.entryCount > 1) return "多文件传输包 (${snap.entryCount} 项)"
+        return "文件传输"
+    }
+    fun fileSize(): Long = snapshot().totalRawSize
+    fun isSegmented(): Boolean = snapshot().chunkCount > 1
+    fun segmentIndex(): Int = 0
+    fun segmentCount(): Int = snapshot().chunkCount.coerceAtLeast(1)
+    fun rootOriginalSize(): Long = snapshot().totalRawSize
+    fun compressedSize(): Long = snapshot().totalRawSize
+    fun originalSize(): Long = snapshot().totalRawSize
 
-    /** Root session id low 64 bits (whole transfer id), or 0 if not segmented. */
-    fun rootSessionIdLo(): Long =
-        if (initialized) NativeBridge.receiverRootSessionIdLo(handle) else 0L
-
-    /** Root session id high 64 bits, or 0 if not segmented. */
-    fun rootSessionIdHi(): Long =
-        if (initialized) NativeBridge.receiverRootSessionIdHi(handle) else 0L
-
-    /** SHA-256 (raw 32 bytes) of this segment's uncompressed bytes, or null. */
-    fun rawSha256(): ByteArray? =
-        if (initialized) NativeBridge.receiverRawSha256(handle) else null
-
-    /** SHA-256 (raw 32 bytes) of the complete root file, or null. */
-    fun rootSha256(): ByteArray? =
-        if (initialized) NativeBridge.receiverRootSha256(handle) else null
-
-    /** Recover the assembled file bytes, or null if not complete / on failure. */
     fun assemble(): ByteArray? {
         if (!initialized) return null
-        val bytes = NativeBridge.receiverAssembleBytes(handle) ?: return null
-        return bytes.takeIf { it.isNotEmpty() }
+        return NativeBridge.receiverAssembleBytes(handle)
     }
 
-    /** Rust-side reason when [assemble] returns null but [isComplete] is true. */
-    fun lastAssembleError(): String =
-        if (initialized) NativeBridge.receiverLastAssembleError(handle) else ""
-
-    // ---- compressed-stream segment access (descriptor-v5) ----
+    fun assembleChunk(index: Int): ByteArray? {
+        if (!initialized) return null
+        return NativeBridge.receiverAssembleChunk(handle, index)
+    }
 
     /**
-     * Reassemble this segment's **compressed** bytes (no decompression).
-     * Empty byte[] when decoding is incomplete.
+     * Index of the chunk completed by the most recent ChunkReady frame, or -1.
+     * Persist it with [assembleChunk] then release it with [forgetChunk] so
+     * native memory stays bounded by one chunk instead of the whole object.
      */
-    fun assembleRawBytes(): ByteArray? {
-        if (!initialized) return null
-        val bytes = NativeBridge.receiverAssembleRawBytes(handle) ?: return null
-        return bytes.takeIf { it.isNotEmpty() }
+    fun lastChunkIndex(): Int {
+        if (!initialized) return -1
+        return NativeBridge.receiverLastChunkIndex(handle)
     }
 
-    /** Compression-algorithm tag of the whole stream (0=None,1=Zstd,2=Xz). */
-    fun compression(): Int =
-        if (initialized) NativeBridge.receiverCompression(handle) else 0
+    /** Release a persisted chunk from native memory. True when it was resident. */
+    fun forgetChunk(index: Int): Boolean {
+        if (!initialized) return false
+        return NativeBridge.receiverForgetChunk(handle, index)
+    }
 
-    /** This segment's transmitted (compressed) payload length. */
-    fun compressedSize(): Long =
-        if (initialized) NativeBridge.receiverCompressedSize(handle) else 0L
-
-    /** Whole decompressed original size (same across segments of a root). */
-    fun originalSize(): Long =
-        if (initialized) NativeBridge.receiverOriginalSize(handle) else 0L
-
-    fun sessionIdHex(): String {
-        val lo = java.lang.Long.toUnsignedString(sessionIdLo, 16).padStart(16, '0')
-        val hi = java.lang.Long.toUnsignedString(sessionIdHi, 16).padStart(16, '0')
-        return "$hi$lo"
+    /**
+     * Drain the chunk completed by the frame just ingested: hand it to
+     * [sink] and evict it from native memory. Must be called on the ingest
+     * thread right after [ingest] reported `chunkReady` (the ingest path is
+     * serialized, so the drain cannot race another ingest).
+     */
+    fun drainLastChunk(sink: (index: Int, chunkRawSize: Int, bytes: ByteArray) -> Unit) {
+        val index = lastChunkIndex()
+        if (index < 0) return
+        val bytes = assembleChunk(index) ?: return
+        val chunkRawSize = snapshot().chunkRawSize
+        sink(index, chunkRawSize, bytes)
+        forgetChunk(index)
     }
 
     fun destroy() {
+        destroyed = true
         if (initialized && handle != 0L) {
             NativeBridge.receiverDestroy(handle)
             handle = 0L
             initialized = false
+            cachedSnapshot = null
         }
-    }
-
-    private fun parseProgress(json: String): Progress {
-        val o = JSONObject(json)
-        // The Rust progress_json emits `frames_duplicate` and `frames_corrupt`
-        // (there is no `frames_dropped` key). Treat "dropped" as the union of
-        // duplicate and corrupt frames — i.e. every seen frame that did not
-        // contribute new data — which is what the loss-ratio already reflects.
-        val framesDuplicate = o.optLong("frames_duplicate")
-        val framesCorrupt = o.optLong("frames_corrupt")
-        return Progress(
-            decodedSymbols = o.optInt("decoded_symbols"),
-            totalSymbols = o.optInt("total_symbols"),
-            receivedSymbols = o.optInt("received_symbols"),
-            framesSeen = o.optLong("frames_seen"),
-            framesDropped = framesDuplicate + framesCorrupt,
-            framesCorrupt = framesCorrupt,
-            decodedBlocks = o.optInt("decoded_blocks"),
-            totalBlocks = o.optInt("total_blocks"),
-            decodedFraction = o.optDouble("decoded_fraction"),
-            lossRatio = o.optDouble("loss_ratio"),
-            complete = o.optBoolean("complete"),
-            metaConfirmed = o.optBoolean("meta_confirmed", false),
-            sessionMismatchStreak = o.optInt("session_mismatch_streak", 0)
-        )
     }
 
     companion object {
-        const val MAGIC = 0x4554
-        const val PROTOCOL_VERSION = 1
-        const val FLAG_DESCRIPTOR = 0x01
-
-        private fun u16be(b: ByteArray, o: Int): Int =
-            ((b[o].toInt() and 0xFF) shl 8) or (b[o + 1].toInt() and 0xFF)
-        private fun u32be(b: ByteArray, o: Int): Int =
-            (u16be(b, o) shl 16) or u16be(b, o + 2)
-        /** Read a big-endian u32 as an unsigned Long (0..=0xFFFFFFFF), so a value
-         *  near 2^32 is not reinterpreted as a negative Int. */
-        private fun u32beLong(b: ByteArray, o: Int): Long =
-            u32be(b, o).toLong() and 0xFFFFFFFFL
-        private fun u64be(b: ByteArray, o: Int): Long {
-            val hi = u32be(b, o).toLong() and 0xFFFFFFFFL
-            val lo = u32be(b, o + 4).toLong() and 0xFFFFFFFFL
-            return (hi shl 32) or lo
-        }
+        const val MAGIC = 0x4146 // ASCII 'AF' (protocol 2)
+        const val PROTOCOL_VERSION = 2
     }
 }

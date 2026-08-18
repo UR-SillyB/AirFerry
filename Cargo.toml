@@ -4,6 +4,7 @@ members = [
     "core/raptorq-core",
     "core/qr-protocol",
     "core/transfer-engine",
+    "core/af2",
 ]
 
 [workspace.package]
@@ -19,11 +20,15 @@ description = "Fully offline optical file transfer: browser sender <-> Android s
 raptorq-core = { path = "core/raptorq-core" }
 qr-protocol = { path = "core/qr-protocol" }
 transfer-engine = { path = "core/transfer-engine" }
+af2 = { path = "core/af2" }
 
 # Common shared deps (pinned for reproducible builds)
+blake3 = "1"
 crc32fast = "1.4"
+raptorq = "2.0"
 sha2 = "0.10"
 thiserror = "1"
+unicode-normalization = "0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 

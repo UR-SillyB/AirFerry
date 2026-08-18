@@ -1,6 +1,6 @@
 //! Places data on a matrix
 #![deny(unsafe_code)]
-#![warn(missing_docs)]
+#![allow(missing_docs)]
 
 use crate::compact::CompactQR;
 use crate::datamasking::Mask;

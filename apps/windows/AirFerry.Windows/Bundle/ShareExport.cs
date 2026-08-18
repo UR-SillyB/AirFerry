@@ -39,6 +39,30 @@ public static class ShareExport
         }
     }
 
+    /// <summary>Streaming overload for path-backed recovered bundle members.</summary>
+    public static string ExportFiles(
+        IEnumerable<BundleFile> files,
+        string? rootDirectory = null)
+    {
+        PruneExpired(rootDirectory);
+        string dir = CreateShareDirectory(rootDirectory);
+        try
+        {
+            foreach (BundleFile file in files)
+            {
+                string target = FileNameUtil.UniqueRelativeTarget(dir, file.Name);
+                file.CopyTo(target);
+                MarkAsUntrusted(target);
+            }
+            return dir;
+        }
+        catch
+        {
+            TryDeleteDirectory(dir);
+            throw;
+        }
+    }
+
     public static string ExportFiles(
         IEnumerable<(string Name, byte[] Data)> files,
         string? rootDirectory = null)

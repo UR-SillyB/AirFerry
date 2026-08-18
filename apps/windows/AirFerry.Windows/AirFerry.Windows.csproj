@@ -7,16 +7,16 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <UseWPF>true</UseWPF>
     <LangVersion>latest</LangVersion>
-    <!-- Version mirrors apps/sender/package.json, apps/scanner build.gradle.kts,
+    <!-- Version mirrors apps/web/package.json, apps/scanner build.gradle.kts,
          and Cargo.toml workspace version — keep all four in sync. -->
     <Version>1.2.7</Version>
     <AssemblyName>AirFerry</AssemblyName>
     <RootNamespace>AirFerry.Windows</RootNamespace>
     <ApplicationManifest>app.manifest</ApplicationManifest>
-    <!-- Exe/taskbar/Alt-Tab receiver icon (multi-size 16–128, generated from
-         apps/sender/assets/receiver-icon*.png — see AGENTS.md §3.4 for the regen
-         command). Note: ApplicationIcon sets the Win32 exe icon; XAML use via
-         pack:// URI requires the explicit <Resource Include="Assets\app.ico" /> below. -->
+    <!-- Exe/taskbar/Alt-Tab receiver icon (multi-size 16–128; source PNGs live
+         in apps/web/assets/receiver-icon*.png). Note: ApplicationIcon sets the
+         Win32 exe icon; XAML use via pack:// URI requires the explicit
+         <Resource Include="Assets\app.ico" /> below. -->
     <ApplicationIcon>Assets\app.ico</ApplicationIcon>
     <Platforms>x64</Platforms>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
@@ -42,10 +42,13 @@
     <PackageReference Include="DirectShowLib.Standard" Version="1.0.0" />
     <!-- MVVM source generators (ObservableObject, RelayCommand). -->
     <PackageReference Include="CommunityToolkit.Mvvm" Version="8.2.2" />
-    <!-- Fluent Design UI (lepo.co WPF-UI): themed controls, light/dark theme
-         dictionaries, FluentWindow chrome, symbol icons. Win10-compatible
-         (Mica backdrop degrades gracefully; we use WindowBackdropType=None). -->
-    <PackageReference Include="WPF-UI" Version="4.3.0" />
+    <!-- HandyControl themed controls: skin dictionaries (light/dark swapped at
+         runtime), hc:Window chrome with caption buttons, hc:Card, themed
+         MessageBox. The AirFerry brand palette is layered on top in
+         Themes/AirFerry.xaml (accent #2563EB + WPF-UI-era brush key aliases).
+         No icon font ships with the library — glyphs use the system Segoe MDL2
+         Assets font via the GlyphIcon style. Win10-compatible (no Mica). -->
+    <PackageReference Include="HandyControl" Version="3.5.1" />
   </ItemGroup>
 
   <ItemGroup>

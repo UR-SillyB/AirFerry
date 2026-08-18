@@ -197,8 +197,11 @@ public sealed class QrDecodePool : IDisposable
                     FlushPending(pending);
                 }
             }
-            catch
+            catch (Exception ex)
             {
+                // A persistently failing native decode used to vanish here with
+                // no trace; keep the batch-drop behavior but leave a breadcrumb.
+                System.Diagnostics.Debug.WriteLine($"[QrDecodePool] decode/flush failed: {ex}");
                 pending.Clear();
             }
             finally
@@ -243,11 +246,14 @@ public sealed class QrDecodePool : IDisposable
             lockedCount = _multiLockedCount;
         }
 
-        // Match Android v1.1.3 exactly: a zero miss counter is due for a
-        // full-frame lock; otherwise try the tracked regions first. A complete
-        // region miss falls through to full-frame recovery on the same frame.
+        // The periodic full-frame re-lock counts CONSECUTIVE misses: the miss
+        // counter is reset to 0 on any success, and `0 % N == 0` would then
+        // force a full-frame scan on EVERY frame — exactly what the tracked
+        // fast path exists to avoid. Only miss counts that are > 0 and land on
+        // the boundary trigger the cold path (mirrors Android's fix).
+        long misses = Interlocked.Read(ref _multiMisses);
         bool dueFullLock = tracked is null || lockedCount == 0 ||
-            Interlocked.Read(ref _multiMisses) % MultiFullDecodeEvery == 0;
+            (misses > 0 && misses % MultiFullDecodeEvery == 0);
         if (!dueFullLock && tracked is not null && lockedCount > 0)
         {
             List<ZxingDecoder.MultiResult> regionResults = ZxingDecoder.DecodeMulti(

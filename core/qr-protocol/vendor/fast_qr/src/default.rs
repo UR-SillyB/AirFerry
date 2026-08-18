@@ -1,6 +1,6 @@
 //! Creates the default empty `QRCode` (no data)
 #![deny(unsafe_code)]
-#![warn(missing_docs)]
+#![allow(missing_docs)]
 
 use crate::datamasking::Mask;
 use crate::module::Module;

@@ -2,7 +2,6 @@ using System.IO;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
-using AirFerry.Windows.ViewModels;
 
 namespace AirFerry.Windows.Bundle;
 
@@ -43,6 +42,16 @@ public static class ContentStore
         string Kind = "file",
         string? BundleId = null,
         string? BundleTitle = null);
+
+    public sealed record PutFileRequest(
+        string DisplayName,
+        string FilePath,
+        string CrcHex = "unknown",
+        bool CrcUnknown = true,
+        string Kind = "file",
+        string? BundleId = null,
+        string? BundleTitle = null,
+        long? ExpectedSize = null);
 
     public static string RootDir =>
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
@@ -109,7 +118,9 @@ public static class ContentStore
                 }
                 var entry = new Entry(
                     Id: Guid.NewGuid().ToString("N"),
-                    Name: FileNameUtil.Sanitize(request.DisplayName),
+                    Name: request.BundleId is not null
+                        ? FileNameUtil.SanitizeRelativePath(request.DisplayName)
+                        : FileNameUtil.Sanitize(request.DisplayName),
                     Hash: hash,
                     Size: request.Bytes.LongLength,
                     CrcHex: request.CrcHex,
@@ -122,6 +133,82 @@ public static class ContentStore
                 results.Add(new PutResult(entry, path, deduped));
             }
             SaveIndex(all);
+            return results;
+        }
+    }
+
+    /// <summary>
+    /// Archive a bundle of pre-staged files with ONE index write so a mid-bundle
+    /// disk failure cannot leave a truncated bundle committed to history (and to
+    /// avoid O(n²) index rewrites). The index is only saved after every member
+    /// has been hashed and moved into the blob tree; blobs moved by a FAILED
+    /// batch that no pre-existing entry references are deleted in the failure
+    /// unwind (no orphan space leak, retry-safe). Callers own leftover staged
+    /// files when the batch throws.
+    /// </summary>
+    public static IReadOnlyList<PutResult> PutFileBatch(
+        IReadOnlyList<PutFileRequest> requests)
+    {
+        if (requests.Count == 0) return [];
+        lock (Gate)
+        {
+            var all = LoadIndex();
+            var priorHashes = all.Select(e => e.Hash).ToHashSet(StringComparer.Ordinal);
+            Directory.CreateDirectory(RootDir);
+            long createdAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            var results = new List<PutResult>(requests.Count);
+            var movedBlobs = new List<string>();
+            try
+            {
+                foreach (PutFileRequest request in requests)
+                {
+                    if (!File.Exists(request.FilePath))
+                        throw new FileNotFoundException(
+                            "Staged bundle member is missing", request.FilePath);
+                    long sourceLength = new FileInfo(request.FilePath).Length;
+                    if (request.ExpectedSize is not null && sourceLength != request.ExpectedSize.Value)
+                        throw new InvalidDataException("staged file length differs from manifest");
+                    string hash = Sha256HexFile(request.FilePath);
+                    string path = BlobPath(hash);
+                    bool deduped = FileMatchesHash(path, hash, sourceLength);
+                    if (!deduped)
+                    {
+                        MoveFileAtomic(request.FilePath, path);
+                        movedBlobs.Add(path);
+                    }
+                    var entry = new Entry(
+                        Id: Guid.NewGuid().ToString("N"),
+                        Name: request.BundleId is not null
+                            ? FileNameUtil.SanitizeRelativePath(request.DisplayName)
+                            : FileNameUtil.Sanitize(request.DisplayName),
+                        Hash: hash,
+                        Size: sourceLength,
+                        CrcHex: request.CrcHex,
+                        CrcUnknown: request.CrcUnknown,
+                        Kind: request.Kind,
+                        CreatedAt: createdAt,
+                        BundleId: request.BundleId,
+                        BundleTitle: request.BundleTitle);
+                    all.Add(entry);
+                    results.Add(new PutResult(entry, path, deduped));
+                }
+                SaveIndex(all);
+            }
+            catch
+            {
+                // Pre-commit failure unwind: blobs moved by THIS batch that no
+                // pre-existing entry references are orphans — delete them so
+                // the failure leaks no space and the batch is retryable.
+                foreach (string blob in movedBlobs)
+                {
+                    string hash = Path.GetFileName(blob);
+                    if (!priorHashes.Contains(hash))
+                    {
+                        try { File.Delete(blob); } catch { }
+                    }
+                }
+                throw;
+            }
             return results;
         }
     }
@@ -159,11 +246,11 @@ public static class ContentStore
                 : expectedSize ?? throw new FileNotFoundException(
                     "Assembled task file is missing", filePath);
             if (expectedSize is not null && sourceLength != expectedSize.Value)
-                throw new InvalidDataException("assembled file length differs from descriptor");
+                throw new InvalidDataException("assembled file length differs from manifest");
             string hash = sourceExists ? Sha256HexFile(filePath) : expectedHash!;
             if (expectedHash is not null &&
                 !string.Equals(hash, expectedHash, StringComparison.Ordinal))
-                throw new InvalidDataException("assembled file SHA-256 differs from descriptor");
+                throw new InvalidDataException("assembled file SHA-256 differs from manifest");
             string path = BlobPath(hash);
             bool deduped = FileMatchesHash(path, hash, sourceLength);
             if (!deduped)
@@ -191,7 +278,9 @@ public static class ContentStore
             }
             var entry = new Entry(
                 Id: stableEntryId ?? Guid.NewGuid().ToString("N"),
-                Name: FileNameUtil.Sanitize(displayName),
+                Name: bundleId is not null
+                    ? FileNameUtil.SanitizeRelativePath(displayName)
+                    : FileNameUtil.Sanitize(displayName),
                 Hash: hash,
                 Size: new FileInfo(path).Length,
                 CrcHex: crcHex,
@@ -255,13 +344,18 @@ public static class ContentStore
         }
     }
 
+    /// <summary>Legacy archive directory, retained only for one-time migration.</summary>
+    private static string LegacyReceivedDir =>
+        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
+            "AirFerry", "received");
+
     /// <summary>Import legacy Documents/AirFerry/received once if store is empty.</summary>
     public static void MigrateLegacyReceivedIfNeeded()
     {
         lock (Gate)
         {
             if (LoadIndex().Count > 0) return;
-            string legacy = ScanViewModel.ReceivedDir;
+            string legacy = LegacyReceivedDir;
             if (!Directory.Exists(legacy)) return;
             foreach (string f in Directory.EnumerateFiles(legacy, "*", SearchOption.AllDirectories))
             {
@@ -306,11 +400,16 @@ public static class ContentStore
         }
         catch (Exception ex)
         {
-            string backup = Path.Combine(
-                RootDir,
-                $"index.corrupt.{File.GetLastWriteTimeUtc(IndexPath).Ticks}.json");
+            // The backup path itself touches the filesystem — if the index
+            // vanished between the read above and here, re-throwing a raw IO
+            // exception would escape as a non-InvalidDataException and crash
+            // callers that only guard the corruption case.
+            string backup = "";
             try
             {
+                backup = Path.Combine(
+                    RootDir,
+                    $"index.corrupt.{File.GetLastWriteTimeUtc(IndexPath).Ticks}.json");
                 if (!File.Exists(backup)) File.Copy(IndexPath, backup, overwrite: false);
             }
             catch

@@ -280,9 +280,13 @@ class QrDecodePool(
         // Hot path: region decode per code when we have a lock AND we're not due
         // for a full-frame re-lock. We track `lockedCount` slots (fixed since the
         // first lock), NOT results.size — a partial decode (some codes missed)
-        // must still hint all original positions next frame.
+        // must still hint all original positions next frame. The periodic
+        // re-lock counts CONSECUTIVE misses (mirrors the single-code path's
+        // `roiMiss.incrementAndGet() % N`): multiMiss is 0 right after any
+        // success, and `0 % N == 0` would then force a full-frame scan on every
+        // frame — exactly what this tracker exists to avoid.
         val dueFullLock = tracked == null || lockedCount == 0 ||
-            multiMiss.get() % MULTI_FULL_DECODE_EVERY == 0L
+            (multiMiss.get() > 0 && multiMiss.get() % MULTI_FULL_DECODE_EVERY == 0L)
         if (!dueFullLock && tracked != null && lockedCount > 0) {
             val buf = try {
                 ZxingDecoder.decodeMultiYTracked(

@@ -1,419 +1,286 @@
-# 跨端契约规格 (Cross-Platform Contract SPEC)
+# AirFerry Protocol 2 (AF2) 跨端位级契约规格 (SPEC)
 
-> **本文是「三端都必须遵守」的不变量清单**——Rust 核心（`core/`）、浏览器发送端（`apps/sender/`）、Android 接收端（`apps/scanner/`）之间所有线格式与接口的**位级权威定义**。
->
-> - 与 `protocol.md` / `api.md` 互补：那两份讲「为什么」和「用法」，本文讲「字节怎么排、位怎么编码」，且**聚焦于容易漂移的细节**。
-> - **冲突时以代码为准**：每个字段都标注了权威源文件位置。
-> - 改协议字段时，三端必须同步，并同步更新本文。
+> **权威位级线格式与跨端不变量清单**。
+> Rust 核心（`core/af2/`、`core/transfer-engine/`）、Web/扩展前端（`apps/web/`）、Android 接收端（`apps/scanner/`）、Windows 接收端（`apps/windows/`）共享。
+> 
+> - **Wire magic / version**：`AF` / `2`
+> - **兼容性**：与 v1 协议（`ET / wire version 1`）完全不兼容，按魔数互斥，无误解析窗口。
 
 ---
 
-## 1. 会话 ID 派生（断点恢复的基石）
+## 0. 核心架构裁决
 
-同一文件重发必须产生**相同** session_id，接收端据此识别并断点恢复。
+1. **自举闭合**：晚加入接收端不依赖“先恢复某对象”即可拿到精确 OTI。
+2. **编码实例隔离**：同内容换 T / 换压缩器重发时，未完成 Decoder 结构性不混流（以 128 位 `object_id` 为路由键，包含 `encoded_hash` 并在解码前复算比对）。
+3. **独立提交**：Raw Chunk 独立分块、压缩、校验、落盘，支持跨重启与跨编码实例复用。
+4. **位级严谨**：所有长度、加法、乘法、偏移、`ceil_div` 在切片或分配前必须经 checked arithmetic 防御。
+5. **哈希基准**：采用 **BLAKE3-256 单算法**（Rust `blake3` crate 唯一权威，FFI 跨端复用，空输入摘要 `af1349b9...`）。
 
-### 输入与哈希
+---
 
+## 1. 目标与非目标
+
+### 1.1 目标
+1. 文件、UTF-8 文字、目录、多文件包采用统一的 Entry 模型，废除旧式魔数嗅探；
+2. 用户选择内容后自动分块、压缩、编码、循环播放，无需手动换段；
+3. 每个 Raw Chunk 独立恢复、解压、校验、落盘、跨重启复用；
+4. 同内容换 T / codec / 压缩参数重发：已完成 Chunk 复用，未完成 Decoder 结构性不混流；
+5. 一切不可信输入在进入第三方解码器前 fail-closed 验尽；
+6. 协议演进通过 Critical/Optional TLV 与注册表扩展，消除固定尾部追加。
+
+### 1.2 非目标
+- 不提供双向 ACK/NACK（完全单向光学信道）；
+- 不做符号级 Decoder 持久化（仅做 Chunk 级持久化）；
+- 不提供对 v1 构件的升级兼容。
+
+---
+
+## 2. 分层模型
+
+```text
+内容层   Manifest：Entry、规范路径、Entry Hash、Chunk Hash Table
+分块层   Canonical Content Stream → 固定大小 Raw Chunk (默认 8 MiB)
+压缩层   每个 Raw Chunk 独立选择 RAW / Zstd / XZ
+FEC 层   Manifest 与每个 Encoded Chunk 各为一个 RaptorQ Object（RFC 6330）
+帧层     ROOT / OBJECT_META / SYMBOL
+物理层   每帧一个 QR；多码布局并行承载多帧
 ```
-session_id = FNV1a_128( name_utf8 || size_le64 || mtime_ms_le64 || fingerprint )
-fingerprint = FNV1a_64( head_1KiB || tail_1KiB )   → 输出 8 字节（小端）
-```
 
-- 喂入顺序固定：**文件名(UTF-8) → size(LE u64) → mtime 毫秒(LE u64) → 指纹字节**。
-- FNV-1a 128 常量：offset basis `0x6c62272e07bb01426b82175983ad0b58`，prime `0x0000000001000000000000000000013b`。
-- FNV-1a 64 常量：offset basis `0xcbf29ce484222325`，prime `0x100000001b3`。
-- 指纹覆盖**头 1 KiB + 尾 1 KiB**（小文件取实际长度），检测截断/追加而无需全量哈希。
+- **Entry**：文件、UTF-8 文字或目录。
+- **Canonical Content Stream**：按规范路径字节序升序，顺序无缝拼接全部非目录 Entry 内容。
+- **Raw Chunk**：该流的固定范围切片。**Encoded Chunk**：Raw Chunk 经 RAW/Zstd/XZ 编码后的字节。
+- **Object**：独立 RaptorQ 对象；Manifest 是一个，每个 Encoded Chunk 各是一个。
+- **Broadcast Instance**：以固定 T 与一组固定 Object Meta 连续播放一个 Transfer 的一次运行。
+- **Epoch**：调度器遍历全部 Chunk 一轮；后续 Epoch 发送各对象未用过的新 Repair ESI。
 
-### 双端实现（必须位一致）
+---
 
-| 端 | 源 |
-|----|-----|
-| Rust | `core/qr-protocol/src/session.rs:23` `SessionId::derive` + `:52` `content_fingerprint` |
-| 浏览器 (TS) | `apps/sender/src/wasm/session.ts:17` `deriveSessionId` + `:39` `contentFingerprint` |
+## 3. 基础编码约定
 
-> ⚠️ 改其中任一端的哈希实现或输入顺序，另一端必须同步，否则断点恢复失效。
+- 多字节整数一律大端序（Big-Endian）；`u24` 为 3 字节大端无符号数。
+- 基础哈希：**BLAKE3-256**（记作 `H(...)`，输出 32B，空输入摘要 `af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262`）。
+- 帧校验：CRC-32/ISO-HDLC (IEEE)（自检 `CRC32("123456789") = 0xCBF43926`）。
+- 字符串：严格 UTF-8；路径分隔符固定 `/`；域标签为精确 ASCII 字节。
+- `Trunc128(h)`：取 32B 哈希前 16B。
 
-### 大文件根任务与子会话
+---
 
-逻辑传输（文件/多文件包/文字）先被**整段压缩一次**得到压缩流，再按固定 `SEGMENT_RAW_BYTES`（`MAX_OBJECT_BYTES - MAX_SYMBOL_SIZE` ≈ 31.9 MiB）切成段。`root_session_id` 从完整传输身份派生；每个分段使用独立、确定性的 child session id：
+## 4. 三层身份体系
 
-```
-child_session_id = FNV1a_128(
-    ASCII("AirFerry.segment.v1") || BE128(root_session_id) || BE32(segment_index)
+| ID | 位宽 | 回答的问题 | 编码参数变化时 |
+|---|---:|---|---|
+| **Content ID** | 256 | 逻辑内容与路径结构指纹 | 保持不变 |
+| **Transfer ID** | 128 | 该内容按指定 `chunk_raw_size` 切分的身份 | 仅块大小变化才变 |
+| **Object ID** | 128 | 某 Object（Manifest 或 Encoded Chunk）的一次精确编码 | 任意参数变化即变 |
+
+### 4.1 Content ID
+```text
+content_id = H(
+    ASCII("AF2/content/v1")
+    || entry_count:u32
+    || repeated { kind:u8 || path_len:u16 || path || size:u64 || entry_hash:[32] }
 )
 ```
+*注：目录 `size = 0`、`entry_hash = H(空)`。mtime、MIME、权限不进身份，仅作为 TLV 注解。*
 
-域标签、根 ID 的大端字节序和 0 起段号均为协议常量。Rust 权威实现为 `SessionId::derive_segment`，TS 镜像为 `deriveSegmentId`。
+### 4.2 Transfer ID
+```text
+transfer_id = Trunc128(H(
+    ASCII("AF2/transfer/v1") || manifest_hash:[32] || chunk_raw_size:u32
+))
+```
 
----
-
-## 2. 线帧格式（Wire Frame）
-
-每帧 = `[Header 60B][Payload T B][Footer 4B]`，**T = symbol_size**。所有多字节整数**大端序**。
-
-- 一次会话内 T 恒定，合法域为 64..=65528 且必须 8 字节对齐。浏览器默认 **1400**；核心库默认 **1024**。接收端从帧头自适应。预设另有 512/896/1008/1904/2400。
-- magic `0x4554`（ASCII "ET"），version `1`。
-
-### Header（60 字节）
-
-| 偏移 | 长度 | 字段 | 类型 | 说明 |
-|------|------|------|------|------|
-| 0 | 2 | magic | u16 BE | `0x4554` |
-| 2 | 1 | version | u8 | `1` |
-| 3 | 1 | flags | u8 | bit0 = `FLAG_DESCRIPTOR` (`0x01`) |
-| 4 | 16 | session_id | u128 BE | 会话 ID |
-| 20 | 4 | sbn | u32 BE | RaptorQ 源块号 |
-| 24 | 4 | esi | u32 BE | 编码符号 ID（源 < K，修复 ≥ K） |
-| 28 | 4 | total_blocks | u32 BE | 源块总数 |
-| 32 | 4 | total_symbols | u32 BE | 源符号总数 K |
-| 36 | 4 | symbol_size | u32 BE | T |
-| 40 | 8 | frame_index | u64 BE | 单调帧号（统计） |
-| 48 | 8 | timestamp_ms | u64 BE | 发送端 UNIX 毫秒 |
-| 56 | 4 | payload_crc32 | u32 BE | 载荷 CRC32 |
-
-### Footer（4 字节）
-
-| 偏移 | 长度 | 字段 | 说明 |
-|------|------|------|------|
-| 60+T | 4 | frame_crc32 | 覆盖 Header+Payload 的整帧 CRC32 |
-
-### 双层 CRC
-
-`payload_crc32`（Header 内）+ `frame_crc32`（Footer）任一失败 → 丢弃该帧，靠 RaptorQ 冗余恢复。CRC 仅保完整性、**不认证**。
-
-### 权威源
-
-| 端 | 源 |
-|----|-----|
-| Rust 构/析 | `core/qr-protocol/src/frame.rs`：`build` / `to_bytes` / `from_bytes` |
-| 常量 | `frame.rs:13-22`：`MAGIC=0x4554`、`PROTOCOL_VERSION=1`、`FLAG_DESCRIPTOR=0x01`、头 60 / 尾 4 |
-| Kotlin 帧头解析 | `apps/scanner/.../scan/ReceiverSessionManager.kt:99` `parseHeader`（镜像上述布局） |
+### 4.3 Object ID
+```text
+object_id = Trunc128(H(
+    ASCII("AF2/object/v1")
+    || transfer_id:[16] || role:u8 || object_index:u32
+    || codec_id:u8 || fec_id:u8 || oti:[12] || encoded_hash:[32]
+))
+```
 
 ---
 
-## 3. 描述符帧载荷（Descriptor Payload）
+## 5. Wire Frame 格式
 
-描述符帧（`flags & 0x01`）的 payload 不是符号，而是**权威对象元数据**（OTI + 每块 K + 文件元数据 + 压缩标签），零填充到 T 字节。首帧即描述符；之后每 17 帧插一个。间隔 17 与 2/4 多码布局互质，使描述符轮转全部物理码位，不能改回会把描述符固定在单一码位的 16。
-
-### 布局（大端，载荷内偏移）
+```text
+[Header 26 B][Payload Area T B][Frame CRC32 4 B]     总开销 30 B
+```
 
 | 偏移 | 长度 | 字段 | 说明 |
-|------|------|------|------|
-| 0 | 1 | magic | `0xD5` |
-| 1 | 1 | version | 普通对象 `3`；分段对象 `5`；2/1 为旧版；`4` 为撤回的预发布分段版（接收端 fail-closed 拒绝） |
-| 2 | 2 | num_blocks | u16 BE |
-| 4 | 8 | transfer_length | u64 BE（RaptorQ 对象字节数，含填充） |
-| 12 | 4 | symbol_size | u32 BE |
-| 16 | 12 | oti_bytes | RFC 6330 OTI 线格式 |
-| 28 | 16×B | blocks[] | 每块：`sbn(u32) + num_source_symbols(u32) + block_length(u64)` |
+|---:|---:|---|---|
+| 0 | 2 | magic | ASCII `AF` (`0x4146`) |
+| 2 | 1 | wire_version | 固定 `2` |
+| 3 | 1 | frame_type | `1`=ROOT, `2`=OBJECT_META, `3`=SYMBOL |
+| 4 | 16 | object_id | SYMBOL/META = Object ID；ROOT = Transfer ID |
+| 20 | 2 | body_len | Payload Area 内有效字节数 |
+| 22 | 1 | sbn | RaptorQ SBN（控制帧必须 0） |
+| 23 | 3 | esi | RaptorQ ESI，u24 BE（控制帧必须 0） |
+| 26 | T | payload_area | 有效 body + 零填充至 T 字节 |
+| 26+T| 4 | frame_crc32 | 覆盖 0..26+T 字节的 IEEE CRC32 |
 
-记块表末尾 `P = 28 + 16×B`。
+- `T`: `256 ≤ T ≤ 2400` 且 `T % 8 == 0`；一个 Broadcast Instance 内恒定。
+- SYMBOL 帧 `body_len == T`；控制帧 `body_len ≤ T` 且 `body_len..T` 填充 0。
 
-**v2 扩展**（紧跟块表）：
+---
 
+## 6. 控制记录格式
+
+### 6.1 Root Record (`AFR2`, 112 B + TLV)
 | 偏移 | 长度 | 字段 |
-|------|------|------|
-| P | 1 | filename_len（0..=255） |
-| P+1 | filename_len | filename（UTF-8） |
-| P+1+fn | 8 | original_size（u64 BE，压缩前原始字节） |
-| P+9+fn | 4 | crc32（u32 BE，原始文件 CRC32） |
+|---:|---:|---|
+| 0 | 4 | magic ASCII `AFR2` |
+| 4 | 1 | schema = 1 |
+| 5 | 1 | flags = 0 |
+| 6 | 2 | fixed_len = 112 |
+| 8 | 2 | extensions_len |
+| 10 | 2 | reserved = 0 |
+| 12 | 32 | content_id |
+| 44 | 16 | manifest_object_id |
+| 60 | 32 | manifest_hash |
+| 92 | 8 | total_raw_size |
+| 100 | 4 | entry_count |
+| 104 | 4 | chunk_count |
+| 108 | 4 | chunk_raw_size (默认 8 MiB) |
 
-记 v2 末尾 `Q = P + 1 + filename_len + 12`。
-
-**v3 扩展**（紧跟 v2）：
-
+### 6.2 Object Meta Record (`AFO2`, 112 B + TLV)
 | 偏移 | 长度 | 字段 |
-|------|------|------|
-| Q | 1 | compression（u8：0=None, 1=Zstd, 2=XZ） |
-| Q+1 | 8 | compressed_size（u64 BE，压缩后负载字节，RaptorQ 填充前） |
+|---:|---:|---|
+| 0 | 4 | magic ASCII `AFO2` |
+| 4 | 1 | schema = 1 |
+| 5 | 1 | role: `1`=MANIFEST, `2`=CHUNK |
+| 6 | 2 | fixed_len = 112 |
+| 8 | 2 | extensions_len |
+| 10 | 2 | reserved = 0 |
+| 12 | 16 | transfer_id |
+| 28 | 4 | object_index |
+| 32 | 1 | codec_id (0=RAW, 1=Zstd, 2=XZ) |
+| 33 | 1 | fec_id (固定 1 = RaptorQ RFC 6330) |
+| 34 | 2 | reserved = 0 |
+| 36 | 12 | oti (RFC 6330 12B 线格式) |
+| 48 | 32 | raw_hash |
+| 80 | 32 | encoded_hash |
 
-剩余零填充。固定开销 28 + 每块 16 + v2 尾 13 + filename_len + v3 尾 9，默认 1024 symbol 下数百块内轻松装入。
-
-**v5 扩展**仅用于压缩流分段子对象（compress-then-segment 模型），紧跟 v3 尾部（`R = Q + 9`）。`file_meta`：`compressed_size` 是当前段压缩字节数；`original_size`、`crc32`、`compression` 是整份解压后原文的属性（跨段一致）。**v5 取代旧 v4**：v4（8 MiB 原文段 + 逐段压缩，撤回的早期 v1.2.0 预发布构建使用）语义不兼容，接收端 fail-closed 拒绝 version==4：
-
-| 偏移 | 长度 | 字段 | 说明 |
-|------|------|------|------|
-| R | 16 | root_session_id | u128 BE |
-| R+16 | 4 | segment_index | u32 BE，0 起 |
-| R+20 | 4 | segment_count | u32 BE，1..=131072 |
-| R+24 | 8 | original_offset | u64 BE，压缩流内偏移，必须为 `index × SEGMENT_RAW_BYTES` |
-| R+32 | 8 | root_original_size | u64 BE，根压缩流总字节数 |
-| R+40 | 32 | root_sha256 | 完整解压后原文的 SHA-256；每段必须一致 |
-| R+72 | 32 | raw_sha256 | 当前段压缩字节的 SHA-256 |
-
-非分段对象仍写 version 3；分段对象必须写 version 5 且携带完整 104 字节尾段。接收端在分配或定位写入前同时验证 child id、压缩流大小推导出的精确段数、索引、规范偏移、当前段压缩长度 ≤ 规范切片、逐段 SHA-256 与跨段不变的根 SHA-256；全部段齐后拼接压缩流、解压一次，再校验解压后长度 + CRC32 + 根 SHA-256，防止混合两个文件修订版中“各自合法”的分段。
-
-### v2/v3 消歧规则（关键，易踩坑）
-
-载荷总是补零到 T 字节，因此仅凭「剩余 ≥ 9 字节」**无法区分** v3 尾部与 v2 补零——全零 9 字节会被误读为 `compressed_size=0`，导致恢复结果被截成空文件。解析器**仅当 `version ≥ 3` 或尾部非全零**时才当 v3；否则按 v2（`compression=None`、`compressed_size == original_size`）。
-
-### 运行时标志（不在线上）
-
-`FileMeta` 有两个**仅运行时**的布尔标志（不序列化），避免用 `0` 当哨兵误伤合法的零值：
-- `compressed_size_known`：区分「真的 0 字节」与「描述符未提供」。
-- `crc32_known`：区分「真的 CRC=0」与「未验证」（v1/`default()` 置 false，跳过校验而非对比无意义的 0）。
-
-### 权威源
-
-| 端 | 源 |
-|----|-----|
-| Rust 构/析 | `core/transfer-engine/src/descriptor.rs`：`build_payload` / `parse_payload` |
-| 常量 | `descriptor.rs:120-125`：`DESC_MAGIC=0xD5`、`DESC_VERSION=5`（分段）、`DESC_V3_VERSION=3`（v4 为撤回预发布版，fail-closed 拒绝）、固定开销 28/13/9 |
+### 6.3 Manifest Header (`AFM2`, 80 B)
+- 恒为 RAW 不压缩，上限 16 MiB。
+- 结构：`[Header 80 B][Entry Records][Chunk Hash Table][Manifest TLVs]`。
+- **Entry Record (60 B + path + TLV)**：`kind` (1=FILE, 2=UTF8_TEXT, 3=DIRECTORY)、`content_offset`、`content_size`、`content_hash`。
+- **路径约束**：Unicode NFC、严格 UTF-8、`/` 分隔、禁止 `..` 与绝对路径、总长 ≤ 1024 B、单段 ≤ 255 B。
 
 ---
 
-## 3.5 载荷内容类型（Payload Content Kind）
+## 7. 压缩编解码与调度
 
-> **关键设计**：descriptor **不含** mime/kind 字段。文字 / 单文件 / 多文件包的区分**全部在载荷字节层**用魔数前缀完成——与 descriptor 协议解耦，向后兼容老接收端。三种类型复用同一套 RaptorQ + 压缩 + 帧管线，仅「字节如何产生」与「恢复后如何解释」不同。
+### 7.1 压缩注册表
+| codec_id | 算法 | 约束 |
+|---:|---|---|
+| 0 | RAW | encoded == raw |
+| 1 | Zstd | 单 Frame、windowLog ≤ 23 |
+| 2 | XZ/LZMA2 | 单 Stream、解码内存 ≤ 128 MiB |
 
-接收端恢复 + 解压后的字节，按**如下优先级**逐个检测魔数（先到先匹配，互不重叠）：
+- **接收端 MUST 可解码全部三种 codec**（三端已实现：Native 走 zstd/xz2，Web 走 ruzstd/lzma-rs）；发送端按 §10.1 逐块自选算法，**RAW 恒合法**。
+- 严格变小才压缩：压缩结果严格小于原始大小时方可使用压缩，否则必须为 RAW。
 
-| 顺序 | 魔数（前 8 字节 ASCII） | 类型 | 载荷布局（魔数之后） |
-|------|----------------------|------|---------------------|
-| ① | `ETTEXTv1`（`0x45 54 54 45 58 54 76 31`） | **文字** | UTF-8 文本，无长度前缀（由 `original_size`/`compressed_size` 定界） |
-| ② | `ETBUNDL1`（`0x45 54 42 55 4E 44 4C 31`） | 多文件包 | u16 version + u16 count + 逐项 `{name, size, content}`（见 §3.6） |
-| ③ | （无匹配） | 单文件 | 原始文件字节 |
-
-### 文字载荷（ETTEXTv1）
-
-```
-offset  size   field
-0       8      magic: ASCII "ETTEXTv1"
-8       …      UTF-8 文本字节（message body）
+### 7.2 标准 Playlist 调度
+```text
+Bootstrap: ROOT × 4 → MANIFEST META × 4 → up to 32 Manifest Symbols
+Each Chunk i: ROOT × 1 → CHUNK i META × 2 → i's source symbols → fresh repair symbols (0.25 K)
+Interleave: META 每 ~17 帧广播；ROOT 每 ~31 帧广播；每 ~8 个 Chunk Symbol 插入 1 个 Manifest Symbol
 ```
 
-- **无 per-field CRC**：整段文字受 transfer-level CRC32（descriptor）+ RaptorQ + 双层帧 CRC 保护，与单文件完全一致。
-- **descriptor 字段**：`filename` = 选择页用户命名（`normalizeDraftFilename`，默认 `文字消息.txt`）、`original_size = 8 + len(utf8)`、其余字段照常。老接收端不认 ETTEXTv1 → 落到单文件兜底（③），按 descriptor 名存成 `.txt` 仍可打开（向后兼容）。
-- **会话 ID 派生**：name=上述 filename、size=`8+len`、mtime=`Date.now()`（发送时刻，替代文件的 `lastModified`）、fingerprint=内容指纹（头/尾 1024B）。
-- **发送端何时走 ETTEXTv1（UI）**：选择页统一列表里**恰好 1 条文字、0 文件**时 `compressWorker.postMessage({ text, name })` → `processText`（`name` 写入 descriptor / session 派生；空则默认 `文字消息.txt`）。混发 / 多条文字 → 文字物化为命名 `.txt` 进 `ETBUNDL1`（无 ETTEXTv1 魔数）。
-- **收端 UI（不改 wire 格式）**：① ETTEXTv1 → `ReceiveText`，保存/展示名优先 descriptor `fileName()`（Android `ScanActivity` / Windows `StageEtText`），勿再写死 `文字消息.txt`；② 单文件/打包条目若扩展名属文本类（`TextLike` / `FileNameUtil.IsTextLikeName`：txt/md/json/源码…）且为严格 UTF-8 → 同样进 `ReceiveText` 可复制；非法 UTF-8 回退文件页。
+---
 
-### 权威源
+## 8. 完整性校验链（强制顺序）
 
-| 端 | 源 |
-|----|-----|
-| 浏览器发送端 | `apps/sender/src/wasm/text.ts`：`TEXT_MAGIC`/`buildTextPayload`/`isTextPayload`；UI 分流见 `options.tsx` `onSend` |
-| Android 接收端 | `TextParser.kt` + `TextLike.kt` + `ScanActivity.recoverAndStage` / `ReceiveBundleActivity` |
-| Windows 接收端 | `TextParser.cs` + `FileNameUtil.IsTextLikeName`/`DecodeUtf8Strict` + `ScanViewModel` / `ReceiveBundleView` |
-| 分流入口 | Android `ScanActivity.recoverAndStage`（text→bundle→单文件）/ Windows `ScanViewModel.RecoverAndStage`（同序） |
-
-### 3.6 多文件包载荷（ETBUNDL1）
-
-多文件打包格式（大端）：
-
-```
-offset  size   field
-0       8      magic: ASCII "ETBUNDL1"
-8       2      version: u16 = 1
-10      2      file_count: u16
-12      …      file_count × { u16 name_len, name_len name UTF-8, u64 size, size content }
+```text
+① Frame CRC32 
+  → ② Header/Meta 边界与预算校验 
+  → ③ OTI 校验（先于建 Decoder）
+  → ④ object_id + encoded_hash（解码前验证 META，恢复后验证字节）
+  → ⑤ 解压窗口/内存/精确长度/尾随校验 
+  → ⑥ Chunk Hash（校验 Manifest 表）
+  → ⑦ Manifest Hash（校验 ROOT） 
+  → ⑧ Entry Hash 
+  → ⑨ Content ID 重算
 ```
 
-> 发送端仅在选中 ≥2 个文件时打包；单文件直传原始字节（无魔数）。权威源：`apps/sender/src/wasm/bundle.ts`（TS）/ `apps/scanner/.../scan/BundleParser.kt`（Android）/ `apps/windows/AirFerry.Windows/Bundle/BundleParser.cs`（Windows），三端字节级一致。
+---
+
+## 9. 跨端职责分工
+
+- **Rust Core 唯一实现**：帧/ROOT/META/Manifest/TLV 编解码、哈希与三层 ID 派生、路径校验、OTI 验证、状态机、有界解压接口、单一 Receiver Snapshot ABI。
+- **宿主层（TS / Kotlin / C#）**：相机与屏幕捕获、QR 灰度解码、文件系统与 IndexedDB 落盘、UI 视图。禁止在宿主语言中镜像线格式协议。
 
 ---
 
-## 4. 压缩（三算法选优）
+## 10. 发送端预处理流水线（SHOULD）
 
-### 算法标签
-
-| 标签 | 算法 | 说明 |
-|------|------|------|
-| `0` | None (Raw) | 原始字节直传 |
-| `1` | Zstd | 浏览器 level **1**（快速；媒体类二进制负载损失可忽略） |
-| `2` | XZ / LZMA2 | 浏览器 level **9**；native `xz2` preset 6 + EXTREME；解压端兼容 |
-
-> ⚠️ **以代码为准**：`apps/sender/src/wasm/compress.ts`（`ZSTD_LEVEL` / `XZ_LEVEL` / early-exit 阈值）。旧文档写「Zstd Lv22 / 95% early-exit」**已过时**（已调为 Zstd level 1、阈值 70%）。
-
-### 浏览器选优策略（`compress.ts` `preparePayload`）
-
-1. **Raw**：始终候选。
-2. **Zstd (Lv1)**：始终运行。
-3. **XZ (Lv9)**：仅当 Zstd 压缩率 **< 70%** 时运行（`ZSTD_ALREADY_COMPRESSED_RATIO = 0.70`，跳过已压缩文件如 JPEG/MP4 的慢速 XZ）。
-
-最终取所有已运行候选中**最小**者，标签写入描述符 v3 扩展。
-
-### 解压（接收端）
-
-按描述符 `compression` 标签解压。**炸弹防护**：`core/qr-protocol/src/compress.rs:170 decompress_with_limit` 把输出上限封顶到描述符 `original_size`，超限即判失败，防 OOM。**zstd 窗口钳制（线级互操作约束）**：所有 native 解码路径统一经 `zstd_decoder()`（`compress.rs:87`）设 `ZSTD_d_windowLogMax=23`（`ZSTD_WINDOW_LOG_MAX`，`compress.rs:81`）——恶意 CRC-valid 帧头声明 windowLog 27 会在产出任何输出前强制 ~128 MiB 窗口分配（独立于输出上限的输入侧漏洞），一律拒绝；native 编码端 `compress()`（`compress.rs:105`）同步把编码窗口封顶 23，保证自产流按构造可解。浏览器 TS 发送端 zstd level 1 的 windowLog 表值 ≤ 19，天然在钳制内。第三方产出的 windowLog > 23 的 zstd 流会被本接收端拒绝。
-
-### 权威源
-
-| 端 | 源 |
-|----|-----|
-| Rust 分发 | `core/qr-protocol/src/compress.rs:139` `compress_with` / `decompress_with` / `:170` `decompress_with_limit` |
-| 标签常量 | `compress.rs:27-29`：`COMPRESSION_NONE=0`/`ZSTD=1`/`XZ=2` |
-| zstd 窗口钳制 | `compress.rs:81` `ZSTD_WINDOW_LOG_MAX=23`（编码封顶 + 解码拒绝 >23，见「解压」节） |
-| 浏览器 (TS) | `apps/sender/src/wasm/compress.ts:49` `CompressionAlgorithm` 枚举（镜像） |
+1. **单趟读取**：entry hash、chunk hash、全文 content 派生在同一次读取中完成，禁止为哈希与分块分别通读。
+2. **重发免哈希缓存**：发送端本地按 `(规范路径, size, mtime)` 缓存已算好的 entry_hash / chunk 表 / content_id；命中即零预处理直接开播。mtime 仅为本地缓存失效键，不进协议身份。
+3. **惰性编码**：Chunk 的压缩与 RaptorQ 编码在播放开始后按 playlist 顺序惰性进行，降低峰值内存。
 
 ---
 
-## 5. RaptorQ 符号坐标
+## 11. 断点恢复账本（宿主格式，非 wire）
 
-| 符号类型 | ESI 范围 | 说明 |
-|---------|---------|------|
-| 源符号 | `[0, K_block)` | 原始数据符号 |
-| 修复符号 | `[K_block, 2²⁴−1]` | 喷泉码按需生成；到协议 ESI 上限后明确停止 |
+```text
+ledger_version, transfer_id, manifest_hash, content_id(Manifest 后写),
+total_raw_size, chunk_raw_size, chunk_count, completed_bitmap, chunk_hash[](Manifest 后写)
+```
 
-- **SBN**：u8（0–255），源块号。
-- **ESI**：u24（0–16777215）。
-- **越界拒绝**：接收端拒绝 `ESI ≥ 2²⁴` 或载荷长度 ≠ `symbol_size` 的数据帧——否则触发底层 `raptorq` crate panic（`panic="abort"` 下致命）。守卫在 decoder 入参检查 + `ReceiverSession::ingest`。
-- **块上限**：`MAX_SOURCE_SYMBOLS_PER_BLOCK = 56403`，`MAX_SOURCE_BLOCKS = 256`（`core/raptorq-core/src/meta.rs:6,8`）。
-
-### 发射策略（发送端，消除 coupon-collector 拖尾）
-
-1. **源符号阶段（仅一遍）**：所有源符号跨块轮询（esi-major）输出——先每块 esi=0，再每块 esi=1……突发丢帧被均摊到所有块。
-2. **持续新鲜修复阶段**：源符号发完后持续生成修复符号，跨块轮询，每块修复 ESI **单调递增、永不重复**（block_b 第 m 轮 ESI = K_b + m）；若下一 ESI 将达到 `2²⁴`，发送端返回耗尽错误，不调用上游也不回绕。
-
-→ 源符号发完后**每一帧都是接收端从未见过的新符号**，进度近似线性。`redundancy_pct`（5–50，默认 25）**仅用于 UI 时长估算**，不限制实际修复符号数。
-
-### 权威源
-
-`core/raptorq-core/src/encoder.rs:67,77`（源/修复符号）、`core/transfer-engine/src/sender.rs:169` `next_frame` / `:246` `next_symbol_id`。
+- **提交顺序**：恢复 Encoded → 验 object_id/encoded_hash → 有界解压 → 验 chunk hash → pwrite → fsync 数据 → 写临时账本 fsync → 原子 rename 账本 → 内存置位。
+- **重开复核**：重开任务必须重算已完成位对应范围的 chunk hash，不符位清零（治愈账本虚报）。
+- **跨实例复用**：完成位以 `(transfer_id, chunk_index, raw_hash)` 判定，跨 codec、压缩 level、T、修复调度变化均可复用。
 
 ---
 
-## 6. 安全边界（panic=abort 下的生命线）
+## 12. 强制资源上限
 
-本 workspace 以 `panic = "abort"` 构建（`Cargo.toml`）——**任何 panic = 进程崩溃**。因此必须把恶意/越界输入挡在解码器之前：
-
-| 防线 | 位置 | 作用 |
-|------|------|------|
-| OTI 校验 | `core/raptorq-core/src/meta.rs` `ObjectMeta::validate` | 校验 T 的范围/对齐、OTI reserved/sub-block/alignment/整除关系、canonical SBN、块数/K/长度及本地资源预算；非法绝不构建解码器 |
-| 坐标守卫 | decoder 入参检查 + `ReceiverSession::ingest` | 拒绝 ESI≥2²⁴ / 载荷≠symbol_size |
-| 解压炸弹 | `compress.rs` + `receiver.rs` | XZ 解码器内存 128 MiB；**原始内容（解压后）**封顶 `MAX_ORIGINAL_BYTES`（256 MiB），**压缩对象（wire）**封顶 `MAX_OBJECT_BYTES`（32 MiB），并要求结果长度精确等于 `original_size`；两者独立约束——高度可压缩对象可 wire 小但原始大 |
-| 帧校验 | `Frame::from_bytes` | magic/version/双层 CRC |
-| 预描述符缓存封顶 | `receiver.rs` `pre_meta_cache_max()`（随 `pending_symbol_size` 动态缩放，下限 `PRE_META_SYMBOL_CACHE_MAX`=12000，预算 `MAX_OBJECT_BYTES`≈32 MiB） | 描述符确认前 bootstrap cache 按 (sbn,esi) 缓冲；满则丢弃新键并计 `frames_corrupt`，防 CRC 合法、无描述符的恶意码流 OOM；动态缩放避免大文件在描述符到达前"已识别符号"钉死在 12000 |
-| 描述符冻结 | `receiver.rs` `descriptor_seen` | 首个通过全部校验的 descriptor 确立 OTI、文件元数据与压缩算法；同 session 后续描述符只可完全一致，禁止中途替换解码参数 |
-| v5 分段坐标 | `segment.rs` `SegmentMeta::validate` | 校验 child id、段数上限与压缩流大小一致性、规范偏移、压缩长度 ≤ 规范切片；宿主落盘前再校验段 SHA-256，收齐后统一解压并校验长度 + CRC32 + 根 SHA-256 |
-| WASM symbol_size | `wasm.rs` `Config::new(symbol_size)` | 仅接受 64..=65528 的 8 字节倍数，禁止按字段构造绕过 |
-
-> 接收端扫描的是**任意屏幕**的二维码，描述符/帧元数据均**不可信**。CRC32 仅保完整性、不认证——上述参数校验才是真正防线。
+| 项 | 上限 |
+|---|---:|
+| T | 256..=2400，8 对齐 |
+| Manifest | 16 MiB |
+| Entry 数 / 单路径 | 4096 / 1024 B |
+| chunk_raw_size | 1..32 MiB 2 的幂（默认 8） |
+| chunk_count / 总大小 | 131072 / 4 TiB（`total_raw_size ≥ 1`） |
+| 单 Encoded Object | 32 MiB（Manifest 16 MiB） |
+| Source Blocks / ESI | 255 / < 2²⁴（触顶停止，跨 Epoch 永不重复） |
+| zstd windowLog / XZ 内存 | 23 / 128 MiB |
+| 活跃 Decoder | Manifest 1 + Chunk 1 |
+| 未知 Object 符号缓存 | **0** |
 
 ---
 
-## 7. ingest 状态字位布局（权威，三端共享）
+## 13. 跨端能力矩阵
 
-⚠️ Android JNI 的 `receiverIngest` / Windows C ABI 的 `airferry_receiver_ingest` / 浏览器 WASM 的 `ReceiverSessionWasm.ingest` **都不返回 JSON**。返回同一个 packed 64 位状态字（JNI 装入 `jlong`），只携带摄入路径决策所需的最小信息；完整进度按需由 `receiverProgressJson` / `airferry_receiver_progress_json` / `progress_json()`（~7Hz UI 节流）拉取。
+| 端 | 发送端支持 | 接收端支持 | 备注 |
+|---|---|---|---|
+| Native (Android / Windows) | RAW, Zstd, XZ | RAW, Zstd, XZ | 全功能（C 库绑定 `zstd` / `xz2`） |
+| Web (WASM) | RAW, Zstd, XZ | RAW, Zstd, XZ | 全功能（纯 Rust `zrip` / `lzma-rust2` 编码，`ruzstd` / `lzma-rs` 解码） |
 
-三端的打包逻辑由**共享模块** `core/transfer-engine/src/ingest_status.rs` 的 `pack()` + `INGEST_ERROR` 统一提供（JNI/C ABI/WASM 均引用之），位布局不再由各绑定重复实现，杜绝漂移。
-
-### 位布局（packed `u64`，所有字段无符号）
-
-| 位 | 字段 | 说明 |
-|----|------|------|
-| bit 0 | `complete` | 1 = 对象已完全解码 |
-| bit 1 | `accepted` | 1 = 本帧贡献了新符号 |
-| bits 8..23 | `session_mismatch_streak` | 连续 session 不匹配数（0..=0xFFFF，钳到 16 位） |
-| bits 32..63 | `received_symbols` | 已接收去重符号数（低 32 位） |
-
-### 哨兵
-
-- 返回 **`0`**：null handle / 坏帧 / session 错误（调用方视作「无变化」）。
-- `received_symbols == u32::MAX`（`0xFFFFFFFF`，即 [`ingest_status::INGEST_ERROR`]）：**保留错误哨兵**（真实传输永不达到）。Kotlin `IngestStatus.unpack` / C# `IngestStatus.Unpack` / JS 解包遇此视作「帧被拒」。
-
-### 三端对齐
-
-| 端 | 源 |
-|----|-----|
-| Rust 打包（**三端共享**） | `core/transfer-engine/src/ingest_status.rs` `pack` / `INGEST_ERROR` |
-| JNI 入口 | `core/transfer-engine/src/jni.rs` `receiverIngest`（引用 `ingest_status::pack`） |
-| C ABI 入口 | `core/transfer-engine/src/cffi.rs` `airferry_receiver_ingest`（引用 `ingest_status::pack`） |
-| WASM 入口 | `core/transfer-engine/src/wasm.rs` `ReceiverSessionWasm::ingest`（引用 `ingest_status::pack`） |
-| Kotlin 解包 | `apps/scanner/.../scan/ReceiverSessionManager.kt:68` `IngestStatus.unpack` |
-| C# 解包 | `apps/windows/AirFerry.Windows/Scan/IngestStatus.cs` `.Unpack(u64)` |
-
-> 改位布局时改 `ingest_status.rs` 一处，三端自动同步。
-
-### 其他 JNI 函数（修正）
-
-| 函数 | 签名 | 说明 |
-|------|------|------|
-| `receiverCreate` | `(sidLo, sidHi, _blocks, _symbols, _symSize) -> Long` | 缓存引导，**不**从 caller 提供的 totals 建解码器（等待首个校验过的描述符帧） |
-| `receiverIngest` | `(handle, frameBytes) -> Long` | 见上 |
-| `receiverProgressJson` | `(handle) -> ByteArray?` | NUL 结尾的按需 JSON（UI ~7Hz）；native 失败可返回 null/空数组 |
-| `receiverIsComplete` | `(handle) -> Int` | 0/1 |
-| `receiverAssembleBytes` | `(handle) -> ByteArray?` | **原子返回完整字节**，未完成/失败可为 null（修复了旧 `receiverAssemble(handle,outBuf)` 的 >2GB 截断 + 长度/填充竞态） |
-| `receiverDestroy` | `(handle)` | 释放 |
-| `receiverFileName/FileSize/Crc32/Crc32Known` | `(handle) -> ...` | 文件元数据访问器 |
-
-> **线程模型**：上述所有操作同一原生句柄，**非线程安全**。Android 用一把 `ingestLock` 串行化；ZXing 解码在 N 个 worker 上并行。
+> **Web 发送端压缩实现**：Web/WASM 发送端使用纯 Rust 的 `zrip` 与 `lzma-rust2` 编码（`ruzstd` / `lzma-rs` 解码），严格遵守 §7.1"严格变小才压缩"的双端不变量（产物小于原始数据时才使用压缩标签，否则自动使用 RAW）。四端线格式与编解码能力 100% 闭合。
+>
+> **发送端选优策略（不进线格式，三规则平衡策略）**：发送端在预处理期（`开始传输` 时）对每个 Chunk 用
+> `encode_chunk_balanced` 预编码，播放循环零压缩——
+> ① **采样跳过**：每 Chunk 前 256 KiB 用 zstd-L1 与 xz-p2 试压，两者都压不到 98% 以下即判不可压缩（媒体/随机数据），直接 RAW、不做全量尝试；
+> ② **best-of(zstd-L1, xz-p2)**：可压缩 Chunk 在两档间取小（p2 拿回 xz 大部分压缩率、编码速度约 7 倍于标准档）；
+> ③ **速率门控升级**：仅当高压缩档（native 6|EXTREME / wasm 6）预估节省的传输时间大于其编码耗时（按播放速率 R = fps×T×码数 与实测编码吞吐校准），或单 Chunk 传输（≤1 chunk，等待有界）时，才升级到高压缩档。
+> 预编码产物经 `PreencodedChunk` 通道进入发送器，核心侧强制校验严格变小不变量；任何预编码失败回退播放期惰性编码（`encode_chunk`），不影响可用性。
 
 ---
 
-## 8. QR 编码
+## 14. TLV 规则（ROOT / META / Manifest / Entry 四作用域）
 
-| 参数 | 值 |
-|------|-----|
-| 纠错级别 | **L**（最低冗余，最大化容量） |
-| 版本 | **动态最小**（`qr_render::min_version_for`），非固定 V40 |
-| 模式 | Binary |
+```text
+type:u16 || length:u16 || value          type & 0x8000 = Critical
+```
 
-| symbol_size | 整帧字节 (=60+T+4) | 版本 | 模块数 |
-|-------------|-------------------|------|--------|
-| 512（`stable`） | 576 | V16 | 81×81 |
-| 896（`fast`） | 960 | V21 | 101×101 |
-| 1008（`extreme`） | 1072 | V22 | 105×105 |
-| 1024（核心库默认） | 1088 | V23 | 109×109 |
-| 1400（浏览器默认，`aggressive`） | **1464** | **V27** | **125×125** |
-| 1904（`turbo`） / 2400（`max`） | 1968 / 2464 | V34 / V39 | 153×153 / 173×173 |
+- 同一作用域内 type **严格升序**、不得重复；length 累加与 body_len 必须 checked 后才切片。
+- 未知 Optional → 跳过；未知 Critical → 拒绝所在结构并提示升级（fail-closed）。
+- `0x4000–0x7FFF` / `0xC000–0xFFFF` 为实验/厂商段。
+- 演进判定：新注解 → Optional TLV；新算法/新语义 → 注册表新码点 + Critical TLV；
+  帧头布局变化 → wire_version+1。禁止复用已废弃码点。
+- 预留方向：Ed25519 签名、分块 AEAD、SHA-256 注册（外部合规核验）、双向确认 Profile、CDC 分块。
+- 已知 Entry 注解 TLV（均 Optional）：`0x0101` mtime_ms(u64)、`0x0102` unix_mode(u32)、
+  `0x0103` mime(UTF-8 ≤ 255B)、`0x0104` type_class(u8，纯 UI 提示，非信任来源)。
 
-> 历史教训：曾强制 V40（177×177），模块过密致数据帧无法解码、收端卡 0%。改最小版本后稳定。完整预设表见 [qr-frame-format.md](qr-frame-format.md)。
-
-### 16 KiB 页对齐（Android 15+）
-
-16 KiB 页设备内核拒绝 `dlopen` 仅 4 KiB（`0x1000`）对齐 LOAD 段的 `.so`——表现：`System.loadLibrary` 抛 `UnsatisfiedLinkError`，**所有 QR 解码静默失败**。
-- ZXing `.so`：`apps/scanner/app/src/main/cpp/CMakeLists.txt` 用 `-Wl,-z,max-page-size=16384` 强制对齐。
-- Rust `.so`：cargo-ndk/LLVM 默认对齐。
-- 验证：`llvm-readelf -l lib*.so | grep LOAD`，Align 列应为 `0x4000`。
-
-### 权威源
-
-| 端 | 源 |
-|----|-----|
-| Rust 编码 | `core/qr-protocol/src/qr_render.rs`：`min_version_for` / `encode`（单测：1400→125 模块） |
-| WASM | `core/transfer-engine/src/wasm.rs`：`next_qr` / `next_qr_multi` / `*_into` 热路径 |
-| 浏览器渲染 | `apps/sender/src/components/QrStream.tsx`：rAF + `drawMatrix` + `putImageData` |
-
----
-
-## 9. 版本号（单一来源）
-
-四处版本必须保持一致，改版本时一起改（另见 AGENTS.md §2.8 / Windows CI）：
-
-| 源 | 当前 |
-|----|------|
-| `Cargo.toml` `[workspace.package] version` | `1.2.6` |
-| `apps/sender/package.json` `version` + `manifest.version` | `1.2.6` |
-| `apps/web/package.json` `version` | `1.2.6` |
-| `apps/scanner/app/build.gradle.kts` `versionName` / `versionCode` | `1.2.6` / `20` |
-| `apps/windows/AirFerry.Windows/AirFerry.Windows.csproj` `<Version>` | `1.2.6` |
-
-`scripts/build-all.sh` 的 release 打包文件名版本号由 `read_version()` 从 `apps/sender/package.json` 动态读取，与 `manifest.version` 同源，**无需在脚本里手改**。Windows 发版必须给 workflow 的 `release_tag` 输入一个已存在 tag；workflow 从该 tag 检出、核对 tag commit 与 package/manifest 版本后再派生 `VER`，不再维护可漂移的硬编码版本。
-
----
-
-## 速查：常量表
-
-| 常量 | 值 | 位置 |
-|------|-----|------|
-| 帧 magic | `0x4554` | `frame.rs:13` |
-| 帧版本 | `1` | `frame.rs:14` |
-| 帧头/尾 | 60 / 4 字节 | `frame.rs:16,17` |
-| `FLAG_DESCRIPTOR` | `0x01` | `frame.rs:22` |
-| 描述符 magic | `0xD5` | `descriptor.rs:120` |
-| 描述符版本 | 普通对象 `3` / 分段对象 `5`（v4 为撤回的预发布版，fail-closed 拒绝） | `descriptor.rs` `DESC_V3_VERSION` / `DESC_VERSION` |
-| 描述符固定开销 | 28 + 16×B（块表）+ 13（v2）+ filename_len + 9（v3）+ 分段时 104（v5） | `descriptor.rs` |
-| SEGMENT_RAW_BYTES / MAX_SEGMENT_COUNT | `MAX_OBJECT_BYTES − MAX_SYMBOL_SIZE` ≈ 31.9 MiB / 131072 | `transfer-engine/src/segment.rs` |
-| 压缩 None/Zstd/XZ | `0` / `1` / `2` | `compress.rs:27-29` |
-| Zstd level（浏览器） | `1` | `compress.ts:56` |
-| XZ level（浏览器） | `9` | `compress.ts:58` |
-| early-exit 阈值 | `0.70`（70%） | `compress.ts:64` |
-| MAX_SOURCE_SYMBOLS_PER_BLOCK | `56403` | `meta.rs:6` |
-| MAX_SOURCE_BLOCKS | `256` | `meta.rs:8` |
-| MAX_OBJECT_BYTES | `32 MiB` | `meta.rs:14`（压缩/wire 对象上限） |
-| MAX_ORIGINAL_BYTES | `256 MiB` | `meta.rs:24`（原始/解压后上限） |
-| ESI 上限 | `2²⁴`（u24） | raptorq-core decoder 守卫 |
-| ingest 错误哨兵 | `received_symbols == u32::MAX` | `ingest_status.rs` `INGEST_ERROR`（三端共享）/ `ReceiverSessionManager.kt:68` |
-| 默认 symbol_size（浏览器/核心库） | 1400 / 1024 | `apps/sender/src/types.ts` `DEFAULT_CONFIG.symbolSize` / `config.rs:8` `DEFAULT_SYMBOL_SIZE` |
-| QR EC 级 / 版本 | L / 动态最小 | `qr_render::encode` / `min_version_for` |

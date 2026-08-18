@@ -148,7 +148,7 @@ class ReceiveDetailActivity : ComponentActivity() {
                     if (!crcUnknown) {
                         DetailRow(
                             "校验",
-                            if (crcOk) "✓ CRC32 校验通过" else "✗ 校验失败（数据可能损坏）",
+                            if (crcOk) "CRC32 校验通过" else "校验失败（数据可能损坏）",
                             valueColor = if (crcOk) Success else Error
                         )
                         DetailRow("期望 CRC32", "0x%08X".format(expectedCrc))

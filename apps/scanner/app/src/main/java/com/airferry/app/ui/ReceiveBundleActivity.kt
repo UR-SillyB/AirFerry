@@ -7,6 +7,7 @@ import android.view.WindowManager
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -29,6 +30,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.airferry.app.scan.CreateNamedDocument
 import com.airferry.app.scan.FileTransfer
+import com.airferry.app.scan.SafTreeExporter
 import com.airferry.app.scan.TextLike
 import java.io.File
 
@@ -43,10 +45,10 @@ private val Error = Color(0xFFEF4444)
 /**
  * Detail screen for a recovered multi-file bundle.
  *
- * Lists every unpacked file with its size, and lets the user save the whole
- * batch (one SAF dialog per file, in order) or share the entire set via
- * ACTION_SEND_MULTIPLE. Reached from [ScanActivity] when the recovered payload
- * carries the bundle magic.
+ * Lists every recovered file with its size. Individual members use
+ * ACTION_CREATE_DOCUMENT; Save All selects one SAF directory and preserves
+ * the bundle's sanitized relative hierarchy. The entire set can also be
+ * shared via ACTION_SEND_MULTIPLE.
  *
  * Files are passed via three parallel string-array extras ("FILE_PATHS",
  * "FILE_NAMES", "FILE_SIZES") rather than a Parcelable to avoid adding the
@@ -54,7 +56,7 @@ private val Error = Color(0xFFEF4444)
  */
 class ReceiveBundleActivity : ComponentActivity() {
 
-    /** One unpacked file: temp path + original name + size. */
+    /** One recovered file: ContentStore blob path + logical relative name + size. */
     data class FileInfo(
         val filePath: String,
         val name: String,
@@ -66,7 +68,7 @@ class ReceiveBundleActivity : ComponentActivity() {
     private var receivedCrc: Long = 0L
     private var crcUnknown: Boolean = true
 
-    /** Index of the file we are currently saving in the sequential save-all flow. */
+    /** Index of the member currently being saved through ACTION_CREATE_DOCUMENT. */
     private var pendingSaveIndex = 0
 
     /**
@@ -82,21 +84,38 @@ class ReceiveBundleActivity : ComponentActivity() {
         if (uri != null) {
             saveToUri(uri, files.getOrNull(pendingSaveIndex))
         }
-        // Advance to the next file and keep launching SAF dialogs until done.
-        advanceSaveAll()
     }
 
-    /**
-     * Drive the sequential save-all flow: after each SAF dialog resolves, move
-     * to the next file and relaunch. Lives in a normal method (not the
-     * registerForActivityResult lambda) so the launcher's type can be inferred
-     * without a self-reference recursion.
-     */
-    private fun advanceSaveAll() {
-        pendingSaveIndex++
-        if (pendingSaveIndex < files.size) {
-            saveOne.launch(files[pendingSaveIndex].name)
+    private fun saveAllToTree(treeUri: Uri) {
+        val snapshot = files.toList()
+        Toast.makeText(this, "正在保存 ${snapshot.size} 个文件…", Toast.LENGTH_SHORT).show()
+        saveExecutor.execute {
+            var saved = 0
+            val error = try {
+                saved = SafTreeExporter.copyAll(
+                    this,
+                    treeUri,
+                    snapshot.map { SafTreeExporter.Item(File(it.filePath), it.name) },
+                )
+                null
+            } catch (e: Exception) {
+                e.message ?: e.javaClass.simpleName
+            }
+            runOnUiThread {
+                if (error == null) {
+                    Toast.makeText(this, "已保存 $saved 个文件（目录结构已保留）", Toast.LENGTH_LONG).show()
+                } else {
+                    Toast.makeText(this, "保存失败（已保存 $saved 个）: $error", Toast.LENGTH_LONG).show()
+                }
+            }
         }
+    }
+
+    /** Save-all chooses one directory and preserves bundle subdirectories. */
+    private val saveAllTree = registerForActivityResult(
+        ActivityResultContracts.OpenDocumentTree()
+    ) { uri: Uri? ->
+        if (uri != null) saveAllToTree(uri)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -163,8 +182,8 @@ class ReceiveBundleActivity : ComponentActivity() {
                 Text(
                     text = when {
                         crcUnknown -> "整体校验：— CRC32 未知（未收到描述符）"
-                        crcOk -> "整体校验：✓ CRC32 校验通过"
-                        else -> "整体校验：✗ 校验失败（数据可能损坏）"
+                        crcOk -> "整体校验：CRC32 校验通过"
+                        else -> "整体校验：校验失败（数据可能损坏）"
                     },
                     color = when {
                         crcUnknown -> TextSecondary
@@ -217,8 +236,7 @@ class ReceiveBundleActivity : ComponentActivity() {
                         if (files.isEmpty()) {
                             Toast.makeText(this@ReceiveBundleActivity, "没有可保存的文件", Toast.LENGTH_SHORT).show()
                         } else {
-                            pendingSaveIndex = 0
-                            saveOne.launch(files[0].name)
+                            saveAllTree.launch(null)
                         }
                     },
                     modifier = Modifier.weight(1f).height(50.dp),
@@ -302,8 +320,9 @@ class ReceiveBundleActivity : ComponentActivity() {
 
     /**
      * Open a bundle entry as a text message (copy / share / save .txt).
-     * Used for sender-side "添加文字" items materialised as named .txt files
-     * inside ETBUNDL1 — no ETTEXTv1 magic on the wire for mixed batches.
+     * Used for sender-side "添加文字" items materialised as named .txt entries
+     * in the AF2 Manifest (kind = FILE; UTF8_TEXT kind is only used for lone
+     * text transfers, so mixed batches never carry pure-text entries).
      */
     private fun openAsText(info: FileInfo) {
         val src = File(info.filePath)
@@ -369,10 +388,7 @@ class ReceiveBundleActivity : ComponentActivity() {
     private fun saveToUri(uri: Uri, info: FileInfo?) {
         val src = info?.let { File(it.filePath) } ?: return
         // M6: the full stream copy runs on the background executor; the
-        // completion toast hops back to the main thread. The sequential
-        // save-all flow is unaffected — the next SAF dialog is launched from
-        // advanceSaveAll() independent of this copy, and copies serialize on
-        // the single-thread executor.
+        // completion toast hops back to the main thread.
         Toast.makeText(this, "保存中…", Toast.LENGTH_SHORT).show()
         saveExecutor.execute {
             val error: String? = try {

@@ -8,7 +8,7 @@
 
 | 层 | 技术 | 说明 |
 |----|------|------|
-| UI | WPF (.NET 8, C#) + **WPF-UI 4.3.0**（lepo.co Fluent 主题库） | 对标 Android Compose UI；浅色/深色/跟随系统三主题，`ui:FluentWindow` 单窗口 + Frame 页面流导航，细节见 §7.4 |
+| UI | WPF (.NET 8, C#) + **HandyControl 3.5.1**（主题控件库 + AirFerry 品牌层） | 对标 Android Compose UI；浅色/深色/跟随系统三主题，`hc:Window` 单窗口 + Frame 页面流导航，细节见 §7.4 |
 | 相机/采集卡 | OpenCvSharp4 (DirectShow 后端) | 单句柄读取；Gray 送解码、池化 BGR24 快照送预览 |
 | 设备枚举 | DirectShowLib (DsDevice) | `FilterCategory.VideoInputDevice` 同时覆盖摄像头+采集卡 |
 | 屏幕区域/窗口捕获 | GDI（`BitBlt`/`PrintWindow`/`GetDIBits`，P/Invoke） | 零新增 NuGet 依赖；`ScreenCapture.cs` 实现 `IFrameSource`，与设备源同管线（详见 §7.1） |
@@ -108,8 +108,8 @@ dotnet run --project AirFerry.Windows -c Release
 ## 5. 关键依赖顺序（坑）
 
 1. **两个 native DLL 必须先于 C# 构建**：见 §4.1/§4.2。走 `build-windows.ps1` 会自动跑 cargo、CMake 与 CTest。
-2. **WPF 只能在 Windows 上构建**：`net8.0-windows` TFM 依赖 Windows SDK，无法在 macOS/Linux 上编译 C# 主项目。**协议层单元测试**（`AirFerry.Windows.Tests`）用纯 `net8.0` TFM，可在任何 OS 上跑（不依赖 P/Invoke，只测 IngestStatus 位域、FrameHeader 解析、BundleParser 等纯逻辑）。
-3. **版本号同步**：改版本时同时改 `apps/sender/package.json`（→ 文件名）+ `apps/web/package.json` + `apps/scanner/app/build.gradle.kts` versionName（→ APK 内嵌）+ `Cargo.toml`（→ 核心库）+ `apps/windows/AirFerry.Windows/AirFerry.Windows.csproj` `<Version>`（→ exe 内嵌）。Windows workflow 不再硬编码版本。详见 [AGENTS.md](../AGENTS.md) §2.8 / §2.9。
+2. **WPF 只能在 Windows 上构建**：`net8.0-windows` TFM 依赖 Windows SDK，无法在 macOS/Linux 上编译 C# 主项目。**协议层单元测试**（`AirFerry.Windows.Tests`）用纯 `net8.0` TFM，可在任何 OS 上跑（不依赖 P/Invoke，只测 IngestStatus 位域、FrameHeader 解析、golden vectors 等纯逻辑）。
+3. **版本号同步**：改版本时同时改根 `Cargo.toml`（`[workspace.package].version`，→ 核心库）+ `apps/web/package.json` + `apps/scanner/app/build.gradle.kts` versionName（→ APK 内嵌）+ `apps/windows/AirFerry.Windows/AirFerry.Windows.csproj` `<Version>`（→ exe 内嵌）。Windows workflow 不再硬编码版本。同步一致性由 `node scripts/version.mjs check` 门禁保证（见 AGENTS.md「版本事实源」）。
 
 ---
 
@@ -175,14 +175,14 @@ Windows 端的核心新增功能。启动后进入**设备选择页**：
 
 若后续确实需要桌面端同时覆盖 macOS/Linux，建议先把扫描编排、文件库和接收结果抽为不依赖 WPF 的 .NET 类库，再用 Avalonia 替换视图层。不要在现有 WPF 上继续叠 MAUI/Electron：这会保留 OpenCV、ZXing、Rust FFI 的全部复杂度，同时再增加一套运行时和打包链。
 
-### 7.4 UI 架构（WPF-UI Fluent 主题）
+### 7.4 UI 架构（HandyControl + AirFerry 品牌层）
 
-视图层基于 lepo.co **WPF-UI 4.3.0**（csproj 中唯一 UI 库 PackageReference；纯托管 + 资源字典，PublishSingleFile 无特殊处理；Win10 兼容——不用 Mica 背景，`WindowBackdropType=None`）。结构与约定：
+视图层基于 **HandyControl 3.5.1**（csproj 中唯一 UI 库 PackageReference；纯托管 + 资源字典，PublishSingleFile 无特殊处理；Win10 兼容——不用 Mica）。AirFerry 品牌配色（#2563EB、语义色）以自有字典叠加在库皮肤之上。结构与约定：
 
-- **窗口壳**：`Views/MainWindow.xaml` 是 `ui:FluentWindow`，内容 Grid 首行放 `ui:TitleBar`、第二行内嵌 `Frame`（`NavigationUIVisibility=Hidden`）——WPF-UI 4.x 没有 `FluentWindow.TitleBar` 属性元素写法，TitleBar 必须是窗口内容的首个子元素。7 个视图仍是 Page，导航调用（`NavigationService.Navigate/GoBack`）不变。`App.OnStartup` 手动创建并 Show MainWindow。
-- **主题**：`App.xaml` 合并 `ui:ThemesDictionary` + `ui:ControlsDictionary` + 自有语义 token 字典（`Themes/DesignTokens.{Light,Dark}.xaml`：`SuccessBrush`/`ErrorBrush`/`WarningBrush`/`PreviewBackdropBrush`）。`Services/ThemeService.cs` 按 `settings.json` 的 `theme` 键（`light`/`dark`/`system`，设置页可改）应用主题：跟随系统模式用 `SystemThemeWatcher.Watch` 监听 OS 切换；之后统一应用品牌主色 `#2563EB`。设置读写由 `Services/AppSettings.cs` 独占（手写 JSON，与 Android 端格式对齐）。**主题画刷一律 `DynamicResource` 引用**。
-- **控件约定**：`ui:Card` 卡片（继承 ContentControl、无 `Padding` 属性，内边距写到子元素 `Margin`；要填满行高须显式 `VerticalAlignment="Stretch"`）、`ui:Button Appearance=Primary/Secondary/Transparent`（**图标必须显式 `<ui:Button.Icon><ui:SymbolIcon …/></ui:Button.Icon>`，`Icon="…24"` 简写不渲染；满宽按钮须显式 `HorizontalAlignment="Stretch"`**，WPF-UI Button 样式默认左对齐）、`ui:InfoBar` 状态条、`ui:SymbolIcon` 图标；**`ComboBox`/`Slider` 没有 `ui:` 包装类**，直接用标准控件（ControlsDictionary 隐式样式接管）。弹窗统一 `Services/UiMessages.cs`（`ui:MessageBox`，调用方必须 `await`，勿同步阻塞 dispatcher）。
-- **RegionPickerWindow 例外**：全屏透明覆盖层与 FluentWindow 不兼容，保持普通 Window，配色固定（主题无关）。
+- **窗口壳**：`Views/MainWindow.xaml` 是 `hc:Window`（`NonClientAreaHeight=36`；模板自带最小化/最大化/关闭按钮，`ShowIcon`/`ShowTitle` 默认显示 Window.Icon 与标题——勿设 `WindowStyle=None`/`AllowsTransparency`，WindowChrome 由库内部接管），内容直接放内嵌 `Frame`（`NavigationUIVisibility=Hidden`）。7 个视图仍是 Page，导航调用（`NavigationService.Navigate/GoBack`）不变。`App.OnStartup` 手动创建并 Show MainWindow。
+- **主题**：`App.xaml` 依次合并 HC 皮肤字典（`SkinDefault.xaml`，皮肤必须在前）→ HC `Theme.xaml`（样式）→ 自有语义 token 字典（`Themes/DesignTokens.{Light,Dark}.xaml`：`SuccessBrush`/`ErrorBrush`/`WarningBrush`/`PreviewBackdropBrush`，合并位置在 Theme.xaml 之后以覆盖 HC 同名渐变刷）→ `Themes/AirFerry.xaml` 品牌层（覆盖 `PrimaryColor`=#2563EB 等 Color 键、纯色 `PrimaryBrush`、WPF-UI 时代画刷键别名、`GlyphIcon`/`GhostButton` 样式、Card 圆角 8px）。`Services/ThemeService.cs` 按 `settings.json` 的 `theme` 键（`light`/`dark`/`system`，设置页可改）切主题：换皮肤字典与 DesignTokens 的 Source；跟随系统模式自订 `SystemEvents.UserPreferenceChanged` + `AppsUseLightTheme` 注册表判定（不用库的 SyncWithSystem——它换不了 DesignTokens）。设置读写由 `Services/AppSettings.cs` 独占（手写 JSON，与 Android 端格式对齐）。**主题画刷一律 `DynamicResource` 引用**。
+- **控件约定**：`hc:Card` 卡片（Padding 属性存在但默认模板不绑定，内边距写到子元素 `Margin`；要填满行高须显式 `VerticalAlignment="Stretch"`）、标准 `Button` + keyed Style（`ButtonPrimary` 品牌蓝实心 / 隐式 `ButtonDefault` 中性 / `GhostButton` 透明幽灵；**图标+文字手动堆 StackPanel**——HC 无 `Button.Icon` 属性；**按钮固定高 28px**，大按钮显式 `Height="40"`；满宽按钮须显式 `HorizontalAlignment="Stretch"`）、状态条用自写 `Controls/InfoBanner`（HC 无 InfoBar 控件）、图标用 `GlyphIcon` 样式 TextBlock（系统字体 Segoe MDL2 Assets，Win10/11 自带；库无图标体系）；`ComboBox`/`Slider`/`CheckBox`/`ListBox` 等标准控件由 HC 隐式样式接管，**TextBlock 无隐式样式**（必须显式 `Foreground`）。弹窗统一 `Services/UiMessages.cs`（HC `MessageBox`，同步模态、中文按钮文字、不支持自定义按钮文字）。
+- **RegionPickerWindow 例外**：全屏透明覆盖层（`AllowsTransparency=True`），保持普通 Window（HC 的隐式 Window 样式只设置背景/前景，不影响覆盖层），配色固定（主题无关）。
 - **接收结果页层级**：`ReceiveDetailView` / `ReceiveTextView` / `ReceiveBundleView` 顶部先单独显示左对齐的「返回」，下一行再显示成功图标与接收完成状态；导航和结果状态不放在同一横排。单文件与文件包结果页原「分享」按钮实际是调用 Explorer 定位导出文件，因此统一按真实行为显示为「打开文件夹」并使用文件夹图标。
 
 ---
@@ -208,8 +208,7 @@ dotnet test
 
 测试覆盖纯托管逻辑（不实际加载 P/Invoke DLL，跨平台可跑）：
 - `IngestStatusTests`：packed 位域解析（对标 Rust `cffi::tests`）
-- `FrameHeaderTests`：60B 大端帧头解析
-- `BundleParserTests`：ETBUNDL1 多文件包解包
+- `FrameHeaderTests`：26B AF2 大端帧头解析
 - `FileNameUtilTests`：文件名 sanitize + Windows 保留名处理
 - `ProgressSnapshotTests`：进度 JSON 解析
 - `PreviewFrameTests`：池化预览缓冲的所有权与幂等释放
@@ -223,7 +222,7 @@ dotnet test
 ctest --test-dir apps/windows/native/build -C Release --output-on-failure
 ```
 
-> Rust 侧的 C ABI 端到端测试：`cargo test -p transfer-engine --features cffi --test cffi_e2e`（用真实 sender 帧喂 cffi receiver，验证完整恢复）。
+> Rust 侧 C ABI 单元测试：`cargo test -p transfer-engine --features cffi`（`cffi.rs`/`ingest_status.rs`/`progress.rs` 内部 `#[cfg(test)]`，验证 packed 状态与 JSON 快照；跨端线格式一致性由 `core/af2/tests/golden_vectors.rs` golden fixture 覆盖）。
 
 ---
 
@@ -239,5 +238,5 @@ ctest --test-dir apps/windows/native/build -C Release --output-on-failure
 | 核心引擎 | Rust `jni.rs` (JNI) | Rust `cffi.rs` (C ABI) |
 | 并行解码 | 2–6 workers + v1.1.3 调度/4 符号批摄入 | 同 worker/队列/批量/miss 状态机 + ingestLock |
 | 落盘 | ContentStore blob + `index.json` | `%USERPROFILE%\Documents\AirFerry\store\blobs\<hh>\<sha256>` + `index.json` |
-| 多文件包 | BundleParser.kt | BundleParser.cs |
+| 多文件包 | 经 Rust 快照 entries 还原（无本地解析器） | 经 Rust 快照 entries 还原（无本地解析器） |
 | 签名 | keystore.properties | （暂无 Authenticode 签名） |

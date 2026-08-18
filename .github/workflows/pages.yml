@@ -4,8 +4,8 @@
 #   /                    → 发送端（index.html，来自 apps/web/dist）
 #   /receiver/           → 接收端（receiver.html 改名 index.html，来自 apps/web/dist-receiver）
 #
-# web 构建复用 sender 的 WASM 产物（wasm-pkg-simd），因此本 workflow 需先在
-# sender 下用 Rust/wasm-pack 编译 WASM，再构建 web 两端。
+# web 构建在 apps/web 下用 Rust/wasm-pack 编译单一 WASM 产物（wasm-pkg），
+# 再构建 web 两端。
 
 name: pages
 
@@ -13,9 +13,9 @@ on:
   push:
     branches: [main]
     paths:
-      - "apps/sender/**"
       - "apps/web/**"
       - "core/**"
+      - "scripts/**"
       - "Cargo.toml"
       - "Cargo.lock"
       - ".github/workflows/pages.yml"
@@ -34,6 +34,7 @@ concurrency:
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     environment:
       name: github-pages
       url: ${{ steps.deploy.outputs.page_url }}
@@ -45,11 +46,14 @@ jobs:
         with:
           node-version: 22
           cache: npm
-          cache-dependency-path: |
-            apps/sender/package-lock.json
-            apps/web/package-lock.json
+          cache-dependency-path: apps/web/package-lock.json
 
-      # sender 的 npm run wasm 需要 Rust + wasm32 目标 + wasm-pack
+      # 部署门禁：版本位点一致性（根 Cargo.toml 为唯一事实源）。此前本
+      # workflow 是全仓唯一"零测试直接上线"的发布路径。
+      - name: Version gate
+        run: node scripts/version.mjs check
+
+      # npm run wasm 需要 Rust + wasm32 目标 + wasm-pack
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable（与 windows.yml 同 pin）
         with:
           targets: wasm32-unknown-unknown
@@ -58,15 +62,15 @@ jobs:
         # 钉住版本：未锁版本时 crates.io 发新版会静默改变 WASM 产物/toolchain 行为
         run: cargo install wasm-pack --locked --version 0.15.0
 
-      # sender 的 postinstall 含 patch-parcel-dev-server（仅扩展 dev server 的
-      # CORS 修复，对版本敏感）。CI 只需 wasm-pkg-simd，故 --ignore-scripts 跳过。
-      # build-wasm.cjs 只调 wasm-pack/cargo，不依赖 sender node_modules。
-      - name: Build sender WASM (wasm-pkg-simd)
-        working-directory: apps/sender
-        run: npm ci --ignore-scripts && npm run wasm
+      - name: Build WASM package (wasm-pkg)
+        working-directory: apps/web
+        run: |
+          npm ci
+          npm run typecheck
+          npm run wasm
 
       # FAST ZXing-C++ → WASM fast path for the web receiver's QR decode worker.
-      # Produces apps/sender/src/fastzxing/airferry_zxing.{js,wasm} (git-ignored);
+      # Produces apps/web/src/fastzxing/airferry_zxing.{js,wasm} (git-ignored);
       # prepare-wasm.cjs (web prebuild) copies them into public/. Pinned to the
       # same Emscripten version as core/zxing-decoder/link-wasm.sh. ZXing-C++ is
       # fetched at the pinned immutable commit (first run needs network).
@@ -80,7 +84,7 @@ jobs:
 
       - name: Build web sender (dist/)
         working-directory: apps/web
-        run: npm ci && npm run build
+        run: npm run build
 
       - name: Build web receiver (dist-receiver/)
         working-directory: apps/web
@@ -96,9 +100,10 @@ jobs:
           # 接收端 → /receiver/（receiver.html 作为该子路径的 index）
           cp -r apps/web/dist-receiver/. _site/receiver/
           mv _site/receiver/receiver.html _site/receiver/index.html
-          # 发送端产物不含 zxing_reader.wasm；接收端已带，无需从发送端清。
-          # 但发送端根目录可能混入接收端 wasm 的旧文件，确保干净：
-          rm -f _site/zxing_reader.wasm
+          # 发送端不使用 QR 解码器，但 Vite 会把整个 public/（含接收端的
+          # airferry_zxing.*）拷进每个构建产物 —— 从站点根清掉，只留在 /receiver/
+          # （favicon 属发送端自身资产，保留）。
+          rm -f _site/airferry_zxing.js _site/airferry_zxing.wasm
 
       - uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5.0.0
 

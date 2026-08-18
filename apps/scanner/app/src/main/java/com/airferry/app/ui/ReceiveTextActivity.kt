@@ -43,7 +43,7 @@ private val Success = Color(0xFF22C55E)
 private val Error = Color(0xFFEF4444)
 
 /**
- * Result screen for a recovered TEXT transfer (ETTEXTv1 payload).
+ * Result screen for a recovered TEXT transfer (UTF8_TEXT manifest entry).
  *
  * Mirrors [ReceiveDetailActivity]'s layout (status icon + info card + action
  * buttons) but the "content" is an in-memory string, not a file on disk. The
@@ -60,7 +60,7 @@ class ReceiveTextActivity : ComponentActivity() {
     /** CRC32 values carried as unsigned 32-bit in a Long (0..=0xFFFFFFFF). */
     private var expectedCrc: Long = 0L
     private var receivedCrc: Long = 0L
-    /** True when the descriptor never supplied an expected CRC. */
+    /** True when the manifest never supplied an expected CRC. */
     private var crcUnknown: Boolean = true
     /** Suggested .txt name when saving (bundle entry name, or default). */
     private var saveFileName: String = "文字消息.txt"
@@ -165,7 +165,7 @@ class ReceiveTextActivity : ComponentActivity() {
                     if (!crcUnknown) {
                         DetailRow(
                             "校验",
-                            if (crcOk) "✓ CRC32 校验通过" else "✗ 校验失败（数据可能损坏）",
+                            if (crcOk) "CRC32 校验通过" else "校验失败（数据可能损坏）",
                             valueColor = if (crcOk) Success else Error
                         )
                     }

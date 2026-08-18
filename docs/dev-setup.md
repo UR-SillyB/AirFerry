@@ -100,12 +100,12 @@ cd AirFerry
 cargo test
 
 # 2. 构建 WASM 核心
-cd apps/sender
-npm install
+cd apps/web
+npm ci
 npm run wasm
 
-# 3. 构建浏览器扩展
-npm run build
+# 3. 构建浏览器扩展 / web 发送端 / 接收端 / 单文件版
+npm run build:all
 
 # 4. 构建 Rust Android 库
 cd ../..

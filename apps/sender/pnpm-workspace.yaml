@@ -1,8 +1,0 @@
-allowBuilds:
-  '@parcel/watcher': true
-  '@swc/core': true
-  esbuild: true
-  lmdb: true
-  msgpackr-extract: true
-  sharp: true
-onlyBuiltDependencies: '["@parcel/watcher","@swc/core","esbuild","lmdb","msgpackr-extract","sharp"]'

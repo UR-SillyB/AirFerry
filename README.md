@@ -4,7 +4,7 @@
 
 通过**屏幕二维码视频流 + 手机摄像头扫描**完成文件传输，不依赖互联网、局域网、蓝牙、USB、NFC 等任何通信通道。适用于 Air-Gap（隔离网络）场景。
 
-> 🤖 **AI 代理/新开发者**：先读 [AGENTS.md](AGENTS.md)（构建命令、代码导航、调试速查、文档与代码偏差清单）。跨端线格式的位级权威定义见 [docs/SPEC.md](docs/SPEC.md)。
+> 🤖 **AI 代理/新开发者**：先读 [AGENTS.md](AGENTS.md)（构建命令、代码导航、核心协议与工程不变量）。跨端线格式的位级权威定义见 [docs/SPEC.md](docs/SPEC.md)。
 
 - **发送端**：浏览器扩展（Chrome / Edge / Firefox，支持 MV2 与 MV3）· **网页端**（[在线版](#网页端-web-发送接收)）
 - **接收端**：Android 原生 App · Windows 桌面应用（WPF）· **网页接收端**（[在线版](#网页端-web-发送接收)）
@@ -12,37 +12,27 @@
 
 ## 数据流
 
-```
-发送端                                          接收端
-文件                                             摄像头视频流 (锁 ~60fps)
-  │ 三算法选优压缩 (Raw / Zstd / XZ)              │
-  ├─ 分块                                         │
-  ├─ RaptorQ 编码 (RFC 6330)                      │
-  ├─ QR 帧生成 (源一遍→持续新鲜修复) ── 视频流 ──► 并行 QR 解码 (N×ZXing-C++)
-  └─ 连续播放 (15/20/30/45/60/90/120fps或无限制, 默认 60) ├─ 串行 RaptorQ 摄入/恢复
-                                                   ├─ 解压缩
-                                                   ├─ 文件重组
-                                                   └─ 文件保存
-```
+发送端：文件/文字 → 三算法选优压缩（Raw / Zstd / XZ）→ RaptorQ 编码（RFC 6330，源符号一遍 → 持续新鲜修复符号）→ QR 帧 → 屏幕视频流。接收端：摄像头采集 → 并行 QR 解码（ZXing-C++）→ 串行 RaptorQ 摄入/恢复 → 解压 → 文件保存。详图见 [docs/architecture.md](docs/architecture.md#数据流)。
 
 ## 特性
 
 - ✅ 高可靠性、高容错率（支持高丢帧 / 乱序 / 重复帧 / 部分损坏）
-- ✅ 支持大文件分段传输（整段压缩后按 ~32 MiB 切压缩流段；文件/多文件包/文字均可）
+- ✅ 支持大文件 chunk 化传输（默认 8 MiB 定长切块、逐块三算法选优压缩；文件/多文件包/文字均可）
 - ✅ 持续新鲜喷泉码：源符号发一遍后持续补充不重复修复符号，进度近似线性；到 RFC 24 位 ESI 上限时明确停止
 - ✅ 接收端并行解码池：多线程 ZXing + 串行原生摄入，吃满高帧率采集
-- ✅ 大文件断点恢复（历史页显示缺失段；已校验完成段跨重启保留）
-- ✅ 连续二维码视频流（15 / 20 / 30 / 45 / 60 / 90 / 120 fps 或无限制，默认 60）
+- ✅ 大文件断续恢复（已完成 chunk 跨重启持久化；丢失 chunk 由后续新鲜修复符号补齐）
+- ✅ 连续二维码视频流（多档帧率可选，含无限制模式）
 - ✅ Air-Gap 场景，零网络依赖
 - ✅ 单向信道，无需回传确认
 - ✅ 三算法选优压缩（Raw / Zstd Lv1 / Xz Lv9），自动选取最小结果
-- ✅ 多文件打包传输（≥2 项自动打包成单个 ETBUNDL1 容器，走同一条二维码流）
-- ✅ 文件与文字混发（统一选择列表；文件/文件夹支持全页拖放；单条纯文字仍为 ETTEXTv1，收端可复制）
-- ✅ 文本类文件（txt/md/json/源码等）收端可复制 / 分享 / 存盘
+- ✅ 多文件与多 Entry 结构化传输（统一 Manifest 索引与 Entry 清单）
+- ✅ 文件与文字混发（统一选择列表；文件/文件夹支持全页拖放；文字可直接展示与复制）
+- ✅ 文本类文件（txt/md）收端可复制 / 分享 / 存盘
 - ✅ 4 码并行模式（同帧 tile 4 个不同符号，吞吐 ~4×，默认开启）
-- ✅ 速度预设（稳定 / 高速 / 极限 / 激进 / 极速 / 极限 2400B，默认激进 1400B@60fps）
+- ✅ 速度预设多档可调（符号大小 T = 512 / 896 / 1008 / 1400 / 1904 / 2400）
 - ✅ 多浏览器支持（Chrome / Edge / Firefox，MV2 + MV3）
-- ✅ 多接收端：网页、Android App 与 Windows 应用复用同一 Rust 协议核心；Windows 支持摄像头 + USB/HDMI/SDI 采集卡 + 屏幕区域/独立窗口捕获（同机或虚拟机/远程桌面场景免摄像头）
+- ✅ 多接收端：网页、Android App 与 Windows 应用复用同一 Rust 协议核心；Windows 支持摄像头 + USB/HDMI/SDI 采集卡 + 屏幕区域/独立窗口捕获（同机或虚拟机/远程桌面场景免摄像头），网页接收端支持屏幕/标签页捕获
+- ✅ Windows 持续接收模式：完成后不跳转结果页、不停扫，文件直写指定文件夹；按内容 SHA-256 去重，跳过前复验落盘字节
 
 ## 网页端（Web 发送 / 接收）
 
@@ -73,7 +63,7 @@
 | `airferry-receiver-android-arm64-v1.2.7.apk` | **Android 扫码端**：arm64-v8a，Android 10+，对准屏幕二维码即可接收 |
 | `airferry-receiver-windows-x64-v1.2.7.zip` | **Windows 扫码端**：x64，Windows 10+，视频源支持摄像头 + USB/HDMI/SDI 采集卡 + 屏幕区域/窗口捕获 |
 
-> 发送端/APK/web 由 `./scripts/build-all.sh release` 产出；版本号取自 `apps/sender/package.json`。Windows zip 默认由 GitHub Actions `windows` workflow（`workflow_dispatch`）上传到同一 Release。Chrome `.crx` 需本机有 Chrome 才能签名，否则仅产出 `.zip`。web 发送端/接收端由 GitHub Actions `pages` workflow 自动构建并部署到 GitHub Pages（推送 `main` 即触发）。
+> 发送端/APK/web 由 `./scripts/build-all.sh release` 产出；版本号取自根 `Cargo.toml`（`[workspace.package].version`），由 `node scripts/version.mjs check` 门禁统一各端。Windows zip 默认由 GitHub Actions `windows` workflow（`workflow_dispatch`）上传到同一 Release。Chrome `.crx` 需本机有 Chrome 才能签名，否则仅产出 `.zip`。web 发送端/接收端由 GitHub Actions `pages` workflow 自动构建并部署到 GitHub Pages（推送 `main` 即触发）。
 
 ### Android 接收端
 
@@ -106,13 +96,14 @@
 
 ```
 AirFerry/
-├── core/                  # 跨端 Rust 协议核心 + Windows ZXing-C++ 相机解码核心
+├── core/                  # 跨端 Rust 协议核心 + ZXing-C++ 相机解码核心
+│   ├── af2/               # AF2 核心协议层（帧格式、三层 ID、Manifest、状态机、Playlist）
 │   ├── raptorq-core/      # RFC 6330 RaptorQ 编解码封装
-│   ├── qr-protocol/       # 帧格式 / 分块 / 压缩 / CRC / QR 矩阵
-│   ├── transfer-engine/   # 编排 / 状态机 / 进度 / 断点 + WASM/JNI/C ABI
-│   └── zxing-decoder/     # Windows 对 Android v1.1.3 模式的 ZXing-C++ 实现
+│   ├── qr-protocol/       # 压缩 / CRC / QR 矩阵
+│   ├── transfer-engine/   # 编排 / 状态机 / 进度 / 快照 + WASM/JNI/C ABI
+│   └── zxing-decoder/     # ZXing-C++ 的 WASM / Windows 解码封装
 ├── apps/
-│   ├── sender/            # Plasmo + React + TS + WASM 发送端（浏览器扩展）
+│   ├── web/               # Vite + React + TS + WASM 前端（浏览器扩展 + 网页发送/接收 + 单文件版）
 │   ├── scanner/           # Kotlin + CameraX + ZXing-C++ 接收端（Android App）
 │   └── windows/           # C# WPF + OpenCvSharp + ZXing-C++（Windows App）
 ├── scripts/
@@ -136,27 +127,19 @@ AirFerry/
 
 ## 技术架构
 
-- **编码层**：RaptorQ 喷泉码（RFC 6330）；发送端源符号发一遍后持续补充新鲜修复符号（ESI 单调递增、不重复；上限 2²⁴−1），接收端可随时加入
-- **打包层**：≥2 文件先打包成 ETBUNDL1 容器，整批走单条压缩 + 单条 RaptorQ 流
-- **压缩层**：三算法选优（Raw / Zstd Lv1 / Xz Lv9），70% Zstd early-exit 启发式跳过慢速 Xz
-- **传输层**：60 字节帧头 + symbol_size 负载（浏览器默认 1400）+ 4 字节 CRC，编码为**最小版本** EC-L 二维码（**1464B 帧 → V27 125×125**）；4 码模式同帧 tile 4 个符号、吞吐 ~4×
-- **协议层**：Descriptor 帧（每 17 帧，首帧即描述符）携带 OTI + 文件元数据（文件名、大小、CRC32、压缩标签）；17 与 2/4 多码布局互质，使描述符轮流经过所有屏幕码位
-- **接收层**：Android 用 CameraX，并固定采用 v1.1.3 的 Kotlin 调度器与 JNI ZXing-C++ 解码路径；Windows 用 OpenCvSharp DirectShow，并通过 `core/zxing-decoder/` 镜像同一套 v1.1.3 全帧/ROI 模式。两端均为 2–6 worker、4 符号批摄入和串行 Rust 摄入。Windows Gray 帧仅池化复制一次，UI 以约 7Hz 展示 3 秒窗口速率和有效吞吐
+RaptorQ 喷泉码（RFC 6330）+ 三算法选优压缩 + 最小版本 EC-L 二维码 + 周期广播 ROOT 与 OBJECT_META；Android/Windows 接收端镜像同一套并行解码、串行摄入管线。详见 [docs/architecture.md](docs/architecture.md) 与 [docs/SPEC.md](docs/SPEC.md)。
 
 ## 文档
 
-- [AGENTS.md](AGENTS.md) — 🤖 AI 代理操作手册（构建命令、代码导航、调试速查、偏差清单）
-- [协议规范](docs/protocol.md) — 完整协议描述
-- [跨端契约规格](docs/SPEC.md) — 线格式/会话 ID/JNI 位布局等位级权威定义
-- [二维码帧格式](docs/qr-frame-format.md) — 帧头字段定义
-- [RaptorQ 参数](docs/raptorq-params.md) — 编解码参数说明
-- [架构设计](docs/architecture.md) — 系统架构与组件关系
-- [数据流](docs/data-flow.md) — 端到端数据流详解
+- [AGENTS.md](AGENTS.md) — 🤖 AI 代理操作手册（构建命令、代码导航、工程不变量）
+- [跨端契约规格](docs/SPEC.md) — AF2 位级权威定义与线格式
+- [架构设计](docs/architecture.md) — 系统架构、数据流与容错设计
 - [API 参考](docs/api.md) — 核心 API 文档
-- [构建指南 - 浏览器扩展](docs/build-browser.md)
+- [构建指南 - 浏览器扩展与网页端](docs/build-web-targets.md)
 - [构建指南 - Android](docs/build-android.md)
 - [构建指南 - Windows](docs/build-windows.md)
 - [开发环境搭建](docs/dev-setup.md)
+- [变更记录](CHANGELOG.md)
 
 ## 致谢
 

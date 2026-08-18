@@ -25,6 +25,7 @@ public static class AppSettings
     private static int _redundancy = DefaultRedundancy;
     private static string _theme = ThemeSystem;
     private static string _continuousDir = "";
+    private static bool _continuousOn;
 
     public static int Redundancy
     {
@@ -40,6 +41,12 @@ public static class AppSettings
     public static string ContinuousSaveDir
     {
         get { EnsureLoaded(); return _continuousDir; }
+    }
+
+    /// <summary>Whether continuous receive was enabled on the device-select page.</summary>
+    public static bool ContinuousOn
+    {
+        get { EnsureLoaded(); return _continuousOn; }
     }
 
     public static void SetRedundancy(int value)
@@ -60,6 +67,13 @@ public static class AppSettings
     {
         EnsureLoaded();
         _continuousDir = value?.Trim() ?? "";
+        Save();
+    }
+
+    public static void SetContinuousOn(bool value)
+    {
+        EnsureLoaded();
+        _continuousOn = value;
         Save();
     }
 
@@ -115,8 +129,34 @@ public static class AppSettings
             _redundancy = Math.Clamp(ParseInt(json, "default_redundancy", DefaultRedundancy), 5, 50);
             _theme = NormalizeTheme(ParseString(json, "theme"));
             _continuousDir = ParseString(json, "continuous_dir") ?? "";
+            _continuousOn = ParseBool(json, "continuous_on", false);
         }
         catch { /* fall through to defaults */ }
+    }
+
+    private static bool ParseBool(string json, string key, bool fallback)
+    {
+        int idx = json.IndexOf($"\"{key}\"", StringComparison.Ordinal);
+        if (idx < 0)
+        {
+            return fallback;
+        }
+        int colon = json.IndexOf(':', idx);
+        if (colon < 0)
+        {
+            return fallback;
+        }
+        int start = colon + 1;
+        while (start < json.Length && (json[start] == ' ' || json[start] == '\t')) start++;
+        if (start + 4 <= json.Length && json.AsSpan(start, 4).SequenceEqual("true"))
+        {
+            return true;
+        }
+        if (start + 5 <= json.Length && json.AsSpan(start, 5).SequenceEqual("false"))
+        {
+            return false;
+        }
+        return fallback;
     }
 
     private static int ParseInt(string json, string key, int fallback)
@@ -189,7 +229,8 @@ public static class AppSettings
             }
             File.WriteAllText(SettingsPath,
                 $"{{\"default_redundancy\":{_redundancy},\"theme\":\"{_theme}\"," +
-                $"\"continuous_dir\":\"{EscapeJsonString(_continuousDir)}\"}}");
+                $"\"continuous_dir\":\"{EscapeJsonString(_continuousDir)}\"," +
+                $"\"continuous_on\":{(_continuousOn ? "true" : "false")}}}");
         }
         catch { /* settings are best-effort; never block the UI */ }
     }

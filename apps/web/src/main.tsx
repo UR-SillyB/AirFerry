@@ -1,17 +1,16 @@
 /**
  * AirFerry web sender — entry point.
  *
- * This is a thin shell: the entire sender app (file/text select → params → QR
- * stream → stats) is reused verbatim from the browser extension's
- * `apps/sender/src/options.tsx`. The extension-only bits (background worker,
- * chrome.runtime.getURL) are handled inside that shared source via environment
- * detection, so this file only needs to mount the App.
+ * Thin shell: the entire sender app (file/text select → QR stream → stats,
+ * with transfer params on a separate settings page) lives in `src/options.tsx` (via the `@/` alias configured in
+ * vite.config.ts / tsconfig.json). The same source serves the browser
+ * extension build; extension-only bits (background worker, chrome.runtime.getURL)
+ * are handled inside it via environment detection, so this file only mounts
+ * the App.
  */
 import { StrictMode } from "react"
 import { createRoot } from "react-dom/client"
-// Reuse the sender's App component directly. The `@/` alias (configured in
-// vite.config.ts and tsconfig.json) points at ../sender/src/, so this import
-// lands on the real options.tsx without any duplication.
+// `@/` points at src/; options.tsx is shared by the web + extension builds.
 import App from "@/options"
 
 const rootEl = document.getElementById("root")

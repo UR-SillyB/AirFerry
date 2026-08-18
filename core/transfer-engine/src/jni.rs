@@ -20,25 +20,27 @@
 use crate::ingest_status;
 use crate::receiver::ReceiverSession;
 use crate::Progress;
-use jni::objects::{JByteArray, JClass, JString};
-use jni::sys::{jboolean, jint, jlong, jsize};
+use jni::objects::{JByteArray, JClass};
+use jni::sys::{jint, jlong, jsize};
 use jni::JNIEnv;
-use qr_protocol::frame::SessionIdRaw;
-use raptorq_core::MAX_ORIGINAL_BYTES;
 
 /// ABI / protocol capability version of this JNI library.
 ///
-/// The outer QR frame format stays at protocol version 1 (`SessionId::derive_segment`
-/// demultiplexes large-file segments by session id); this counter is a
-/// *separate* Android-side capability marker that advances whenever the native
-/// library gains behaviour the Kotlin host depends on. It is bumped once (to
-/// `1`) for the descriptor-v5 segmented (large-file) receive path.
+/// The wire protocol is AF2 (magic `AF`, wire_version 2, see `docs/SPEC.md`);
+/// this counter is a *separate* Android-side capability marker that advances
+/// whenever the native library gains behaviour the Kotlin host depends on.
+///
+/// - 1: legacy v1 (pre-AF2) segmented receive path.
+/// - 2: the 16 per-field receiver getters were replaced by the single
+///      `receiverSnapshotJson` (`ReceiverSnapshotV2`); old hosts calling the
+///      removed symbols get an `UnsatisfiedLinkError` instead of silent zeros.
+/// - 3: bounded-memory incremental §13 final verification was added.
 ///
 /// The host (`NativeBridge.nativeAbiVersion`) handshakes on startup: if the
 /// loaded `.so` predates this symbol (`UnsatisfiedLinkError`) or reports a
 /// lower version, the app refuses to run as a receiver instead of silently
 /// "staying synchronising" on >32 MiB transfers with a stale library.
-pub const AIRFERRY_NATIVE_ABI_VERSION: jint = 1;
+pub const AIRFERRY_NATIVE_ABI_VERSION: jint = 3;
 
 /// Report the native ABI / protocol capability version. Returns
 /// [`AIRFERRY_NATIVE_ABI_VERSION`].
@@ -56,16 +58,12 @@ pub extern "system" fn Java_com_airferry_app_nativelib_NativeBridge_receiverCrea
     _class: JClass,
     session_id_lo: jlong,
     session_id_hi: jlong,
-    _total_blocks: jint,
-    _total_symbols: jint,
-    _symbol_size: jint,
 ) -> jlong {
-    let sid: SessionIdRaw = ((session_id_hi as u64 as u128) << 64) | (session_id_lo as u64 as u128);
-    // Cache-only bootstrap: do NOT build a decoder from these caller-supplied
-    // totals (a guessed early layout, and `derive_meta_from_totals`'s OTI build
-    // can itself assert on large values). Data frames are buffered until the
-    // first *validated* descriptor frame supplies the authoritative, sanity-
-    // checked OTI (see ReceiverSession::ingest), which builds the real decoder.
+    let sid: u128 = ((session_id_hi as u64 as u128) << 64) | (session_id_lo as u64 as u128);
+    // Cache-only bootstrap: do NOT build a decoder from guessed caller totals.
+    // Data frames are buffered until the first *validated* descriptor frame
+    // supplies the authoritative, sanity-checked OTI (see ReceiverSession::ingest),
+    // which builds the real decoder.
     let session = ReceiverSession::new_pending(sid);
     Box::into_raw(Box::new(session)) as jlong
 }
@@ -119,59 +117,7 @@ pub extern "system" fn Java_com_airferry_app_nativelib_NativeBridge_receiverInge
         Err(_) => return ingest_status::INGEST_ERROR as jlong,
     };
     let session = unsafe { &mut *(handle as *mut ReceiverSession) };
-    let frame = match qr_protocol::Frame::from_bytes(&frame_vec) {
-        Ok(f) => f,
-        Err(e) => {
-            android_log(&format!(
-                "frame rejected (len={}): {:?}",
-                frame_vec.len(),
-                e
-            ));
-            return ingest_status::INGEST_ERROR as jlong;
-        }
-    };
-    let is_descriptor = frame.header.flags & qr_protocol::frame::FLAG_DESCRIPTOR != 0;
-    let prev_received = session.progress().received_symbols;
-    match session.ingest(frame) {
-        Ok(_) => {}
-        Err(e) => {
-            // A SessionMismatch on a data frame would silently drop every
-            // symbol — surface it so the cause is visible.
-            android_log(&format!("ingest error: {e}"));
-        }
-    }
-    let p = session.progress();
-    // Log the first few frames + any descriptor + when received is suspiciously
-    // stuck at 0 while frames are flowing. Throttled by frame_index to avoid
-    // flooding logcat.
-    if p.frames_seen <= 3 || is_descriptor || (p.frames_seen % 50 == 0 && !session.is_complete()) {
-        android_log(&format!(
-            "f={} desc={} meta={} recv={} dec={} {}/{} mismatch={}",
-            p.frames_seen,
-            is_descriptor,
-            p.meta_confirmed,
-            p.received_symbols,
-            p.decoded_blocks,
-            p.decoded_symbols,
-            p.total_symbols,
-            p.session_mismatch_streak
-        ));
-    }
-    let complete = if session.is_complete() { 1 } else { 0 };
-    // A frame "contributed" if received_symbols advanced, OR it was a descriptor
-    // that confirmed meta (so re-init state on the Kotlin side updates even when
-    // no new symbol arrived on that descriptor tick).
-    let accepted = if p.received_symbols > prev_received {
-        1
-    } else {
-        0
-    };
-    ingest_status::pack(
-        complete == 1,
-        accepted == 1,
-        p.session_mismatch_streak,
-        p.received_symbols,
-    ) as jlong
+    session.ingest(&frame_vec) as jlong
 }
 
 /// On-demand progress query (JSON). The UI calls this on its ~7 Hz refresh
@@ -245,13 +191,9 @@ pub extern "system" fn Java_com_airferry_app_nativelib_NativeBridge_receiverAsse
         return null_byte_array(&mut env);
     }
     let session = unsafe { &mut *(handle as *mut ReceiverSession) };
-    let data = match session.assemble_result() {
-        Ok(Some(d)) => d,
-        Ok(None) => return null_byte_array(&mut env),
-        Err(e) => {
-            android_log(&format!("assemble failed: {e}"));
-            return null_byte_array(&mut env);
-        }
+    let data = match session.assemble_all() {
+        Some(d) => d,
+        None => return null_byte_array(&mut env),
     };
     // Allocate a fresh byte[] of exactly data.len() and copy. jsize is i32, so a
     // Vec longer than i32::MAX (2 GiB) cannot be represented as a Java array in
@@ -281,34 +223,21 @@ pub extern "system" fn Java_com_airferry_app_nativelib_NativeBridge_receiverAsse
     }
 }
 
-/// Reassemble the RaptorQ object bytes **exactly as transmitted** (trimmed to
-/// `compressed_size` when known), **without** applying decompression.
-///
-/// For descriptor-v5 segmented transfers the compressed-stream model stores each
-/// segment's **compressed** bytes and concatenates + decompresses once at the
-/// end, so Kotlin calls this instead of `receiverAssembleBytes` (which
-/// decompresses per segment). Returns an empty byte[] if decoding is incomplete.
+/// Reassemble chunk `index` bytes. Returns empty byte[] if not ready / on error.
 #[no_mangle]
-pub extern "system" fn Java_com_airferry_app_nativelib_NativeBridge_receiverAssembleRawBytes(
+pub extern "system" fn Java_com_airferry_app_nativelib_NativeBridge_receiverAssembleChunk(
     mut env: JNIEnv,
     _class: JClass,
     handle: jlong,
+    index: jint,
 ) -> jni::sys::jbyteArray {
     if handle == 0 {
         return null_byte_array(&mut env);
     }
-    let session = unsafe { &*(handle as *const ReceiverSession) };
-    let Some(mut raw) = session.assemble_raw() else {
+    let session = unsafe { &mut *(handle as *mut ReceiverSession) };
+    let Some(raw) = session.assemble_chunk(index as u32) else {
         return null_byte_array(&mut env);
     };
-    let fm = session.file_meta();
-    if fm.compressed_size_known {
-        if let Ok(len) = usize::try_from(fm.compressed_size) {
-            if len <= raw.len() {
-                raw.truncate(len);
-            }
-        }
-    }
     let len = match jsize::try_from(raw.len()) {
         Ok(n) => n,
         Err(_) => return null_byte_array(&mut env),
@@ -325,116 +254,207 @@ pub extern "system" fn Java_com_airferry_app_nativelib_NativeBridge_receiverAsse
     }
 }
 
-/// Compression-algorithm tag of the confirmed descriptor (0=None, 1=Zstd,
-/// 2=Xz). For segmented transfers this is the algorithm of the whole stream,
-/// shared by every segment.
+/// Index of the chunk completed by the most recent ChunkReady frame, or -1.
+/// The host persists that chunk via `receiverAssembleChunk` + forgets it with
+/// `receiverForgetChunk` to keep native memory bounded by one chunk.
 #[no_mangle]
-pub extern "system" fn Java_com_airferry_app_nativelib_NativeBridge_receiverCompression(
+pub extern "system" fn Java_com_airferry_app_nativelib_NativeBridge_receiverLastChunkIndex(
     _env: JNIEnv,
     _class: JClass,
     handle: jlong,
 ) -> jint {
     if handle == 0 {
-        return 0;
+        return -1;
     }
     let session = unsafe { &*(handle as *const ReceiverSession) };
-    i32::from(session.file_meta().compression)
+    session.last_completed_chunk_index().map(|i| i as jint).unwrap_or(-1)
 }
 
-/// Transmitted (possibly compressed) payload length of this object. For a
-/// segmented transfer this is the segment's compressed size.
+/// Release a persisted chunk from native memory (eviction). Returns true when
+/// the chunk was resident. Completion tracking is unaffected.
 #[no_mangle]
-pub extern "system" fn Java_com_airferry_app_nativelib_NativeBridge_receiverCompressedSize(
+pub extern "system" fn Java_com_airferry_app_nativelib_NativeBridge_receiverForgetChunk(
     _env: JNIEnv,
     _class: JClass,
     handle: jlong,
-) -> jlong {
-    if handle == 0 {
+    index: jint,
+) -> jni::sys::jboolean {
+    if handle == 0 || index < 0 {
         return 0;
     }
-    let session = unsafe { &*(handle as *const ReceiverSession) };
-    session.file_meta().compressed_size as jlong
+    let session = unsafe { &mut *(handle as *mut ReceiverSession) };
+    session.forget_chunk(index as u32) as jni::sys::jboolean
 }
 
-/// Whole **decompressed** original size of the transfer (same across every
-/// segment of a segmented root).
+/// Verify a staged raw chunk against the ROOT-bound Manifest chunk table (§11).
 #[no_mangle]
-pub extern "system" fn Java_com_airferry_app_nativelib_NativeBridge_receiverOriginalSize(
-    _env: JNIEnv,
-    _class: JClass,
-    handle: jlong,
-) -> jlong {
-    if handle == 0 {
-        return 0;
-    }
-    let session = unsafe { &*(handle as *const ReceiverSession) };
-    session.file_meta().original_size as jlong
-}
-
-/// Decompress a byte array according to a compression tag (0=None, 1=Zstd,
-/// 2=Xz), bounded by `max_output`. Used by Kotlin to decompress the
-/// concatenated compressed stream of a segmented transfer exactly once.
-#[no_mangle]
-pub extern "system" fn Java_com_airferry_app_nativelib_NativeBridge_decompressBytes(
+pub extern "system" fn Java_com_airferry_app_nativelib_NativeBridge_receiverVerifyChunk(
     mut env: JNIEnv,
     _class: JClass,
-    data: jni::sys::jbyteArray,
-    compression: jint,
-    max_output: jlong,
-) -> jni::sys::jbyteArray {
-    if data.is_null() {
-        return null_byte_array(&mut env);
+    handle: jlong,
+    index: jint,
+    raw_bytes: jni::sys::jbyteArray,
+) -> jni::sys::jboolean {
+    if handle == 0 || raw_bytes.is_null() {
+        return false as jni::sys::jboolean;
     }
-    // SAFETY: `data` is a non-null `jbyteArray` owned by the JVM for the call
-    // duration (JNI local reference). Wrap it so the typed `jni` crate methods
-    // accept it.
-    let arr = unsafe { JByteArray::from_raw(data) };
-    let len = match env.get_array_length(&arr) {
-        Ok(n) => n,
-        Err(_) => return null_byte_array(&mut env),
+    let session = unsafe { &*(handle as *const ReceiverSession) };
+    // Bind the JNI array wrapper to a named local: `get_array_elements`
+    // borrows it, and a temporary (`&JByteArray::from_raw(...)`) would be
+    // dropped while the returned element view is still in use (E0716).
+    let arr = unsafe { jni::objects::JByteArray::from_raw(raw_bytes) };
+    let bytes = match unsafe { env.get_array_elements(&arr, jni::objects::ReleaseMode::NoCopyBack) } {
+        Ok(elems) => elems,
+        Err(_) => return false as jni::sys::jboolean,
     };
-    if len < 0 {
-        return null_byte_array(&mut env);
+    let slice = unsafe { std::slice::from_raw_parts(bytes.as_ptr() as *const u8, bytes.len()) };
+    session.verify_chunk(index as u32, slice) as jni::sys::jboolean
+}
+
+/// Run §13 ⑧⑨ integrity chain over the reassembled canonical stream.
+#[no_mangle]
+pub extern "system" fn Java_com_airferry_app_nativelib_NativeBridge_receiverVerifyFinalStream(
+    mut env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+    stream_bytes: jni::sys::jbyteArray,
+) -> jni::sys::jboolean {
+    if handle == 0 || stream_bytes.is_null() {
+        return false as jni::sys::jboolean;
     }
-    // `jni` expects `&mut [i8]`; `u8`/`i8` share the same in-memory layout.
-    let mut buf = vec![0u8; len as usize];
-    let buf_i8: &mut [i8] =
-        unsafe { std::slice::from_raw_parts_mut(buf.as_mut_ptr() as *mut i8, buf.len()) };
-    if env.get_byte_array_region(&arr, 0, buf_i8).is_err() {
-        return null_byte_array(&mut env);
+    let session = unsafe { &*(handle as *const ReceiverSession) };
+    let arr = unsafe { jni::objects::JByteArray::from_raw(stream_bytes) };
+    let bytes = match unsafe { env.get_array_elements(&arr, jni::objects::ReleaseMode::NoCopyBack) } {
+        Ok(elems) => elems,
+        Err(_) => return false as jni::sys::jboolean,
+    };
+    let slice = unsafe { std::slice::from_raw_parts(bytes.as_ptr() as *const u8, bytes.len()) };
+    session.verify_final_stream(slice) as jni::sys::jboolean
+}
+
+/// Begin bounded-memory §13 ⑧⑨ verification.
+#[no_mangle]
+pub extern "system" fn Java_com_airferry_app_nativelib_NativeBridge_receiverFinalVerifyBegin(
+    _env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+) -> jni::sys::jboolean {
+    if handle == 0 {
+        return false as jni::sys::jboolean;
     }
-    let max_out = if max_output > 0 {
-        // Clamp the host-supplied cap to MAX_ORIGINAL_BYTES so a careless or
-        // hostile caller (e.g. forwarding a descriptor's whole-file size, which
-        // is unbounded for segmented transfers) cannot disable
-        // decompress_with_limit's bomb bound by passing usize::MAX-equivalent.
-        // `max_output` is `jlong` (i64); we've checked `> 0` so the cast to u64
-        // is safe, and only then can we `min` against the u64 ceiling.
-        let cap = (max_output as u64).min(MAX_ORIGINAL_BYTES);
-        cap as usize
-    } else {
-        0
+    let session = unsafe { &mut *(handle as *mut ReceiverSession) };
+    session.final_verify_begin() as jni::sys::jboolean
+}
+
+/// Feed the next contiguous canonical-stream block to the incremental gate.
+#[no_mangle]
+pub extern "system" fn Java_com_airferry_app_nativelib_NativeBridge_receiverFinalVerifyFeed(
+    mut env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+    stream_bytes: jni::sys::jbyteArray,
+) -> jni::sys::jboolean {
+    if handle == 0 || stream_bytes.is_null() {
+        return false as jni::sys::jboolean;
+    }
+    let session = unsafe { &mut *(handle as *mut ReceiverSession) };
+    let arr = unsafe { jni::objects::JByteArray::from_raw(stream_bytes) };
+    let bytes = match unsafe { env.get_array_elements(&arr, jni::objects::ReleaseMode::NoCopyBack) } {
+        Ok(elems) => elems,
+        Err(_) => return false as jni::sys::jboolean,
     };
-    let out = match qr_protocol::compress::decompress_with_limit(&buf, compression as u8, max_out) {
-        Ok(bytes) => bytes,
-        Err(e) => {
-            android_log(&format!("decompressBytes failed: {e}"));
-            return null_byte_array(&mut env);
-        }
+    let slice = unsafe { std::slice::from_raw_parts(bytes.as_ptr() as *const u8, bytes.len()) };
+    session.final_verify_feed(slice) as jni::sys::jboolean
+}
+
+/// Finish bounded-memory §13 ⑧⑨ verification.
+#[no_mangle]
+pub extern "system" fn Java_com_airferry_app_nativelib_NativeBridge_receiverFinalVerifyFinish(
+    _env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+) -> jni::sys::jboolean {
+    if handle == 0 {
+        return false as jni::sys::jboolean;
+    }
+    let session = unsafe { &mut *(handle as *mut ReceiverSession) };
+    session.final_verify_finish() as jni::sys::jboolean
+}
+
+/// Restore receiver from stored ROOT frame bytes + completed chunk indices (§12 resume).
+#[no_mangle]
+pub extern "system" fn Java_com_airferry_app_nativelib_NativeBridge_receiverResume(
+    mut env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+    root_frame_bytes: jni::sys::jbyteArray,
+    completed_indices: jni::sys::jintArray,
+) -> jni::sys::jboolean {
+    if handle == 0 || root_frame_bytes.is_null() || completed_indices.is_null() {
+        return false as jni::sys::jboolean;
+    }
+    let session = unsafe { &mut *(handle as *mut ReceiverSession) };
+    let root_arr = unsafe { jni::objects::JByteArray::from_raw(root_frame_bytes) };
+    let r_bytes = match unsafe { env.get_array_elements(&root_arr, jni::objects::ReleaseMode::NoCopyBack) } {
+        Ok(elems) => elems,
+        Err(_) => return false as jni::sys::jboolean,
     };
-    let out_len = match jsize::try_from(out.len()) {
-        Ok(n) => n,
-        Err(_) => return null_byte_array(&mut env),
+    let r_slice = unsafe { std::slice::from_raw_parts(r_bytes.as_ptr() as *const u8, r_bytes.len()) };
+    let idx_arr = unsafe { jni::objects::JIntArray::from_raw(completed_indices) };
+    let c_elems = match unsafe { env.get_array_elements(&idx_arr, jni::objects::ReleaseMode::NoCopyBack) } {
+        Ok(elems) => elems,
+        Err(_) => return false as jni::sys::jboolean,
     };
-    let arr = match env.new_byte_array(out_len) {
-        Ok(a) => a,
-        Err(_) => return null_byte_array(&mut env),
+    let completed_u32: Vec<u32> = unsafe {
+        std::slice::from_raw_parts(c_elems.as_ptr(), c_elems.len())
+            .iter()
+            .map(|&x| x as u32)
+            .collect()
     };
-    let i8_buf: &[i8] = unsafe { std::slice::from_raw_parts(out.as_ptr() as *const i8, out.len()) };
-    if env.set_byte_array_region(&arr, 0, i8_buf).is_ok() {
-        arr.into_raw()
-    } else {
-        null_byte_array(&mut env)
+    session.resume(r_slice, &completed_u32) as jni::sys::jboolean
+}
+
+/// Evict one chunk from both ledgers after a host-side spill re-verification
+/// failure (§11/§12): the sender's next epoch re-supplies it. Mirrors
+/// [`ReceiverSession::invalidate_chunk`].
+#[no_mangle]
+pub extern "system" fn Java_com_airferry_app_nativelib_NativeBridge_receiverInvalidateChunk(
+    _env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+    index: jint,
+) -> jni::sys::jboolean {
+    if handle == 0 || index < 0 {
+        return false as jni::sys::jboolean;
+    }
+    let session = unsafe { &mut *(handle as *mut ReceiverSession) };
+    session.invalidate_chunk(index as u32) as jni::sys::jboolean
+}
+
+/// Single-JSON receiver snapshot (`ReceiverSnapshotV2`, see
+/// [`ReceiverSession::snapshot_json`]).
+///
+/// Replaces the former 16 per-field getters (compression / compressed_size /
+/// original_size / file_name / file_size / crc32 / crc32_known / is_segmented
+/// / segment_index / segment_count / root_original_size / original_offset /
+/// root_session_id_lo/hi / raw_sha256 / root_sha256). One call returns every
+/// AF2 snapshot field atomically — no torn reads across getters — and
+/// the Kotlin side parses it with `JSONObject`. Returns null on a null handle
+/// or string-conversion failure.
+#[no_mangle]
+pub extern "system" fn Java_com_airferry_app_nativelib_NativeBridge_receiverSnapshotJson(
+    env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+) -> jni::sys::jstring {
+    if handle == 0 {
+        return std::ptr::null_mut();
+    }
+    let session = unsafe { &*(handle as *const ReceiverSession) };
+    let json = session.snapshot_json();
+    match env.new_string(&json) {
+        Ok(s) => s.into_raw(),
+        Err(_) => std::ptr::null_mut(),
     }
 }
 
@@ -446,362 +466,9 @@ fn null_byte_array(env: &mut JNIEnv) -> jni::sys::jbyteArray {
     }
 }
 
-// ===== File metadata accessors =====
-// Kotlin reads these after a descriptor frame arrives to display the filename,
-// original size, and verify CRC32.
-
-/// Returns the original filename as a Java String (or empty if unknown).
-#[no_mangle]
-pub extern "system" fn Java_com_airferry_app_nativelib_NativeBridge_receiverFileName(
-    env: JNIEnv,
-    _class: JClass,
-    handle: jlong,
-) -> jni::sys::jstring {
-    if handle == 0 {
-        return std::ptr::null_mut();
-    }
-    let session = unsafe { &*(handle as *const ReceiverSession) };
-    let name = session.file_meta().filename.clone();
-    match env.new_string(&name) {
-        Ok(s) => s.into_raw(),
-        Err(_) => std::ptr::null_mut(),
-    }
-}
-
-/// Returns the original file size (0 if unknown).
-#[no_mangle]
-pub extern "system" fn Java_com_airferry_app_nativelib_NativeBridge_receiverFileSize(
-    _env: JNIEnv,
-    _class: JClass,
-    handle: jlong,
-) -> jlong {
-    if handle == 0 {
-        return 0;
-    }
-    let session = unsafe { &*(handle as *const ReceiverSession) };
-    session.file_meta().original_size as jlong
-}
-
-/// Returns the CRC32 of the original file (0 if unknown).
-///
-/// Returned as `jlong` (not `jint`) so the full unsigned 32-bit range
-/// (0..=0xFFFF_FFFF) survives intact — Kotlin's `Int` is signed, so a value
-/// like `0xDEADBEEF` would otherwise arrive as a negative number and break
-/// equality comparisons with a receiver-computed CRC.
-#[no_mangle]
-pub extern "system" fn Java_com_airferry_app_nativelib_NativeBridge_receiverCrc32(
-    _env: JNIEnv,
-    _class: JClass,
-    handle: jlong,
-) -> jlong {
-    if handle == 0 {
-        return 0;
-    }
-    let session = unsafe { &*(handle as *const ReceiverSession) };
-    session.file_meta().crc32 as u64 as jlong
-}
-
-/// Returns 1 if the descriptor supplied a real CRC32 (so the receiver should
-/// verify it), or 0 if the CRC is unknown (v1 descriptor / not yet received)
-/// and must NOT be compared against the recovered bytes.
-///
-/// This exists because CRC32 can legitimately be 0 (~1 in 2^32 files): the old
-/// `expectedCrc == 0L` sentinel on the Kotlin side mislabelled such files as
-/// "unverified". `crc32_known` is the authoritative "is there a value" flag.
-#[no_mangle]
-pub extern "system" fn Java_com_airferry_app_nativelib_NativeBridge_receiverCrc32Known(
-    _env: JNIEnv,
-    _class: JClass,
-    handle: jlong,
-) -> jint {
-    if handle == 0 {
-        return 0;
-    }
-    let session = unsafe { &*(handle as *const ReceiverSession) };
-    session.file_meta().crc32_known as jint
-}
-
-// ===== descriptor-v5 segment metadata accessors =====
-// Kotlin reads these after a descriptor frame arrives to detect a large-transfer
-// child object and to drive the per-segment `.partial` writer. All mirror the
-// WASM `ReceiverSessionWasm` getters (wasm.rs) and read `session.segment_meta()`.
-
-/// 1 if the confirmed descriptor was a v5 large-transfer child object, else 0.
-#[no_mangle]
-pub extern "system" fn Java_com_airferry_app_nativelib_NativeBridge_receiverIsSegmented(
-    _env: JNIEnv,
-    _class: JClass,
-    handle: jlong,
-) -> jint {
-    if handle == 0 {
-        return 0;
-    }
-    let session = unsafe { &*(handle as *const ReceiverSession) };
-    session.segment_meta().is_some() as jint
-}
-
-/// Zero-based index of this segment within the root transfer (0 if not segmented).
-#[no_mangle]
-pub extern "system" fn Java_com_airferry_app_nativelib_NativeBridge_receiverSegmentIndex(
-    _env: JNIEnv,
-    _class: JClass,
-    handle: jlong,
-) -> jint {
-    if handle == 0 {
-        return 0;
-    }
-    let session = unsafe { &*(handle as *const ReceiverSession) };
-    session
-        .segment_meta()
-        .map(|s| s.segment_index as jint)
-        .unwrap_or(0)
-}
-
-/// Total segment count of the root transfer (1 if not segmented).
-#[no_mangle]
-pub extern "system" fn Java_com_airferry_app_nativelib_NativeBridge_receiverSegmentCount(
-    _env: JNIEnv,
-    _class: JClass,
-    handle: jlong,
-) -> jint {
-    if handle == 0 {
-        return 0;
-    }
-    let session = unsafe { &*(handle as *const ReceiverSession) };
-    session
-        .segment_meta()
-        .map(|s| s.segment_count as jint)
-        .unwrap_or(1)
-}
-
-/// Root (whole-file) original size in bytes (0 if not segmented).
-#[no_mangle]
-pub extern "system" fn Java_com_airferry_app_nativelib_NativeBridge_receiverRootOriginalSize(
-    _env: JNIEnv,
-    _class: JClass,
-    handle: jlong,
-) -> jlong {
-    if handle == 0 {
-        return 0;
-    }
-    let session = unsafe { &*(handle as *const ReceiverSession) };
-    session
-        .segment_meta()
-        .map(|s| s.root_original_size as jlong)
-        .unwrap_or(0)
-}
-
-/// Original (uncompressed) offset of this segment in the root file (0 if not segmented).
-#[no_mangle]
-pub extern "system" fn Java_com_airferry_app_nativelib_NativeBridge_receiverOriginalOffset(
-    _env: JNIEnv,
-    _class: JClass,
-    handle: jlong,
-) -> jlong {
-    if handle == 0 {
-        return 0;
-    }
-    let session = unsafe { &*(handle as *const ReceiverSession) };
-    session
-        .segment_meta()
-        .map(|s| s.original_offset as jlong)
-        .unwrap_or(0)
-}
-
-/// Root session id low 64 bits (whole transfer id), or 0 if not segmented.
-#[no_mangle]
-pub extern "system" fn Java_com_airferry_app_nativelib_NativeBridge_receiverRootSessionIdLo(
-    _env: JNIEnv,
-    _class: JClass,
-    handle: jlong,
-) -> jlong {
-    if handle == 0 {
-        return 0;
-    }
-    let session = unsafe { &*(handle as *const ReceiverSession) };
-    session
-        .segment_meta()
-        .map(|s| (s.root_session_id as u64) as jlong)
-        .unwrap_or(0)
-}
-
-/// Root session id high 64 bits, or 0 if not segmented.
-#[no_mangle]
-pub extern "system" fn Java_com_airferry_app_nativelib_NativeBridge_receiverRootSessionIdHi(
-    _env: JNIEnv,
-    _class: JClass,
-    handle: jlong,
-) -> jlong {
-    if handle == 0 {
-        return 0;
-    }
-    let session = unsafe { &*(handle as *const ReceiverSession) };
-    session
-        .segment_meta()
-        .map(|s| (s.root_session_id >> 64) as jlong)
-        .unwrap_or(0)
-}
-
-/// SHA-256 (raw 32 bytes) of this segment's uncompressed bytes, or empty if not
-/// segmented.
-#[no_mangle]
-pub extern "system" fn Java_com_airferry_app_nativelib_NativeBridge_receiverRawSha256(
-    env: JNIEnv,
-    _class: JClass,
-    handle: jlong,
-) -> jni::sys::jbyteArray {
-    if handle == 0 {
-        return std::ptr::null_mut();
-    }
-    let session = unsafe { &*(handle as *const ReceiverSession) };
-    match session.segment_meta() {
-        Some(s) => match env.byte_array_from_slice(&s.raw_sha256) {
-            Ok(arr) => arr.into_raw(),
-            Err(_) => std::ptr::null_mut(),
-        },
-        None => std::ptr::null_mut(),
-    }
-}
-
-/// SHA-256 of the complete uncompressed root file, or null for a legacy
-/// non-segmented descriptor.
-#[no_mangle]
-pub extern "system" fn Java_com_airferry_app_nativelib_NativeBridge_receiverRootSha256(
-    env: JNIEnv,
-    _class: JClass,
-    handle: jlong,
-) -> jni::sys::jbyteArray {
-    if handle == 0 {
-        return std::ptr::null_mut();
-    }
-    let session = unsafe { &*(handle as *const ReceiverSession) };
-    match session.segment_meta() {
-        Some(s) => match env.byte_array_from_slice(&s.root_sha256) {
-            Ok(arr) => arr.into_raw(),
-            Err(_) => std::ptr::null_mut(),
-        },
-        None => std::ptr::null_mut(),
-    }
-}
-
-/// Last [`ReceiverSession::assemble_result`] error message, or empty if none.
-#[no_mangle]
-pub extern "system" fn Java_com_airferry_app_nativelib_NativeBridge_receiverLastAssembleError(
-    env: JNIEnv,
-    _class: JClass,
-    handle: jlong,
-) -> jni::sys::jstring {
-    if handle == 0 {
-        return std::ptr::null_mut();
-    }
-    let session = unsafe { &*(handle as *const ReceiverSession) };
-    let msg = session.last_assemble_error().unwrap_or("");
-    match env.new_string(msg) {
-        Ok(s) => s.into_raw(),
-        Err(_) => std::ptr::null_mut(),
-    }
-}
-
-/// Stream a concatenated compressed stream from `input_path` to `output_path`,
-/// decompressing as it goes (zstd/xz streaming decoder) while computing CRC32 +
-/// SHA-256 incrementally — neither input nor output is held wholly in memory, so
-/// very large files can be recovered in bounded RAM. Verifies the decompressed
-/// size, CRC32 (when known) and SHA-256 against the descriptor before returning
-/// success; any mismatch or I/O error removes the partial output and returns
-/// false.
-///
-/// `max_output` caps the decompressed size (decompression-bomb guard).
-#[no_mangle]
-pub extern "system" fn Java_com_airferry_app_nativelib_NativeBridge_decompressStreamToFile(
-    env: JNIEnv,
-    _class: JClass,
-    input_path: JString,
-    output_path: JString,
-    compression: jint,
-    max_output: jlong,
-    expected_size: jlong,
-    expected_crc: jlong,
-    crc_known: jboolean,
-    expected_sha_hex: JString,
-) -> jboolean {
-    fn jstr(env: &mut JNIEnv, s: JString) -> Option<String> {
-        env.get_string(&s).ok().map(|j| j.into())
-    }
-    let mut env = env;
-    let input = match jstr(&mut env, input_path) {
-        Some(v) => v,
-        None => {
-            android_log("decompressStreamToFile: missing input path");
-            return 0;
-        }
-    };
-    let output = match jstr(&mut env, output_path) {
-        Some(v) => v,
-        None => {
-            android_log("decompressStreamToFile: missing output path");
-            return 0;
-        }
-    };
-    let expected_sha = match jstr(&mut env, expected_sha_hex) {
-        Some(v) => v,
-        None => {
-            android_log("decompressStreamToFile: missing expected sha");
-            return 0;
-        }
-    };
-
-    // Streamed decompression writes to disk in bounded RAM, so unlike the
-    // in-memory `decompressBytes` path it is NOT capped at MAX_ORIGINAL_BYTES
-    // (256 MiB). For a descriptor-v5 segmented transfer `decompressedSize` is
-    // the whole-file original size, which legitimately exceeds 256 MiB. The
-    // host (SegmentAssembler) has already validated it as a positive Long and
-    // checked the disk has room for the compressed stream; using that exact
-    // value as the streaming cap still defends against a decompression bomb
-    // (the stream is rejected as soon as it would exceed the declared output).
-    // The downstream size + CRC + SHA checks enforce correctness regardless.
-    let max_out = if max_output > 0 {
-        // `max_output` is a positive jlong (i64), so the cast to u64 is safe.
-        max_output as u64
-    } else {
-        0
-    };
-    let outcome = match qr_protocol::compress::decompress_stream_to_file(
-        &input,
-        &output,
-        compression as u8,
-        max_out,
-    ) {
-        Ok(o) => o,
-        Err(e) => {
-            android_log(&format!("decompressStreamToFile failed: {e}"));
-            return 0;
-        }
-    };
-
-    if outcome.output_size != expected_size as u64 {
-        android_log(&format!(
-            "decompressStreamToFile size mismatch: {} != {}",
-            outcome.output_size, expected_size
-        ));
-        let _ = std::fs::remove_file(&output);
-        return 0;
-    }
-    if crc_known != 0 && outcome.crc32 != expected_crc as u32 {
-        android_log(&format!(
-            "decompressStreamToFile crc mismatch: {:08x} != {:08x}",
-            outcome.crc32, expected_crc as u32
-        ));
-        let _ = std::fs::remove_file(&output);
-        return 0;
-    }
-    let actual_sha: String = outcome.sha256.iter().map(|b| format!("{b:02x}")).collect();
-    if !actual_sha.eq_ignore_ascii_case(&expected_sha) {
-        android_log("decompressStreamToFile sha mismatch");
-        let _ = std::fs::remove_file(&output);
-        return 0;
-    }
-    1
-}
+// ===== Recovered-file / manifest snapshot + progress JSON =====
+// All consumed through the single `receiverSnapshotJson` snapshot above; the
+// per-field accessors were removed with AIRFERRY_NATIVE_ABI_VERSION 2.
 
 fn progress_json(p: &Progress) -> String {
     format!(

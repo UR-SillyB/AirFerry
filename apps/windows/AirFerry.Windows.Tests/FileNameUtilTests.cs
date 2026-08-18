@@ -39,6 +39,33 @@ public class FileNameUtilTests
     }
 
     [Fact]
+    public void SanitizeRelativePath_PreservesSafeHierarchyAndDropsTraversal()
+    {
+        Assert.Equal("目录/子目录/报告 2026.txt",
+            FileNameUtil.SanitizeRelativePath("目录/子目录/报告 2026.txt"));
+        Assert.Equal("escape/a_b.txt",
+            FileNameUtil.SanitizeRelativePath("../escape/a:b.txt"));
+    }
+
+    [Fact]
+    public void UniqueRelativeTarget_CreatesNestedDirectorySafely()
+    {
+        string root = Path.Combine(Path.GetTempPath(), "AirFerry.FileNameUtilTests",
+            Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            string target = FileNameUtil.UniqueRelativeTarget(root, "a/b/report.txt");
+            Assert.Equal(Path.Combine(root, "a", "b", "report.txt"), target);
+            Assert.True(Directory.Exists(Path.Combine(root, "a", "b")));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
     public void Sanitize_DropsLeadingDots()
     {
         Assert.Equal("hidden", FileNameUtil.Sanitize(".hidden"));

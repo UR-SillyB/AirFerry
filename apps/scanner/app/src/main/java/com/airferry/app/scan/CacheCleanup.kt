@@ -8,8 +8,8 @@ import java.io.File
  * App-cache housekeeping for **legacy** recovery temps and share staging.
  *
  * Modern transfers use [ContentStore] under `files/store/` (not purged here).
- * This only cleans leftover `cacheDir/recovered_*` and `cacheDir/share/` from
- * older builds or interrupted sessions.
+ * This cleans leftover `cacheDir/recovered_*`, `cacheDir/share/` from older
+ * builds, and `cacheDir/af2-entry-stage/` temps from interrupted stagings.
  */
 object CacheCleanup {
 
@@ -18,6 +18,7 @@ object CacheCleanup {
     private const val KEY_SHARE_DIRTY = "share_dirty"
     private const val SHARE_DIR = "share"
     private const val RECOVERED_PREFIX = "recovered_"
+    private const val ENTRY_STAGE_DIR = "af2-entry-stage"
 
     /** Optional: mark that a legacy share staging dir was used. */
     fun markShareDirty(context: Context) {
@@ -48,6 +49,13 @@ object CacheCleanup {
             }
             if (shareDirty) {
                 prefs.edit().putBoolean(KEY_SHARE_DIRTY, false).apply()
+            }
+            // Interrupted §13 entry staging leaves `<uuid>.partial` temps
+            // behind; recovery wipes the dir at its own start, this covers
+            // a process kill before that ever runs.
+            val entryStage = File(cache, ENTRY_STAGE_DIR)
+            if (entryStage.exists() && entryStage.listFiles()?.isNotEmpty() == true) {
+                if (entryStage.deleteRecursively()) removed++
             }
         } catch (e: Exception) {
             Log.w(TAG, "purgeOnAppStart failed", e)

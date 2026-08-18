@@ -55,7 +55,7 @@ internal static class NativeBridge
 
     /// <summary>
     /// Create a cache-only receiver. No object metadata is built yet — data
-    /// frames are buffered until the first validated descriptor frame supplies
+    /// frames are buffered until the first validated ROOT/META frame supplies
     /// the authoritative OTI. Split the 128-bit session id into low/high
     /// 64-bit halves (host order), matching the Rust contract.
     /// </summary>
@@ -130,28 +130,28 @@ internal static class NativeBridge
         EntryPoint = "airferry_buffer_free")]
     public static extern void BufferFree(IntPtr ptr, nuint len);
 
+    /// <summary>Reassemble chunk <paramref name="index"/> into a native buffer.</summary>
+    [DllImport(LibName, CallingConvention = CallingConvention.Cdecl,
+        EntryPoint = "airferry_receiver_assemble_chunk")]
+    public static extern int ReceiverAssembleChunk(IntPtr handle, uint index, out IntPtr outBuf, out nuint outLen);
+
     /// <summary>
-    /// Reassemble this segment's transmitted (compressed) bytes as received,
-    /// **without** decompression. Free with <see cref="BufferFree"/>.
+    /// Index of the chunk completed by the most recent ChunkReady frame, or -1.
+    /// Persist it via <see cref="ReceiverAssembleChunk"/> and release it via
+    /// <see cref="ReceiverForgetChunk"/> to keep native memory bounded by one
+    /// chunk instead of the whole object.
     /// </summary>
     [DllImport(LibName, CallingConvention = CallingConvention.Cdecl,
-        EntryPoint = "airferry_receiver_assemble_raw")]
-    public static extern int ReceiverAssembleRaw(IntPtr handle, out IntPtr outBuf, out nuint outLen);
+        EntryPoint = "airferry_receiver_last_chunk_index")]
+    public static extern int ReceiverLastChunkIndex(IntPtr handle);
 
-    /// <summary>Compression-algorithm tag of the confirmed descriptor (0=None,1=Zstd,2=Xz).</summary>
+    /// <summary>
+    /// Release a persisted chunk from native memory (eviction). Returns 1 when
+    /// the chunk was resident. Completion tracking is unaffected.
+    /// </summary>
     [DllImport(LibName, CallingConvention = CallingConvention.Cdecl,
-        EntryPoint = "airferry_receiver_compression")]
-    public static extern byte ReceiverCompression(IntPtr handle);
-
-    /// <summary>This object's transmitted (compressed) payload length.</summary>
-    [DllImport(LibName, CallingConvention = CallingConvention.Cdecl,
-        EntryPoint = "airferry_receiver_compressed_size")]
-    public static extern ulong ReceiverCompressedSize(IntPtr handle);
-
-    /// <summary>Whole decompressed original size (same across segments of a root).</summary>
-    [DllImport(LibName, CallingConvention = CallingConvention.Cdecl,
-        EntryPoint = "airferry_receiver_original_size")]
-    public static extern ulong ReceiverOriginalSize(IntPtr handle);
+        EntryPoint = "airferry_receiver_forget_chunk")]
+    public static extern int ReceiverForgetChunk(IntPtr handle, uint index);
 
     /// <summary>
     /// Decompress a byte buffer by tag (0=None,1=Zstd,2=Xz), bounded by
@@ -214,84 +214,72 @@ internal static class NativeBridge
     public static extern nuint ReceiverProgressJson(IntPtr handle, byte[]? outBuf, nuint cap);
 
     /// <summary>
-    /// Write the recovered filename (UTF-8 + NUL) using the same two-pass
-    /// protocol as <see cref="ReceiverProgressJson"/>.
+    /// Single-JSON receiver snapshot (<c>ReceiverSnapshotV2</c>): every
+    /// recovered-transfer field the AF2 schema exposes (name/sizes/CRC/codec,
+    /// session id, manifest/chunk metadata) in ONE atomic call, replacing the
+    /// former 16 per-field getters. Returns a Rust-allocated NUL-terminated
+    /// UTF-8 string — free it with <see cref="FreeString"/>,
+    /// never with your own <c>free</c>.
     /// </summary>
     [DllImport(LibName, CallingConvention = CallingConvention.Cdecl,
-        EntryPoint = "airferry_receiver_file_name")]
-    public static extern nuint ReceiverFileName(IntPtr handle, byte[]? outBuf, nuint cap);
+        EntryPoint = "airferry_receiver_snapshot_json")]
+    public static extern IntPtr ReceiverSnapshotJson(IntPtr handle);
 
-    /// <summary>Original file size in bytes (0 if unknown / null handle).</summary>
+    /// <summary>Free a string returned by <see cref="ReceiverSnapshotJson"/>.</summary>
     [DllImport(LibName, CallingConvention = CallingConvention.Cdecl,
-        EntryPoint = "airferry_receiver_file_size")]
-    public static extern ulong ReceiverFileSize(IntPtr handle);
+        EntryPoint = "airferry_free_string")]
+    public static extern void FreeString(IntPtr ptr);
+
+    /// <summary>Verify a staged raw chunk against the ROOT-bound Manifest table (§11).</summary>
+    [DllImport(LibName, CallingConvention = CallingConvention.Cdecl,
+        EntryPoint = "airferry_receiver_verify_chunk")]
+    public static extern int ReceiverVerifyChunk(IntPtr handle, uint index, byte[] rawBytes, nuint rawLen);
+
+    /// <summary>Run §13 ⑧⑨ integrity chain over the reassembled canonical stream.</summary>
+    [DllImport(LibName, CallingConvention = CallingConvention.Cdecl,
+        EntryPoint = "airferry_receiver_verify_final_stream")]
+    public static extern int ReceiverVerifyFinalStream(IntPtr handle, byte[] streamBytes, nuint streamLen);
+
+    [DllImport(LibName, CallingConvention = CallingConvention.Cdecl,
+        EntryPoint = "airferry_receiver_final_verify_begin")]
+    public static extern int ReceiverFinalVerifyBegin(IntPtr handle);
+
+    [DllImport(LibName, CallingConvention = CallingConvention.Cdecl,
+        EntryPoint = "airferry_receiver_final_verify_feed")]
+    public static extern int ReceiverFinalVerifyFeed(IntPtr handle, byte[] streamBytes, nuint streamLen);
+
+    [DllImport(LibName, CallingConvention = CallingConvention.Cdecl,
+        EntryPoint = "airferry_receiver_final_verify_finish")]
+    public static extern int ReceiverFinalVerifyFinish(IntPtr handle);
+
+    /// <summary>Restore receiver from stored ROOT frame bytes + completed chunk indices (§12 resume).</summary>
+    [DllImport(LibName, CallingConvention = CallingConvention.Cdecl,
+        EntryPoint = "airferry_receiver_resume")]
+    public static extern int ReceiverResume(IntPtr handle, byte[] rootFrameBytes, nuint rootLen, uint[] completedIndices, nuint completedLen);
 
     /// <summary>
-    /// CRC32 of the original file as a <see cref="ulong"/> (so the full
-    /// unsigned 32-bit range survives; <c>0xDEADBEEF</c> would look negative
-    /// as a signed int). 0 if unknown.
+    /// Evict one chunk from both ledgers after a spill re-verification failure
+    /// (§11/§12): the sender's next epoch re-supplies it.
     /// </summary>
     [DllImport(LibName, CallingConvention = CallingConvention.Cdecl,
-        EntryPoint = "airferry_receiver_crc32")]
-    public static extern ulong ReceiverCrc32(IntPtr handle);
+        EntryPoint = "airferry_receiver_invalidate_chunk")]
+    public static extern int ReceiverInvalidateChunk(IntPtr handle, uint index);
 
-    /// <summary>
-    /// 1 if the descriptor supplied a real CRC32 (so the host should verify
-    /// it); 0 if unknown and the CRC MUST NOT be compared. CRC32 can
-    /// legitimately be 0, so do not test <c>Crc32() == 0</c>.
-    /// </summary>
+    /// <summary>Report the native ABI / capability version of the loaded DLL.</summary>
+    /// <remarks>
+    /// Mirrors the Android <c>NativeBridge.nativeAbiVersion()</c> handshake:
+    /// the host must verify <c>NativeAbiVersion() &gt;= NativeAbiVersion2</c>
+    /// before using the receiver, so a stale <c>transfer_engine.dll</c>
+    /// (missing <c>airferry_receiver_snapshot_json</c>) fails up front with a
+    /// clear message instead of an <see cref="EntryPointNotFoundException"/>
+    /// on the first decoded QR frame.
+    /// </remarks>
     [DllImport(LibName, CallingConvention = CallingConvention.Cdecl,
-        EntryPoint = "airferry_receiver_crc32_known")]
-    public static extern int ReceiverCrc32Known(IntPtr handle);
+        EntryPoint = "airferry_native_abi_version")]
+    public static extern uint NativeAbiVersion();
 
-    // ── descriptor-v5 segment metadata (large-transfer child objects) ───────
-
-    /// <summary>1 if the confirmed descriptor was a v5 large-transfer child object.</summary>
-    [DllImport(LibName, CallingConvention = CallingConvention.Cdecl,
-        EntryPoint = "airferry_receiver_is_segmented")]
-    public static extern int ReceiverIsSegmented(IntPtr handle);
-
-    /// <summary>Zero-based index of this segment within the root transfer (0 if not segmented).</summary>
-    [DllImport(LibName, CallingConvention = CallingConvention.Cdecl,
-        EntryPoint = "airferry_receiver_segment_index")]
-    public static extern uint ReceiverSegmentIndex(IntPtr handle);
-
-    /// <summary>Total segment count of the root transfer (1 if not segmented).</summary>
-    [DllImport(LibName, CallingConvention = CallingConvention.Cdecl,
-        EntryPoint = "airferry_receiver_segment_count")]
-    public static extern uint ReceiverSegmentCount(IntPtr handle);
-
-    /// <summary>Root (whole-file) original size in bytes (0 if not segmented).</summary>
-    [DllImport(LibName, CallingConvention = CallingConvention.Cdecl,
-        EntryPoint = "airferry_receiver_root_original_size")]
-    public static extern ulong ReceiverRootOriginalSize(IntPtr handle);
-
-    /// <summary>Original (uncompressed) offset of this segment in the root file (0 if not segmented).</summary>
-    [DllImport(LibName, CallingConvention = CallingConvention.Cdecl,
-        EntryPoint = "airferry_receiver_original_offset")]
-    public static extern ulong ReceiverOriginalOffset(IntPtr handle);
-
-    /// <summary>Root session id low 64 bits (whole transfer id), or 0 if not segmented.</summary>
-    [DllImport(LibName, CallingConvention = CallingConvention.Cdecl,
-        EntryPoint = "airferry_receiver_root_session_id_lo")]
-    public static extern ulong ReceiverRootSessionIdLo(IntPtr handle);
-
-    /// <summary>Root session id high 64 bits, or 0 if not segmented.</summary>
-    [DllImport(LibName, CallingConvention = CallingConvention.Cdecl,
-        EntryPoint = "airferry_receiver_root_session_id_hi")]
-    public static extern ulong ReceiverRootSessionIdHi(IntPtr handle);
-
-    /// <summary>
-    /// Copy the 32-byte SHA-256 of this segment's uncompressed bytes into
-    /// <paramref name="outBuf"/> (two-pass length protocol: returns required
-    /// length, or 0 when not segmented).
-    /// </summary>
-    [DllImport(LibName, CallingConvention = CallingConvention.Cdecl,
-        EntryPoint = "airferry_receiver_raw_sha256")]
-    public static extern nuint ReceiverRawSha256(IntPtr handle, byte[]? outBuf, nuint cap);
-
-    /// <summary>Copy the 32-byte SHA-256 of the complete root file.</summary>
-    [DllImport(LibName, CallingConvention = CallingConvention.Cdecl,
-        EntryPoint = "airferry_receiver_root_sha256")]
-    public static extern nuint ReceiverRootSha256(IntPtr handle, byte[]? outBuf, nuint cap);
+    /// <summary>Snapshot ABI: the 16 per-field getters were folded into one JSON.</summary>
+    public const uint NativeAbiVersion2 = 2;
+    /// <summary>Bounded-memory incremental final-verification ABI.</summary>
+    public const uint NativeAbiVersion3 = 3;
 }

@@ -1,0 +1,19 @@
+[package]
+name = "af2"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "AirFerry Protocol 2 (AF2) core: frames, three-layer ids, ROOT/OBJECT_META/Manifest, per-chunk codec, state machines."
+
+[dependencies]
+blake3.workspace = true
+raptorq.workspace = true
+raptorq-core.workspace = true
+qr-protocol.workspace = true
+crc32fast.workspace = true
+thiserror.workspace = true
+unicode-normalization.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

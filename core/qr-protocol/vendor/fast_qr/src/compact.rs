@@ -1,7 +1,7 @@
 //! Struct containing an u8-array of C size to store bitwise boolean values
 
 #![deny(unsafe_code)]
-#![warn(missing_docs)]
+#![allow(missing_docs)]
 
 use core::fmt::{Display, Formatter};
 

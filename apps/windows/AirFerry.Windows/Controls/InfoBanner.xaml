@@ -1,0 +1,34 @@
+<UserControl x:Class="AirFerry.Windows.Controls.InfoBanner"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <!-- Inline severity banner (replaces WPF-UI's InfoBar, which has no
+         HandyControl equivalent). Two layered Borders give the tint + outline:
+         Opacity on the layers keeps the severity brush theme-adaptive (a flat
+         semi-transparent brush computed in code would not follow a skin swap).
+         Brushes are attached via SetResourceReference in code-behind so they
+         re-resolve when ThemeService swaps dictionaries. -->
+    <Grid>
+        <Border x:Name="TintLayer" CornerRadius="8" Opacity="0.08" />
+        <Border x:Name="OutlineLayer" CornerRadius="8" BorderThickness="1" Opacity="0.35" />
+        <Grid Margin="14,10">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="*" />
+            </Grid.ColumnDefinitions>
+            <TextBlock x:Name="IconText"
+                       FontFamily="Segoe MDL2 Assets"
+                       FontSize="16"
+                       Margin="0,1,0,0"
+                       VerticalAlignment="Top" />
+            <StackPanel Grid.Column="1" Margin="10,0,0,0">
+                <TextBlock x:Name="TitleText"
+                           FontSize="13" FontWeight="SemiBold"
+                           TextWrapping="Wrap" />
+                <TextBlock x:Name="MessageText"
+                           FontSize="12"
+                           TextWrapping="Wrap"
+                           Margin="0,2,0,0" />
+            </StackPanel>
+        </Grid>
+    </Grid>
+</UserControl>

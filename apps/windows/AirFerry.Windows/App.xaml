@@ -1,18 +1,23 @@
 <Application x:Class="AirFerry.Windows.App"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-             xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml">
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
     <Application.Resources>
         <ResourceDictionary>
             <ResourceDictionary.MergedDictionaries>
-                <!-- Fluent theme + control styles (WPF-UI). The initial theme is
-                     Light; ThemeService swaps it per settings.json "theme". -->
-                <ui:ThemesDictionary Theme="Light" />
-                <ui:ControlsDictionary />
-                <!-- AirFerry semantic tokens not covered by WPF-UI (success /
-                     error / warning / camera-preview backdrop). ThemeService
-                     re-points this dictionary's Source on theme change. -->
+                <!-- HandyControl: skin FIRST, Theme.xaml (styles) second —
+                     required order. ThemeService swaps the skin Source between
+                     SkinDefault/SkinDark and the DesignTokens Source between
+                     Light/Dark when the theme changes. -->
+                <ResourceDictionary Source="pack://application:,,,/HandyControl;component/Themes/SkinDefault.xaml" />
+                <ResourceDictionary Source="pack://application:,,,/HandyControl;component/Themes/Theme.xaml" />
+                <!-- AirFerry semantic tokens (success / error / warning /
+                     camera-preview backdrop). Merged after Theme.xaml so these
+                     solid brushes also win over HC's same-named gradient
+                     brushes inside HC styles (Growl, MessageBox, ...). -->
                 <ResourceDictionary Source="Themes/DesignTokens.Light.xaml" />
+                <!-- Brand accent (#2563EB), WPF-UI-era token aliases, glyph-icon
+                     and ghost-button styles, card corner restyle. -->
+                <ResourceDictionary Source="Themes/AirFerry.xaml" />
             </ResourceDictionary.MergedDictionaries>
         </ResourceDictionary>
     </Application.Resources>

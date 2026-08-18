@@ -1,14 +1,14 @@
 <Page x:Class="AirFerry.Windows.Views.FileListView"
       xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
       xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-      xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
+      xmlns:hc="https://handyorg.github.io/handycontrol"
       Title="AirFerry - 接收历史"
       Background="{DynamicResource ApplicationBackgroundBrush}">
     <Grid Margin="32,24,32,32">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
-            <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
 
@@ -19,71 +19,30 @@
                 <ColumnDefinition Width="*" />
                 <ColumnDefinition Width="Auto" />
             </Grid.ColumnDefinitions>
-            <ui:Button Grid.Column="0" Appearance="Transparent"
-                       Content="返回" Click="Back_Click">
-                <ui:Button.Icon>
-                    <ui:SymbolIcon Symbol="ArrowLeft24" />
-                </ui:Button.Icon>
-            </ui:Button>
+            <Button Grid.Column="0" Style="{StaticResource GhostButton}"
+                    Click="Back_Click">
+                <StackPanel Orientation="Horizontal">
+                    <TextBlock Style="{StaticResource GlyphIcon}" Text="&#xE72B;" />
+                    <TextBlock Text="返回" Margin="7,0,0,0" VerticalAlignment="Center" />
+                </StackPanel>
+            </Button>
             <TextBlock Grid.Column="1"
                        Text="接收历史"
                        FontSize="18" FontWeight="SemiBold"
                        Foreground="{DynamicResource TextFillColorPrimaryBrush}"
                        HorizontalAlignment="Center"
                        VerticalAlignment="Center" />
-            <ui:Button Grid.Column="2" Appearance="Secondary"
-                       Content="清空"
-                       Foreground="{DynamicResource ErrorBrush}"
-                       Click="ClearAll_Click" x:Name="ClearButton">
-                <ui:Button.Icon>
-                    <ui:SymbolIcon Symbol="Delete24" />
-                </ui:Button.Icon>
-            </ui:Button>
+            <Button Grid.Column="2"
+                    Foreground="{DynamicResource ErrorBrush}"
+                    Click="ClearAll_Click" x:Name="ClearButton">
+                <StackPanel Orientation="Horizontal">
+                    <TextBlock Style="{StaticResource GlyphIcon}" Text="&#xE74D;" />
+                    <TextBlock Text="清空" Margin="7,0,0,0" VerticalAlignment="Center" />
+                </StackPanel>
+            </Button>
         </Grid>
 
-        <!-- Pending segmented-recovery tasks (collapsed when empty). -->
-        <ui:Card Grid.Row="1" x:Name="TasksPanel"
-                 Margin="0,0,0,12">
-            <StackPanel Margin="16">
-                <TextBlock Text="待恢复任务" FontSize="15" FontWeight="SemiBold"
-                           Foreground="{DynamicResource TextFillColorPrimaryBrush}"
-                           Margin="4,0,0,8" />
-                <ListView x:Name="TasksListView" Background="Transparent"
-                          BorderThickness="0"
-                          Foreground="{DynamicResource TextFillColorPrimaryBrush}"
-                          MaxHeight="220">
-                    <ListView.View>
-                        <GridView>
-                            <GridViewColumn Header="名称" Width="190"
-                                            DisplayMemberBinding="{Binding DisplayName}" />
-                            <GridViewColumn Header="恢复进度" Width="200"
-                                            DisplayMemberBinding="{Binding ProgressText}" />
-                            <GridViewColumn Header="大小" Width="80"
-                                            DisplayMemberBinding="{Binding SizeText}" />
-                            <GridViewColumn Header="操作" Width="160">
-                                <GridViewColumn.CellTemplate>
-                                    <DataTemplate>
-                                        <StackPanel Orientation="Horizontal">
-                                            <ui:Button Content="继续恢复" Margin="0,0,8,0"
-                                                       Appearance="Secondary"
-                                                       Tag="{Binding RootSessionIdHex}"
-                                                       Click="ContinueTask_Click" />
-                                            <ui:Button Content="删除"
-                                                       Appearance="Transparent"
-                                                       Foreground="{DynamicResource ErrorBrush}"
-                                                       Tag="{Binding RootSessionIdHex}"
-                                                       Click="DeleteTask_Click" />
-                                        </StackPanel>
-                                    </DataTemplate>
-                                </GridViewColumn.CellTemplate>
-                            </GridViewColumn>
-                        </GridView>
-                    </ListView.View>
-                </ListView>
-            </StackPanel>
-        </ui:Card>
-
-        <ui:Card Grid.Row="2">
+        <hc:Card Grid.Row="1">
             <ListView x:Name="FilesListView"
                       Background="Transparent"
                       BorderThickness="0"
@@ -100,7 +59,24 @@
                     </GridView>
                 </ListView.View>
             </ListView>
-        </ui:Card>
+        </hc:Card>
+
+        <!-- Pending transfers card -->
+        <hc:Card Grid.Row="2" x:Name="PendingCard" Margin="0,12,0,0" Visibility="Collapsed">
+            <Grid Margin="12">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <StackPanel Grid.Column="0" VerticalAlignment="Center">
+                    <TextBlock x:Name="PendingTitle" FontWeight="SemiBold" Foreground="{DynamicResource WarningBrush}" />
+                    <TextBlock x:Name="PendingDesc" FontSize="12" Foreground="{DynamicResource TextFillColorSecondaryBrush}" Margin="0,4,0,0" />
+                </StackPanel>
+                <Button Grid.Column="1" Click="ClearPending_Click" Foreground="{DynamicResource ErrorBrush}" VerticalAlignment="Center">
+                    <TextBlock Text="清理断点" />
+                </Button>
+            </Grid>
+        </hc:Card>
 
         <TextBlock Grid.Row="3"
                    x:Name="PathHint"

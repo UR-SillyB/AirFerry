@@ -33,7 +33,7 @@ set -euo pipefail
 #   白名单清单（仅 .apk/.zip/.crx/.xpi/.html，物理上排除了密钥）。
 #
 # 版本号规范：
-#   • 唯一来源：apps/sender/package.json 的 version（read_version() 读取），
+#   • 唯一来源：apps/web/package.json 的 version（read_version() 读取），
 #     扩展 manifest 同步；改版本只改这一处。
 #   • 产物统一命名 airferry-<端>-<平台>-v<VER>.<ext>，VER 即该来源版本号。
 #   • 手动同步项（无自动派生，改版本时须同步）：
@@ -55,16 +55,40 @@ error() { echo -e "${RED}[✗]${NC} $1"; exit 1; }
 # 目标列表
 TARGET="${1:-all}"
 
-# 从 apps/sender/package.json 读取版本号（与扩展 manifest.version 同源）。
+# 从 apps/web/package.json 读取版本号（与扩展 manifest.version 同源）。
 read_version() {
-  node -e "console.log(require('$ROOT/apps/sender/package.json').version)"
+  node -e "console.log(require('$ROOT/apps/web/package.json').version)"
 }
 VER="$(read_version)"
 
-# Chrome 二进制路径（macOS 标准安装位置）。找不到时跳过 crx 签名，仅留 zip。
-CHROME_BIN="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+# Chrome 二进制：允许显式 CHROME_BIN 覆盖，并自动探测 macOS/Linux 常见路径。
+# 普通 `dist` 可以在无签名环境只产 zip；`release` 必须 fail-closed 产出 CRX。
+CHROME_BIN="${CHROME_BIN:-}"
+REQUIRE_SIGNED_ARTIFACTS="${AIRFERRY_REQUIRE_SIGNED_RELEASE:-0}"
+if [[ "$TARGET" == "release" ]]; then
+  REQUIRE_SIGNED_ARTIFACTS=1
+fi
 EXPECTED_ANDROID_CERT_SHA256="44577EDA2C6D4F44638C9D61DC161F08FDB30FCEE6A3410AADAEB7CE65A97FDD"
 EXPECTED_CHROME_PUBLIC_KEY_SHA256="b6059f0bf2184bbdb153013b15eee99cf8176fd653e46fcda4123868a05e2986"
+
+detect_chrome_bin() {
+  if [[ -n "$CHROME_BIN" && -x "$CHROME_BIN" ]]; then
+    return 0
+  fi
+  local candidate=""
+  for candidate in \
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+    "/usr/bin/google-chrome-stable" \
+    "/usr/bin/google-chrome" \
+    "/usr/bin/chromium" \
+    "/usr/bin/chromium-browser"; do
+    if [[ -x "$candidate" ]]; then
+      CHROME_BIN="$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
 
 verify_apk_signature() {
   local apk="$1"
@@ -92,7 +116,9 @@ verify_apk_signature() {
       apksigner_bin="$(find "$sdk_root/build-tools" -type f -name apksigner 2>/dev/null | sort | tail -1 || true)"
     fi
   fi
-  [[ -n "$apksigner_bin" ]] || error "找不到 apksigner，拒绝发布未验证签名的 APK"
+  if [[ -z "$apksigner_bin" ]]; then
+    error "未找到 apksigner，无法验证 APK 发布证书；拒绝打包: $apk"
+  fi
   local cert_info
   cert_info="$("$apksigner_bin" verify --verbose --print-certs "$apk")" || \
     error "APK 签名验证失败: $apk"
@@ -109,20 +135,18 @@ verify_apk_signature() {
 }
 
 build_wasm() {
-  info "编译 Rust WASM 双产物 (legacy=0.2.92/标量 → wasm-pkg-legacy/, simd=0.2.125+SIMD → wasm-pkg-simd/) ..."
-  cd "$ROOT/apps/sender"
+  info "编译 Rust WASM 单产物 (wasm-bindgen=0.2.92/标量 → wasm-pkg/) ..."
+  cd "$ROOT/apps/web"
   npm run wasm 2>&1 | tail -3
-  info "WASM 双产物编译完成"
+  info "WASM 产物编译完成"
 }
 
 build_sender() {
-  # npm run build already runs extract-lzma-wasm + build-wasm.cjs (both wasm
-  # variants) + build-all.cjs (4 targets, swapping in the right variant per
-  # MV2/MV3). No separate build_wasm call here — it would compile wasm twice.
   info "构建浏览器发送端 (Chrome MV3/MV2 + Firefox MV3/MV2) ..."
-  cd "$ROOT/apps/sender"
-  npm run build 2>&1 | grep -E 'DONE|Finished' | while read -r line; do info "$line"; done
-  info "发送端构建完成 → apps/sender/build/"
+  cd "$ROOT/apps/web"
+  npm run build:ext 2>&1 | grep -E 'built in|Building target|All targets built' | while read -r line; do info "$line"; done
+  WASM_BUILT=1
+  info "发送端构建完成 → apps/web/build/"
 }
 
 build_scanner() {
@@ -154,17 +178,10 @@ build_scanner() {
   ANDROID_NDK_HOME="${ANDROID_NDK_HOME:-$ANDROID_HOME/ndk}"
   export ANDROID_HOME ANDROID_NDK_HOME
 
-  # 先编译 Rust JNI 库 (libtransfer_engine.so) 到 jniLibs/。
-  # v1.2.0 起 Gradle 的 compileRustJni task（merge*JniLibFolders 的前置）已会在
-  # assembleRelease 时自动重编，此处的显式 cargo-ndk 作为双保险保留（手动单独
-  # 跑 ./gradlew 也不再需要先跑 cargo-ndk）。若跳过这步，APK 里可能带过期的
-  # .so（比如缺 v5 分段符号 → 安卓扫码 >32 MiB 一直「正在同步」，或旧 JNI 符号
-  # com.easytransfer.* → receiverCreate 抛 UnsatisfiedLinkError 闪退）。
+  # Rust JNI 库 (libtransfer_engine.so) 由 Gradle 的 compileRustJni task
+  # （merge*JniLibFolders 的前置，debug/release 均生效）在 assembleRelease 时
+  # 编译到 jniLibs/，此处不再显式跑 cargo-ndk（避免每次 release 双重编译）。
   # 详见 docs/build-android.md。
-  info "编译 Rust JNI 库 (core/transfer-engine --features jni → jniLibs/arm64-v8a/) ..."
-  cargo ndk -t arm64-v8a -o "$ROOT/apps/scanner/app/src/main/jniLibs" \
-    build -p transfer-engine --features jni --release 2>&1 | tail -3
-  info "JNI 库编译完成 → apps/scanner/app/src/main/jniLibs/arm64-v8a/libtransfer_engine.so"
 
   cd "$ROOT/apps/scanner"
   ./gradlew assembleRelease 2>&1 | tail -3 | while read -r line; do info "$line"; done
@@ -222,24 +239,29 @@ build_web() {
   info "构建网页端 — 发送端 dist/ + 接收端 dist-receiver/（各自独立 zip）..."
 
   # 保证 web 打包的每个原生 lib 都来自最新源码，而非复用旧的中间产物：
-  #  ① Rust WASM（transfer_engine_bg.wasm）— 重编 wasm-pkg-simd，避免单独跑
-  #     build_web 时 prepare-wasm.cjs 只复制 sender 的旧产物（它仅校验存在、不
-  #     校验 freshness）。cargo 增量使 all/release 流程中的重复编译开销极小。
+  #  ① Rust WASM（transfer_engine_bg.wasm）— 单独跑 build_web 时重编 wasm-pkg/
+  #     （prepare-wasm.cjs 只校验存在、不校验 freshness）；all/release 流程里
+  #     build_sender 的 `npm run build` 已编译过，直接跳过。
   #  ② FAST ZXing-C++（airferry_zxing.js/.wasm）— emcc 可用时重编，防止 build-all.sh
   #     从不调用 build-fastzxing.sh 而把上一次遗留的旧 .wasm 打进接收端；emcc
-  #     缺失时**显式警告**（不静默），接收端回退 zxing-wasm 兼容后端，构建不中断。
-  build_wasm
+  #     缺失即失败（FAST-only，zxing-wasm 回退已移除）。
+  if [[ -z "${WASM_BUILT:-}" ]]; then
+    build_wasm
+  fi
   if command -v emcc >/dev/null 2>&1; then
-    info "重编 FAST ZXing-C++ 快路径 (airferry_zxing.js/.wasm → apps/sender/src/fastzxing/) ..."
+    info "重编 FAST ZXing-C++ 快路径 (airferry_zxing.js/.wasm → apps/web/src/fastzxing/) ..."
     "$ROOT/scripts/build-fastzxing.sh" --use-cache
+  elif [[ -f "$ROOT/apps/web/src/fastzxing/airferry_zxing.js" && -f "$ROOT/apps/web/src/fastzxing/airferry_zxing.wasm" ]]; then
+    info "复用现有 FAST ZXing-C++ 缓存产物 (airferry_zxing.js/.wasm)"
   else
-    warn "未找到 emcc（Emscripten），跳过 FAST ZXing-C++ 重编。接收端将使用 apps/sender/src/fastzxing/ 现有产物，缺失则回退 zxing-wasm 兼容后端。发布前请在带 Emscripten 的环境运行: ./scripts/build-fastzxing.sh"
+    error "未找到 emcc（Emscripten），且缺失缓存产物。请安装 Emscripten 3.1.64 后运行: ./scripts/build-fastzxing.sh"
+    exit 1
   fi
 
-  # npm run build 已内嵌 prebuild（prepare-wasm.cjs）：校验 sender 的现代
-  # wasm-pkg-simd，持锁复制到 web 自有 wasm-pkg/，再拷 wasm-zstd.wasm +
-  # zxing_reader.wasm 到 public/。产物缺失时脚本非零退出，npm run build 失败，
-  # set -e 中断。
+  # npm run build 已内嵌 prebuild（prepare-wasm.cjs）：校验 web 的
+  # wasm-pkg，再拷 wasm-zstd.wasm 与 FAST ZXing 到 public/。
+  # airferry_zxing.js/.wasm 缺失时脚本非零退出（FAST-only 硬要求），
+  # npm run build 失败，set -e 中断。
   cd "$ROOT/apps/web"
   # ① 发送端：vite.config.ts 单入口 index.html → dist/
   npm run build 2>&1 | grep -E 'built in|error|✖' | while read -r line; do info "$line"; done
@@ -270,30 +292,44 @@ pack_chrome_crx() {
   local plat="${prod_dir%-prod}"   # chrome-mv3
   local key="$ROOT/dist/airferry-extension.pem"
 
-  if [[ ! -x "$CHROME_BIN" ]]; then
-    warn "未找到 Chrome（${CHROME_BIN}），跳过 ${plat} 的 .crx 签名，仅保留 .zip"
+  if ! detect_chrome_bin; then
+    # 与 verify-dist.mjs 对齐：签名私钥存在本身就是签名意图，dist 模式也
+    # 必须 fail-closed（否则 build 过了、verify 门禁才失败，两个门禁打架）。
+    if [[ "$REQUIRE_SIGNED_ARTIFACTS" == "1" || -f "$key" ]]; then
+      error "未找到可用于打包 CRX 的 Chrome；签名私钥存在（$key），必须产出已签名 ${plat}.crx。可通过 CHROME_BIN 指定。"
+    fi
+    warn "未找到 Chrome，跳过 ${plat} 的 .crx 签名，仅保留 .zip（release 模式会失败）"
     return 0
   fi
 
-  [[ -f "$key" ]] || error "缺少固定 Chrome 签名私钥: $key（拒绝生成新扩展 ID）"
+  if [[ ! -f "$key" ]]; then
+    if [[ "$REQUIRE_SIGNED_ARTIFACTS" == "1" ]]; then
+      error "缺少固定 Chrome 签名私钥: $key（release 必须复用固定扩展 ID）"
+    fi
+    warn "缺少固定 Chrome 签名私钥，跳过 ${plat}.crx，仅保留 .zip（release 模式会失败）"
+    return 0
+  fi
   command -v openssl >/dev/null 2>&1 || error "找不到 openssl，无法核对 Chrome 公钥指纹"
   local actual_key_sha
   actual_key_sha="$(openssl rsa -in "$key" -pubout -outform DER 2>/dev/null | shasum -a 256 | awk '{print $1}')"
   [[ "$actual_key_sha" == "$EXPECTED_CHROME_PUBLIC_KEY_SHA256" ]] || \
     error "Chrome 签名密钥不是 AirFerry 固定发布密钥（实际公钥 SHA-256: $actual_key_sha）"
-  "$CHROME_BIN" --pack-extension="$ROOT/apps/sender/build/$prod_dir" \
+  "$CHROME_BIN" --pack-extension="$ROOT/apps/web/build/$prod_dir" \
                 --pack-extension-key="$key" >/dev/null 2>&1 || {
-    warn "${plat} 的 .crx 打包失败，仅保留 .zip"
+    if [[ "$REQUIRE_SIGNED_ARTIFACTS" == "1" ]]; then
+      error "${plat} 的 .crx 打包失败；release 拒绝继续"
+    fi
+    warn "${plat} 的 .crx 打包失败，仅保留 .zip（release 模式会失败）"
     return 0
   }
 
   # Chrome 把 .crx 产物写到 build/<prod_dir>.crx，搬到 dist 并按规范命名。
-  mv "$ROOT/apps/sender/build/${prod_dir}.crx" \
+  mv "$ROOT/apps/web/build/${prod_dir}.crx" \
      "$ROOT/dist/airferry-sender-${plat}-v${VER}.crx"
   info "发送端 ${plat} → dist/airferry-sender-${plat}-v${VER}.crx"
 }
 
-# 仅打包：假设 apps/sender/build/ 与 APK 已构建好，把它们复制/签名到 dist/。
+# 仅打包：假设 apps/web/build/ 与 APK 已构建好，把它们复制/签名到 dist/。
 pack_dist() {
   info "打包产物到 dist/（版本 v${VER}）..."
   mkdir -p "$ROOT/dist"
@@ -313,12 +349,15 @@ pack_dist() {
         "$ROOT/dist"/airferry-receiver-web-*.zip \
         "$ROOT/dist"/airferry-web-*.zip
 
-  # 扫码端 APK
+  # 扫码端 APK（仅当已构建时打包）
   local apk_src="$ROOT/apps/scanner/app/build/outputs/apk/release/app-release.apk"
-  [[ -f "$apk_src" ]] || error "找不到 APK：${apk_src}（先运行 build-all.sh scanner）"
-  verify_apk_signature "$apk_src"
-  cp "$apk_src" "$ROOT/dist/airferry-receiver-android-arm64-v${VER}.apk"
-  info "Android 接收端 → dist/airferry-receiver-android-arm64-v${VER}.apk"
+  if [[ -f "$apk_src" ]]; then
+    verify_apk_signature "$apk_src"
+    cp "$apk_src" "$ROOT/dist/airferry-receiver-android-arm64-v${VER}.apk"
+    info "Android 接收端 → dist/airferry-receiver-android-arm64-v${VER}.apk"
+  else
+    warn "未找到 Android APK（${apk_src}）。如需打包，先运行: ./scripts/build-all.sh scanner"
+  fi
 
   # Windows 端 zip（仅当已构建时打包——Windows 端须在 Windows 上构建）
   local win_publish="$ROOT/apps/windows/AirFerry.Windows/bin/x64/Release/net8.0-windows/win-x64/publish"
@@ -336,15 +375,14 @@ pack_dist() {
   # 拆成两个独立 zip，各自自包含可独立部署：
   #   • airferry-sender-web-v{VER}.zip    ← dist/        （index.html 发送端）
   #   • airferry-receiver-web-v{VER}.zip  ← dist-receiver/（receiver.html 接收端）
-  # 发送端 zip 排除接收端 QR 解码专用资产：zxing_reader.wasm（zxing-wasm 兼容
-  # 后端）以及 airferry_zxing.js/.wasm（FAST ZXing-C++ 后端，~850 KiB）——它们
-  # 只被接收端 receiver.html 的 qr-decode worker 使用，发送端 zip 不应带入。
-  # 接收端自带 wasm-zstd.wasm（解压 zstd 载荷）+ zxing_reader.wasm +
-  # airferry_zxing.*。与 Windows 同样用 warn 而非 error：用户可能只想发扩展
-  # +APK 而不发网页端。
+  # 发送端 zip 排除接收端 QR 解码专用资产：airferry_zxing.js/.wasm（FAST
+  # ZXing-C++ 后端，接收端唯一解码后端）——它们只被接收端 receiver.html 的
+  # qr-decode worker 使用，发送端 zip 不应带入。接收端自带 wasm-zstd.wasm
+  # （解压 zstd 载荷）+ airferry_zxing.*。与 Windows 同样用 warn 而非 error：
+  # 用户可能只想发扩展+APK 而不发网页端。
   local web_dist="$ROOT/apps/web/dist"
   if [[ -d "$web_dist" ]]; then
-    ( cd "$web_dist" && zip -r -q -X "$ROOT/dist/airferry-sender-web-v${VER}.zip" . -x 'zxing_reader.wasm' -x 'airferry_zxing.js' -x 'airferry_zxing.wasm' )
+    ( cd "$web_dist" && zip -r -q -X "$ROOT/dist/airferry-sender-web-v${VER}.zip" . -x 'airferry_zxing.js' -x 'airferry_zxing.wasm' )
     info "发送端网页 → dist/airferry-sender-web-v${VER}.zip（index.html）"
   else
     warn "未找到发送端网页构建产物（${web_dist}）。如需打包，先运行: ./scripts/build-all.sh web"
@@ -373,7 +411,7 @@ pack_dist() {
   for target in chrome-mv3-prod chrome-mv2-prod firefox-mv3-prod firefox-mv2-prod; do
     local prod_dir="$target"
     local plat="${prod_dir%-prod}"
-    local src_dir="$ROOT/apps/sender/build/$prod_dir"
+    local src_dir="$ROOT/apps/web/build/$prod_dir"
     [[ -d "$src_dir" ]] || error "找不到发送端构建：${src_dir}（先运行 build-all.sh sender）"
 
     if [[ "$plat" == chrome-* ]]; then

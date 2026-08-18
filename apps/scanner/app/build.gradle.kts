@@ -120,8 +120,7 @@ val compileRustJni = tasks.register<Exec>("compileRustJni") {
     description = "Compile the Rust transfer_engine JNI library (.so) via cargo-ndk."
     workingDir = rootProject.file("../..") // AirFerry/ workspace root
     // cargo-ndk discovers the NDK itself from ANDROID_NDK_HOME / ANDROID_HOME /
-    // ANDROID_SDK_ROOT (same as the manual `cargo ndk` invocation in
-    // scripts/build-all.sh). Pass through any already-exported vars so a
+    // ANDROID_SDK_ROOT. Pass through any already-exported vars so a
     // bare `./gradlew` still finds the NDK without extra setup.
     doFirst {
         for (v in listOf("ANDROID_NDK_HOME", "ANDROID_HOME", "ANDROID_SDK_ROOT")) {
@@ -131,6 +130,12 @@ val compileRustJni = tasks.register<Exec>("compileRustJni") {
             }
         }
     }
+    // Up-to-date check: skip the cargo invocation entirely when core/ sources
+    // and this task's command line haven't changed since the .so was produced.
+    inputs.dir(rootProject.file("../../core"))
+    inputs.file(rootProject.file("../../Cargo.toml"))
+    inputs.file(rootProject.file("../../Cargo.lock"))
+    outputs.file(rootProject.file("app/src/main/jniLibs/arm64-v8a/libtransfer_engine.so"))
     commandLine(
         "cargo", "ndk", "-t", "arm64-v8a",
         "-o", rootProject.file("app/src/main/jniLibs").absolutePath,

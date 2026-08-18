@@ -6,6 +6,7 @@ import android.os.Bundle
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
@@ -16,6 +17,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Message
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
@@ -34,10 +36,11 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.airferry.app.scan.Af2LedgerStore
 import com.airferry.app.scan.ContentStore
 import com.airferry.app.scan.CreateNamedDocument
 import com.airferry.app.scan.FileTransfer
-import com.airferry.app.scan.SegmentAssembler
+import com.airferry.app.scan.SafTreeExporter
 import com.airferry.app.scan.TextLike
 import java.io.File
 import java.util.concurrent.Executors
@@ -68,13 +71,10 @@ private sealed class Row {
         val createdAt: Long,
     ) : Row()
 
-    data class TaskRow(val task: SegmentAssembler.Task) : Row()
-
     val key: String
         get() = when (this) {
             is FileRow -> entry.id
             is BundleRow -> "b:$bundleId"
-            is TaskRow -> "t:${task.rootSessionIdHex}"
         }
 }
 
@@ -82,6 +82,7 @@ class FileListActivity : ComponentActivity() {
 
     private val saveQueue = ArrayDeque<Pair<File, String>>()
     private var pendingSave: Pair<File, String>? = null
+    private var pendingTreeSave: List<Pair<File, String>> = emptyList()
     private var indexErrorShown = false
 
     /**
@@ -106,24 +107,62 @@ class FileListActivity : ComponentActivity() {
             // queue only advances after the copy finishes, preserving the
             // one-SAF-dialog-at-a-time sequential semantics.
             Toast.makeText(this, "保存中…", Toast.LENGTH_SHORT).show()
-            bgExecutor.execute {
-                val error: String? = try {
-                    contentResolver.openOutputStream(uri)?.use { out ->
-                        job.first.inputStream().use { it.copyTo(out) }
+            try {
+                bgExecutor.execute {
+                    val error: String? = try {
+                        contentResolver.openOutputStream(uri)?.use { out ->
+                            job.first.inputStream().use { it.copyTo(out) }
+                        }
+                        null
+                    } catch (e: Exception) {
+                        e.message
                     }
-                    null
-                } catch (e: Exception) {
-                    e.message
-                }
-                runOnUiThread {
-                    if (error != null) {
-                        Toast.makeText(this, "保存失败: $error", Toast.LENGTH_LONG).show()
+                    runOnUiThread {
+                        if (error != null) {
+                            Toast.makeText(this, "保存失败: $error", Toast.LENGTH_LONG).show()
+                        }
+                        advanceSaveQueue()
                     }
-                    advanceSaveQueue()
                 }
+            } catch (_: RejectedExecutionException) {
+                // Activity is already being destroyed.
+                runOnUiThread { advanceSaveQueue() }
             }
         } else {
             advanceSaveQueue()
+        }
+    }
+
+    private val openSaveTree = registerForActivityResult(
+        ActivityResultContracts.OpenDocumentTree()
+    ) { uri: Uri? ->
+        val jobs = pendingTreeSave
+        pendingTreeSave = emptyList()
+        if (uri == null || jobs.isEmpty()) return@registerForActivityResult
+        Toast.makeText(this, "正在保存 ${jobs.size} 个文件…", Toast.LENGTH_SHORT).show()
+        try {
+            bgExecutor.execute {
+                var saved = 0
+                val error = try {
+                    saved = SafTreeExporter.copyAll(
+                        this,
+                        uri,
+                        jobs.map { (file, name) -> SafTreeExporter.Item(file, name) },
+                    )
+                    null
+                } catch (e: Exception) {
+                    e.message ?: e.javaClass.simpleName
+                }
+                runOnUiThread {
+                    if (error == null) {
+                        Toast.makeText(this, "已保存 $saved 个文件", Toast.LENGTH_LONG).show()
+                    } else {
+                        Toast.makeText(this, "保存失败（已保存 $saved 个）: $error", Toast.LENGTH_LONG).show()
+                    }
+                }
+            }
+        } catch (_: RejectedExecutionException) {
+            // Activity is already being destroyed.
         }
     }
 
@@ -153,6 +192,7 @@ class FileListActivity : ComponentActivity() {
         // null = root (top-level entries + bundle groups); non-null = inside a bundle
         var openBundleId by remember { mutableStateOf<String?>(null) }
         var rows by remember { mutableStateOf<List<Row>>(emptyList()) }
+        var pendingTransfers by remember { mutableStateOf<List<Af2LedgerStore.PendingTransfer>>(emptyList()) }
         var selection by remember { mutableStateOf<Set<String>?>(null) }
         var pendingDelete by remember { mutableStateOf<List<Row>?>(null) }
         var pendingClearAll by remember { mutableStateOf(false) }
@@ -165,22 +205,18 @@ class FileListActivity : ComponentActivity() {
         // overwrite a newer one (e.g. rapidly entering/leaving a bundle).
         var rowsGeneration by remember { mutableStateOf(0) }
         fun refresh() {
-            // Fail-safe against the executor being shut down from onDestroy:
-            // the background completion callbacks (clear-all / delete) post
-            // back via runOnUiThread without checking destroy state, and
-            // submitting to a shutdown executor throws
-            // RejectedExecutionException on the main thread (uncaught → crash).
-            // refresh() and onDestroy both run on the main thread, so the
-            // lifecycle check cannot race with shutdown; the try/catch is
-            // defense-in-depth for any future background-thread caller.
             if (isFinishing || isDestroyed) return
             val filter = openBundleId
             val gen = ++rowsGeneration
             try {
                 bgExecutor.execute {
                     val loaded = loadRows(filter)
+                    val pending = if (filter == null) Af2LedgerStore.listPendingTransfers(cacheDir) else emptyList()
                     runOnUiThread {
-                        if (gen == rowsGeneration) rows = loaded
+                        if (gen == rowsGeneration) {
+                            rows = loaded
+                            pendingTransfers = pending
+                        }
                     }
                 }
             } catch (_: RejectedExecutionException) {
@@ -224,7 +260,14 @@ class FileListActivity : ComponentActivity() {
                         refresh()
                         exitSelection()
                     }) {
-                        Text("← 返回", color = Accent, fontSize = 14.sp)
+                        Icon(
+                            Icons.AutoMirrored.Filled.ArrowBack,
+                            contentDescription = null,
+                            tint = Accent,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(Modifier.width(4.dp))
+                        Text("返回", color = Accent, fontSize = 14.sp)
                     }
                     Spacer(Modifier.width(8.dp))
                     val title = rows.filterIsInstance<Row.FileRow>().firstOrNull()?.entry?.bundleTitle
@@ -260,7 +303,60 @@ class FileListActivity : ComponentActivity() {
                 }
             }
 
-            if (rows.isEmpty()) {
+            if (openBundleId == null && pendingTransfers.isNotEmpty()) {
+                val totalPendingBytes = pendingTransfers.sumOf { it.diskBytes }
+                Card(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp),
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFF332005)),
+                    shape = RoundedCornerShape(8.dp)
+                ) {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "${pendingTransfers.size} 个未完成断点传输",
+                                color = Color(0xFFFBBF24),
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 14.sp
+                            )
+                            TextButton(
+                                onClick = {
+                                    // A §12 recovery in ScanActivity may be streaming
+                                    // from these exact spill/ledger files right now —
+                                    // deleting them under it aborts a fully received
+                                    // transfer. Refuse while one is running.
+                                    if (ScanActivity.recoveryActive.get()) {
+                                        Toast.makeText(
+                                            this@FileListActivity,
+                                            "有传输正在恢复中，请稍后再清理断点",
+                                            Toast.LENGTH_SHORT
+                                        ).show()
+                                        return@TextButton
+                                    }
+                                    bgExecutor.execute {
+                                        Af2LedgerStore.discardAllPending(cacheDir)
+                                        runOnUiThread { refresh() }
+                                    }
+                                },
+                                contentPadding = PaddingValues(0.dp)
+                            ) {
+                                Text("清理断点", color = DeleteRed, fontSize = 12.sp)
+                            }
+                        }
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            text = "已占用磁盘 ${ScanActivity.formatSize(totalPendingBytes)} · 再次对准原二维码即可接续传输",
+                            color = Color(0xFFFDE68A),
+                            fontSize = 12.sp
+                        )
+                    }
+                }
+            }
+
+            if (rows.isEmpty() && pendingTransfers.isEmpty()) {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     Text("暂无接收文件或待恢复任务", color = TextSecondary, fontSize = 16.sp, textAlign = TextAlign.Center)
                 }
@@ -304,18 +400,6 @@ class FileListActivity : ComponentActivity() {
                                     else toggle(row)
                                 },
                                 onSingleDelete = { pendingDelete = listOf(row) },
-                            )
-                            is Row.TaskRow -> TaskCard(
-                                row = row,
-                                enabled = !inSelectionMode,
-                                onContinue = {
-                                    startActivity(
-                                        Intent(this@FileListActivity, ScanActivity::class.java).apply {
-                                            putExtra("RESUME_ROOT_ID", row.task.rootSessionIdHex)
-                                        }
-                                    )
-                                },
-                                onDelete = { pendingDelete = listOf(row) },
                             )
                         }
                     }
@@ -393,11 +477,6 @@ class FileListActivity : ComponentActivity() {
     }
 
     private fun loadRows(bundleFilter: String?): List<Row> {
-        val tasks = if (bundleFilter == null) {
-            SegmentAssembler.listTasks(ContentStore.root(this)).map { Row.TaskRow(it) }
-        } else {
-            emptyList()
-        }
         val all = try {
             ContentStore.listEntries(this)
         } catch (e: IllegalStateException) {
@@ -409,7 +488,7 @@ class FileListActivity : ComponentActivity() {
                     Toast.makeText(this, e.message ?: "接收历史索引损坏", Toast.LENGTH_LONG).show()
                 }
             }
-            return tasks
+            return emptyList()
         }
         if (bundleFilter != null) {
             return all.filter { it.bundleId == bundleFilter }
@@ -436,11 +515,10 @@ class FileListActivity : ComponentActivity() {
                 createdAt = members.maxOfOrNull { it.createdAt } ?: 0L,
             )
         }
-        return (tasks + fileRows + bundleRows).sortedByDescending {
+        return (fileRows + bundleRows).sortedByDescending {
             when (it) {
                 is Row.FileRow -> it.entry.createdAt
                 is Row.BundleRow -> it.createdAt
-                is Row.TaskRow -> it.task.updatedAt
             }
         }
     }
@@ -465,11 +543,6 @@ class FileListActivity : ComponentActivity() {
         when (row) {
             is Row.FileRow -> ContentStore.deleteEntry(this, row.entry.id)
             is Row.BundleRow -> ContentStore.deleteBundle(this, row.bundleId)
-            is Row.TaskRow -> SegmentAssembler.discard(
-                ContentStore.root(this),
-                row.task.rootSessionIdLo,
-                row.task.rootSessionIdHi,
-            )
         }
     }
 
@@ -506,6 +579,16 @@ class FileListActivity : ComponentActivity() {
             Toast.makeText(this, "没有可保存的文件", Toast.LENGTH_SHORT).show()
             return
         }
+        // A directory picker is both less tedious for multi-save and the only
+        // SAF flow that can preserve a bundle member such as `dir/a.txt` as an
+        // actual subdirectory. Keep ACTION_CREATE_DOCUMENT for a lone flat file.
+        if (pairs.size > 1 || pairs.any { (_, name) -> '/' in name || '\\' in name }) {
+            saveQueue.clear()
+            pendingSave = null
+            pendingTreeSave = pairs
+            openSaveTree.launch(null)
+            return
+        }
         saveQueue.clear()
         pendingSave = null
         pairs.forEach { saveQueue.add(it) }
@@ -523,7 +606,6 @@ class FileListActivity : ComponentActivity() {
                         if (f.exists()) out.add(f to m.name)
                     }
                 }
-                is Row.TaskRow -> Unit
             }
         }
         return out
@@ -739,59 +821,6 @@ class FileListActivity : ComponentActivity() {
                     TextButton(onClick = { showDelete = false }) { Text("取消") }
                 },
             )
-        }
-    }
-
-    @Composable
-    private fun TaskCard(
-        row: Row.TaskRow,
-        enabled: Boolean,
-        onContinue: () -> Unit,
-        onDelete: () -> Unit,
-    ) {
-        val task = row.task
-        val fraction = if (task.segmentCount > 0) {
-            task.receivedCount.toFloat() / task.segmentCount.toFloat()
-        } else 0f
-        val dateStr = java.text.SimpleDateFormat("MM-dd HH:mm", java.util.Locale.getDefault())
-            .format(java.util.Date(task.updatedAt))
-        Card(
-            modifier = Modifier.fillMaxWidth().clickable(enabled = enabled, onClick = onContinue),
-            shape = RoundedCornerShape(12.dp),
-            colors = CardDefaults.cardColors(containerColor = CardBg),
-        ) {
-            Column(modifier = Modifier.padding(16.dp)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(Icons.Default.Refresh, contentDescription = null, tint = Accent,
-                        modifier = Modifier.size(32.dp))
-                    Spacer(Modifier.width(12.dp))
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(task.fileName, color = TextPrimary, fontSize = 15.sp,
-                            fontWeight = FontWeight.Medium, maxLines = 1)
-                        Text(
-                            "待恢复 · ${task.receivedCount}/${task.segmentCount} 段 · " +
-                                "${ScanActivity.formatSize(task.rootOriginalSize)} · $dateStr",
-                            color = TextSecondary, fontSize = 12.sp,
-                        )
-                        Text(
-                            "缺少第 ${task.missingSegmentsText()} 段",
-                            color = Accent, fontSize = 12.sp,
-                        )
-                    }
-                    TextButton(onClick = onContinue, enabled = enabled) {
-                        Text("继续恢复", color = Accent)
-                    }
-                    IconButton(onClick = onDelete, enabled = enabled) {
-                        Icon(Icons.Default.Delete, contentDescription = "删除任务", tint = DeleteRed)
-                    }
-                }
-                LinearProgressIndicator(
-                    progress = { fraction.coerceIn(0f, 1f) },
-                    modifier = Modifier.fillMaxWidth().padding(top = 10.dp),
-                    color = Accent,
-                    trackColor = Color(0xFF334155),
-                )
-            }
         }
     }
 

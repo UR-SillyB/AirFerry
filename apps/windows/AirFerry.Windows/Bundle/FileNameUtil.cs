@@ -96,6 +96,46 @@ public static class FileNameUtil
     }
 
     /// <summary>
+    /// Sanitize a logical bundle-relative path while preserving directory
+    /// hierarchy. Every component is independently sanitized, so traversal
+    /// tokens and illegal filename characters cannot escape the bundle root.
+    /// The returned logical separator is always '/'.
+    /// </summary>
+    public static string SanitizeRelativePath(string path)
+    {
+        string[] parts = path.Replace('\\', '/')
+            .Split('/', StringSplitOptions.RemoveEmptyEntries)
+            .Where(p => p is not "." and not "..")
+            .Select(Sanitize)
+            .ToArray();
+        return parts.Length == 0 ? FallbackName : string.Join('/', parts);
+    }
+
+    /// <summary>
+    /// Resolve a non-existing target beneath <paramref name="rootDir"/> while
+    /// preserving a sanitized relative directory hierarchy.
+    /// </summary>
+    public static string UniqueRelativeTarget(string rootDir, string relativeName)
+    {
+        string safe = SanitizeRelativePath(relativeName);
+        string[] parts = safe.Split('/');
+        string dir = rootDir;
+        for (int i = 0; i < parts.Length - 1; i++)
+        {
+            dir = Path.Combine(dir, parts[i]);
+        }
+        if (!IsWithin(rootDir, dir) && !string.Equals(
+                Path.GetFullPath(rootDir).TrimEnd(Path.DirectorySeparatorChar),
+                Path.GetFullPath(dir).TrimEnd(Path.DirectorySeparatorChar),
+                StringComparison.OrdinalIgnoreCase))
+        {
+            return UniqueTarget(rootDir, FallbackName);
+        }
+        Directory.CreateDirectory(dir);
+        return UniqueTarget(dir, parts[^1]);
+    }
+
+    /// <summary>
     /// Return a non-existing file in <paramref name="dir"/> named
     /// <paramref name="name"/> (after sanitizing), appending <c>(1)</c>,
     /// <c>(2)</c>, … before the extension on collisions so the original name
@@ -210,7 +250,7 @@ public static class FileNameUtil
 
     /// <summary>
     /// Soft cap for the in-memory text (copy) UI — mirrors Android
-    /// <c>TextLike.MAX_TEXT_UI_BYTES</c> and the web receiver's ETTEXTv1 cap.
+    /// <c>TextLike.MAX_TEXT_UI_BYTES</c> and the web receiver's UTF8_TEXT cap.
     /// Larger text-like files (e.g. multi-MB HTML) stay on the file screen.
     /// </summary>
     public const int MaxTextUiBytes = 256 * 1024;

@@ -23,8 +23,12 @@ const server = https.createServer(
   { cert: fs.readFileSync(crt), key: fs.readFileSync(key) },
   (req, res) => {
     const urlPath = decodeURIComponent((req.url || "/").split("?")[0])
-    const filePath = path.join(dir, urlPath === "/" ? "receiver.html" : urlPath)
-    if (!filePath.startsWith(dir) || !fs.existsSync(filePath) || fs.statSync(filePath).isDirectory()) {
+    const filePath = path.resolve(dir, urlPath === "/" ? "receiver.html" : urlPath)
+    // Boundary-aware containment: a plain startsWith(dir) also admits sibling
+    // directories that share the prefix (e.g. dist vs dist-standalone).
+    const root = path.resolve(dir)
+    const contained = filePath === root || filePath.startsWith(root + path.sep)
+    if (!contained || !fs.existsSync(filePath) || fs.statSync(filePath).isDirectory()) {
       res.writeHead(404); res.end("not found"); return
     }
     res.writeHead(200, { "content-type": types[path.extname(filePath)] || "application/octet-stream" })

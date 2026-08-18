@@ -9,7 +9,7 @@ AirFerry 是一个完全离线的光学文件传输系统。发送端（浏览�
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │              发送端 (Browser Extension / Web)                     │
-│  Chrome/Edge/Firefox · MV2 & MV3 · Plasmo + React + TS           │
+│  Chrome/Edge/Firefox · MV2 & MV3 · Vite + React + TS             │
 │  网页端 Vite 复用同一份 sender 源码                                │
 │                                                                  │
 │  统一列表（文件 + 文字）→ 显式「发送」→ [三算法选优压缩] → [Rust/WASM] │
@@ -26,8 +26,8 @@ AirFerry 是一个完全离线的光学文件传输系统。发送端（浏览�
 │ Web Worker / Kotlin+CameraX / C#+OpenCvSharp + ZXing 解码         │
 │                                                                  │
 │  视频流 → [并行解码池] → [串行 Rust 摄入]                          │
-│  帧解析 → RaptorQ 恢复 → 解压 → ETTEXTv1 / ETBUNDL1 / 文件       │
-│  文本类扩展名可进复制页（TextLike）                                 │
+│  帧解析 → RaptorQ 恢复 → Manifest → 按条目 kind 路由              │
+│  （UTF8_TEXT → 文本页；FILE/DIRECTORY → 文件/目录结构）             │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -35,22 +35,25 @@ AirFerry 是一个完全离线的光学文件传输系统。发送端（浏览�
 
 ```
 core/
-├── raptorq-core/      RFC 6330 RaptorQ 编解码封装（纯逻辑）
-│   ├── Encoder        分源块、生成源符号 + 按需生成新鲜修复符号
-│   └── Decoder        接收任意顺序符号、容错恢复
-├── qr-protocol/       帧格式 + 分块 + 压缩 + CRC + QR 矩阵
-│   ├── frame          60B Header + T 字节 Payload + 4B Footer
-│   ├── compress       Zstd + XZ 解压分发与输出上限
-│   ├── session        确定性会话 ID（FNV-1a 128-bit）
-│   └── qr_render      fast_qr crate → 模块矩阵（按帧长选最小版本）
-├── transfer-engine/   编排 + 状态机 + 进度 + 断点 + FFI
-│   ├── sender         帧流生成（源符号一遍 → 持续新鲜修复符号）
-│   ├── receiver       帧摄入 + 去重 + 解码 + 重组
-│   ├── descriptor     会话描述符帧（携带 OTI）
-│   ├── wasm.rs        wasm-bindgen（浏览器）
-│   ├── jni.rs         JNI（Android）
-│   └── cffi.rs        C ABI（Windows P/Invoke）
-└── zxing-decoder/     Windows 对 Android v1.1.3 模式的 ZXing-C++ 实现
+├── af2/                 AF2 协议层（帧格式、三层 ID、BLAKE3、Manifest、OTI、状态机、Playlist）
+│   ├── frame            26B Header + T 字节 Payload + 4B 单帧 CRC（ROOT/META/SYMBOL）
+│   ├── id               三层身份派生（Content / Transfer / Object ID，BLAKE3-256）
+│   ├── root / meta      会话 ROOT 与 OBJECT_META 记录（含 OTI、raw/encoded hash）
+│   ├── manifest         80B 头 + Entry Records(kind) + Chunk Hash Table + TLV
+│   ├── sender/receiver  收发状态机（源符号一遍 → 持续新鲜修复符号；
+│   │                    Idle→Locked→Decode→Ready）
+│   └── tlv              四作用域 TLV 编解码（Critical 位 fail-closed）
+├── raptorq-core/         RFC 6330 RaptorQ 编解码封装（纯逻辑）
+│   ├── Encoder          分源块、生成源符号 + 按需生成新鲜修复符号
+│   └── Decoder          接收任意顺序符号、容错恢复
+├── qr-protocol/          压缩 + CRC + QR 矩阵
+│   ├── compress         Zstd + XZ 有界编解码（严格变小才压缩）
+│   └── qr_render        fast_qr crate → 模块矩阵（按帧长选最小版本）
+├── transfer-engine/      编排 + 状态机 + 进度 + 快照 + FFI（re-export `af2`）
+│   ├── wasm.rs          wasm-bindgen（浏览器）
+│   ├── jni.rs           JNI（Android）
+│   └── cffi.rs          C ABI（Windows P/Invoke）
+└── zxing-decoder/       Windows 对 Android v1.1.3 模式的 ZXing-C++ 实现
     ├── DecodeMultiFull / DecodeMultiRegions
     └── packed payload + bbox 结果布局
 ```
@@ -70,38 +73,109 @@ core/
 ### 发送端
 
 ```
-统一 pending 列表（File + 文字 content）
-  │ 用户点「发送」才进入 worker
-  ├─ 恰好 1 条文字、0 文件 → ETTEXTv1（processText）
-  ├─ 否则文字物化为命名 .txt + 文件 → ≥2 则 ETBUNDL1
-  ├─ 三算法选优压缩 (Raw / Zstd Lv1 / Xz Lv9)，70% early-exit
-  ├─ 整段压缩一次；压缩流 > ~32 MiB → 按 ~32 MiB 切压缩流段（文件/包/文字均可）
-  ├─ 零填充到 symbol_size 整数倍
-  ├─ RaptorQ 编码（RFC 6330 自动分源块）
-  └─ 源符号一遍 → 持续新鲜修复符号；每 17 帧插描述符（首帧即描述符，多码布局下轮转码位）
-         Frame → QR 编码 → Canvas（单码或 4 码 tile）
+        ┌────────────────────────────┐
+        │ 统一 pending 列表           │  添加文件（全页拖放/点选/文件夹，追加）
+        │ PendingItem[]              │  添加文字（弹窗 → 命名 .txt + content）
+        └────┬───────────────────────┘
+             │ 用户点「发送」（此前不压缩、不跳页）
+             ▼
+     ┌───────┴────────┐
+     │ 1×text 且无文件 │ 否则（文件和/或 ≥1 文字）
+     ▼                ▼
+ 单一 UTF8_TEXT     文字→File(.txt) + 文件
+ 条目               ≥2 → 多条目 Manifest（AFM2）
+     │                │ 1 项 → 单文件条目
+     └───────┬────────┘
+             ▼
+   ┌────────────────────────────┐
+   │ 构建 AF2 Sender（AF2Sender）│  add_entry(kind, path, content)
+   │  Manifest + 定长切块        │  chunk_raw_size 默认 8 MiB（1..32 MiB）
+   └────┬───────────────────────┘
+        │ 逐 chunk 三算法选优压缩   Raw / Zstd Lv1 / Xz Lv9
+        │ （严格变小才压缩）        （compress.worker 读取 + 计算哈希）
+        ▼
+      ┌──────────────┐
+      │ RaptorQ 编码  │  OTI-only 分区推导（RFC 6330）
+      └────┬─────────┘
+           ▼
+   ┌──────────────────────────────┐
+   │ 发射策略 (af2::sender)        │
+   │ ① Bootstrap: ROOT+META+Manifest│
+   │ ② 源符号跨块轮询一遍          │
+   │ ③ 持续新鲜修复符号（ESI↑）    │
+   └────┬─────────────────────────┘
+        ▼
+    ┌──────────────────┐     META 每 ~17 帧、ROOT 每 ~31 帧插入
+    │ 帧封装           │     （AF2 帧：26B Header + T Payload + 4B CRC）
+    └────┬─────────────┘     (26+T+4) 字节帧
+         ▼
+   ┌──────────────┐
+   │ QR 编码       │  min_version_for（1430B → V27 125×125）
+   └────┬─────────┘
+        ▼
+  ┌──────────────┐
+  │ Canvas 渲染   │  next_qr_scratch/view + drawMatrix + putImageData
+  │ 单码 or 4码   │  默认 multiQr=4；fps 默认 60
+  └──────┬───────┘
+         ▼
+    屏幕二维码视频流 ▶ ▶ ▶
 ```
 
-> **持续新鲜修复符号**：源符号发完后持续产生从未见过的修复符号，进度近似线性；每块 ESI 达 2²⁴ 时明确停止，避免回绕或 panic。
+> **持续新鲜修复符号**：源符号发完后持续产生从未见过的修复符号，进度近似线性；每块 ESI 达 2²⁴ 时明确停止，避免回绕或 panic。`redundancy_pct` 仅 UI 估算。
 
 ### 接收端
 
 ```
-摄像头 / 采集卡 / [Windows] 屏幕区域·窗口捕获 (~60fps)
-  │
-  ├─ 生产者将 Gray 池化拷贝一次入队 → 2–6 worker 并行 ZXing-C++
-  ├─ Android：v1.1.3 调度/JNI；Windows：等价 C#/C ABI 模式
-  ├─ Windows 同一采集句柄节流 BGR24 快照 → WPF 预览（UI 不读设备）
-  ├─ 串行 ingest（锁）：帧校验 → 去重 → RaptorQ
-  └─ assemble + 解压后分流：
-       ⓪ descriptor-v5 → 逐段 SHA 校验 + 磁盘/IndexedDB 账本；原生端流式解压写盘（bounded RAM）
-       ① ETTEXTv1 → ReceiveText（复制/分享/存盘）
-       ② ETBUNDL1 → 拆包；文本类扩展名可点进 ReceiveText
-       ③ 单文件 + TextLike 扩展名 + 严格 UTF-8 → ReceiveText
-       ④ 否则 → 普通文件详情
+              屏幕二维码视频流 ▶ ▶ ▶
+                       │
+                       ▼
+            ┌───────────────────┐
+            │ 摄像头 / 采集卡    │  Android: ImageAnalysis @ ~60fps, 1920×1080
+            │                   │  Windows: OpenCvSharp DirectShow
+            └────┬──────────────┘
+                 ├── Windows: 同一次读取按 15fps 池化快照 → WPF 预览
+                 ▼
+          ┌────────────────────────┐
+          │ 池化 Gray 一次拷贝→队列 │  满则丢最新（喷泉码）
+          └────┬───────────────────┘
+               ▼
+        ┌──────────────────────────────┐
+        │ 2–6 解码 worker（并行）        │  Android v1.1.3 JNI / Windows 等价 C#/C ABI 模式
+        └────┬─────────────────────────┘
+             ▼
+        ┌──────────────────────────┐
+        │ 串行 ingest（锁）         │  原生句柄非线程安全
+        │ magic + 帧 CRC           │
+        └────┬─────────────────────┘
+             ▼
+      ROOT/META 绑定 → RaptorQ 恢复 → Manifest 恢复 → 逐 chunk 解压
+      （每 chunk 按 encoded_hash/raw_hash 校验；磁盘/IndexedDB 账本，
+        原生端流式解压写盘，bounded RAM）
+             ▼
+         ┌──────────────────────────────────────┐
+         │ 按 Manifest Entry.kind 路由：          │
+         │ ① UTF8_TEXT?      → ReceiveText       │
+         │ ② FILE + TextLike + 严格 UTF-8?      │
+         │      → ReceiveText（可复制）          │
+         │ ③ 多条目           → 拆包列表/目录     │
+         │ ④ 否则单文件      → 文件详情/分享/存盘 │
+         └──────────────────────────────────────┘
 ```
 
-> **并行解码池**：采集与解码解耦；QR 识别可并行，但原生 receiver 句柄非线程安全，ingest 必须串行。进度 UI 从一致快照展示接收进度、3 秒窗口速率和有效吞吐；不再展示容易误判的逐二维码活跃/暂停状态。详见 [data-flow.md](data-flow.md)。
+> **并行解码池 / 解码摄入分离**：采集与解码解耦；QR 识别可并行，但原生 receiver 句柄非线程安全，ingest 必须串行。完成时先停止摄入再 `assemble()`；会话切换和进度快照都在 ingest 锁内完成。Android 的 worker/批摄入/全帧与 ROI 状态机及 JNI 识别逻辑固定为 v1.1.3；Windows 用 C#/C ABI 镜像相同 worker 数、队列容量、4 符号批摄入、miss 状态机和 TryHarder/TryInvert 选项。进度 UI 从一致快照展示接收进度、3 秒窗口速率和有效吞吐；不再展示容易误判的逐二维码活跃/暂停状态。
+
+### 进度反馈流
+
+```
+解码 worker → (ingest 锁) → ReceiverSession.ingest(frame)
+        │
+        ▼
+   Progress { decoded_symbols, total_symbols, received_symbols,
+              decoded_fraction, loss_ratio, ... }
+        │
+        ▼ (JSON / 位域，UI 节流 ~7Hz)
+   进度条 + 3 秒窗口解码速率 + 有效吞吐 + 文件大小
+```
 
 ## 容错设计
 
@@ -110,13 +184,13 @@ core/
 | 帧丢失 | RaptorQ 喷泉码 + 持续新鲜修复符号 |
 | 帧乱序 | 符号按 (sbn, esi) 索引 |
 | 帧重复 | per-block ESI 集合去重 |
-| 帧损坏 | 双层 CRC32 丢弃 |
-| 大文件接收端重启 | 已验证完成压缩段持久化；当前未完成的 ~32 MiB 段重扫 |
-| 不同文件修订版分段混入 | 每段冻结 `root_sha256`；最终发布前流式重算完整根摘要 |
-| 存储空间不足 | 新建根任务和逐段写入前预检，并保留 64 MiB 安全余量 |
-| 成品归档中途崩溃 | 同卷原子移动 + 预期根摘要恢复；根任务派生稳定历史 ID，重试不生成重复记录 |
-| 晚加入 | 描述符帧定期广播 OTI |
-| 恶意/越界描述符 | `ObjectMeta::validate` |
+| 帧损坏 | 帧级 CRC32-IEEE 丢弃（覆盖 Header + Payload） |
+| 大文件接收端重启 | 已验证完成 chunk 持久化；未完成的 chunk 由后续新鲜修复符号重扫 |
+| 不同文件修订版混入 | Object ID 解码前绑定（含 encoded_hash）杜绝混流 |
+| 存储空间不足 | 逐 chunk 写盘前预检，并保留 64 MiB 安全余量 |
+| 成品归档中途崩溃 | 同卷原子移动 + 预期内容摘要恢复；重试不生成重复记录 |
+| 晚加入 | ROOT 每 ~31 帧、OBJECT_META 每 ~17 帧定期广播 OTI |
+| 恶意/越界 META/Manifest | `ObjectMeta::validate` + Manifest 路径/长度校验 |
 | 越界符号坐标 | 拒绝 ESI ≥ 2²⁴ 或载荷长度 ≠ symbol_size |
 | 解压炸弹 | 原生端流式解压按 `original_size` 封顶；网页端按浏览器接收上限封顶 |
 
@@ -125,31 +199,34 @@ core/
 | 参数 | 值 | 说明 |
 |------|-----|------|
 | Symbol Size (T) | 浏览器默认 **1400** / 核心库默认 **1024** | 每帧载荷；收端从帧头自适应 |
-| 速度预设 | 512 / 896 / 1008 / **1400（默认）** / 1904 / 2400 | 均为 8 字节倍数；见 [qr-frame-format.md](qr-frame-format.md) |
-| QR Version | 动态最小 | **1464B 帧 → V27 (125×125)**；1088B → V23 |
+| 速度预设 | 512 / 896 / 1008 / **1400（默认）** / 1904 / 2400 | 均为 8 字节倍数；见 [SPEC.md](SPEC.md) |
+| QR Version | 动态最小 | **1430B 帧 → V27 (125×125)**；1088B → V23 |
 | QR 纠错 | L | 最大化容量 |
 | 4 码并行 | 默认 4 | 同帧 tile 4 符号 |
 | 默认冗余率 | 5% | 仅 UI 时长估算 |
-| 描述符间隔 | 17 帧 | 首帧即描述符；与 2/4 多码布局互质，轮转全部物理码位 |
+| META/ROOT 间隔 | ~17/31 帧 | 周期轮转 OBJECT_META 与 ROOT |
 | 帧率 | 15 / 20 / 30 / 45 / 60（默认）/ 90 / 120 / 0=无限制 | `types.ts` + Params UI |
 | 接收采集（Android） | ~60fps | **ImageAnalysis 1920×1080** |
 | 亚像素抖动 | 默认关 | ±1px 打散摩尔纹 |
 
-## 多文件 / 混发
+## 性能基准（实测）
 
-- 2–4096 项（文件和/或文字 `.txt`）→ `ETBUNDL1` 单容器，一条压缩 + 一条 RaptorQ 流；原生内容库批量提交历史索引，避免逐文件 O(n²) 重写。
-- 单文件不打包（向后兼容）。
-- 单条纯文字 → `ETTEXTv1`（descriptor 文件名 = 选择页用户命名，默认 `文字消息.txt`）。
-- 格式见 [protocol.md](protocol.md)、[SPEC.md](SPEC.md)。
+- **Rust 核心不是瓶颈**：WASM 接收端 ingest 约 1000 MiB/s（~100 万符号/秒）；8 MB 文件完整恢复约 7.3 ms。
+- **光学信道才是瓶颈**：默认 1400B 符号、60 fps 下理论上限约 78 KiB/s（单码）/ 308 KiB/s（四码）；核心算力富余约 4000 倍。接收端实际瓶颈在摄像头采集帧率与 ZXing 解码，不在 Rust 核心。
+
+## 多文件与混发
+
+- 1–4096 项（文件、文字、目录）统一由 AF2 Manifest 描述与分块，结构化传输。
+- 格式与位级契约详见 [SPEC.md](SPEC.md)。
 
 ## 4 码并行模式
 
-默认 `multiQr=4`。详见 [qr-frame-format.md](qr-frame-format.md#4-码并行模式)。
+默认 `multiQr=4`，同屏渲染 4 个并行 QR 码，提升光学吞吐量。
 
 ## 速度预设与帧率
 
-六档 symbol 预设 + 独立 fps（含 120、无限制）。`redundancy_pct` 仅估算用。详见 [qr-frame-format.md](qr-frame-format.md)。
+六档 symbol 预设（T = 512..2400）+ 独立 fps。详见 [SPEC.md](SPEC.md)。
 
 ## 亚像素抖动
 
-`ditherJitter` 默认关。详见 [qr-frame-format.md](qr-frame-format.md#亚像素抖动-dither)。
+`ditherJitter` 默认关（±1px 打散摩尔纹）。

@@ -1,5 +1,4 @@
 using AirFerry.Windows.Services;
-using Wpf.Ui.Controls;
 
 namespace AirFerry.Windows.Views;
 
@@ -9,10 +8,9 @@ namespace AirFerry.Windows.Views;
 /// <see cref="System.Windows.Controls.Page"/> instances navigated inside the
 /// embedded Frame, so every existing <c>NavigationService.Navigate / GoBack</c>
 /// call keeps working unchanged. The appearance preference is applied here
-/// (before the first render) because <see cref="SystemThemeWatcher"/> needs a
-/// window to observe.
+/// (before the first render) so the first paint already uses the right skin.
 /// </summary>
-public partial class MainWindow : FluentWindow
+public partial class MainWindow : HandyControl.Controls.Window
 {
     public MainWindow()
     {

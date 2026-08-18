@@ -20,24 +20,24 @@
   <!-- The WPF app project targets net8.0-windows, which won't build on
        non-Windows hosts. Reference only the pure-C# sources (no WPF deps)
        by linking them in directly, so the tests verify the protocol math
-       (IngestStatus bits, FrameHeader parsing, BundleParser) everywhere. -->
+       (IngestStatus bits, golden wire headers) everywhere. -->
   <ItemGroup>
     <Compile Include="..\AirFerry.Windows\Models\DeviceInfo.cs" Link="Models\DeviceInfo.cs" />
     <Compile Include="..\AirFerry.Windows\Models\ScanSource.cs" Link="Models\ScanSource.cs" />
     <Compile Include="..\AirFerry.Windows\Models\ScanSourceOption.cs" Link="Models\ScanSourceOption.cs" />
     <Compile Include="..\AirFerry.Windows\Scan\ScreenRectUtil.cs" Link="Scan\ScreenRectUtil.cs" />
     <Compile Include="..\AirFerry.Windows\Scan\IngestStatus.cs" Link="Scan\IngestStatus.cs" />
-    <Compile Include="..\AirFerry.Windows\Scan\FrameHeader.cs" Link="Scan\FrameHeader.cs" />
     <Compile Include="..\AirFerry.Windows\Scan\Crc32.cs" Link="Scan\Crc32.cs" />
     <Compile Include="..\AirFerry.Windows\Scan\ReceiverSession.cs" Link="Scan\ReceiverSession.cs" />
+    <Compile Include="..\AirFerry.Windows\Scan\Af2LedgerStore.cs" Link="Scan\Af2LedgerStore.cs" />
     <Compile Include="..\AirFerry.Windows\Scan\ProgressSnapshot.cs" Link="Scan\ProgressSnapshot.cs" />
     <Compile Include="..\AirFerry.Windows\Scan\PreviewFrame.cs" Link="Scan\PreviewFrame.cs" />
     <Compile Include="..\AirFerry.Windows\Scan\ZxingDecoder.cs" Link="Scan\ZxingDecoder.cs" />
-    <Compile Include="..\AirFerry.Windows\Bundle\BundleParser.cs" Link="Bundle\BundleParser.cs" />
-    <Compile Include="..\AirFerry.Windows\Bundle\TextParser.cs" Link="Bundle\TextParser.cs" />
     <Compile Include="..\AirFerry.Windows\Bundle\FileNameUtil.cs" Link="Bundle\FileNameUtil.cs" />
+    <Compile Include="..\AirFerry.Windows\Bundle\BundleFile.cs" Link="Bundle\BundleFile.cs" />
     <Compile Include="..\AirFerry.Windows\Bundle\ShareExport.cs" Link="Bundle\ShareExport.cs" />
     <Compile Include="..\AirFerry.Windows\Bundle\ContinuousSave.cs" Link="Bundle\ContinuousSave.cs" />
+    <Compile Include="..\AirFerry.Windows\Bundle\ContentStore.cs" Link="Bundle\ContentStore.cs" />
     <Compile Include="..\AirFerry.Windows\Services\AppSettings.cs" Link="Services\AppSettings.cs" />
     <Compile Include="..\AirFerry.Windows\Native\NativeBridge.cs" Link="Native\NativeBridge.cs" />
     <Compile Include="..\AirFerry.Windows\Native\NativeZxingBridge.cs" Link="Native\NativeZxingBridge.cs" />

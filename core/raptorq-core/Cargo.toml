@@ -7,7 +7,7 @@ license.workspace = true
 description = "RFC 6330 RaptorQ codec wrapper for AirFerry (pure logic, WASM & Android compatible)."
 
 [dependencies]
-raptorq = "2.0"
+raptorq.workspace = true
 thiserror.workspace = true
 serde = { workspace = true, optional = true }
 
