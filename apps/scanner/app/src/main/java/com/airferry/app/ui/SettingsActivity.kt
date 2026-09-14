@@ -32,7 +32,17 @@ class SettingsActivity : ComponentActivity() {
         val prefs = remember { getSharedPreferences("airferry", MODE_PRIVATE) }
         var redundancy by remember { mutableFloatStateOf(prefs.getInt("default_redundancy", 5).toFloat()) }
 
-        Column(modifier = Modifier.fillMaxSize().background(BgDark)) {
+        // 折叠内屏/平板：内容列限宽居中，safeDrawing insets 避开系统栏/挖孔。
+        Box(
+            modifier = Modifier.fillMaxSize().background(BgDark),
+            contentAlignment = Alignment.TopCenter
+        ) {
+        Column(
+            modifier = Modifier
+                .fillMaxHeight()
+                .widthIn(max = 640.dp)
+                .windowInsetsPadding(WindowInsets.safeDrawing)
+        ) {
             Text(
                 "设置",
                 color = TextPrimary, fontSize = 22.sp, fontWeight = FontWeight.Bold,
@@ -80,6 +90,7 @@ class SettingsActivity : ComponentActivity() {
                 modifier = Modifier.fillMaxWidth().padding(16.dp).height(50.dp),
                 shape = RoundedCornerShape(12.dp)
             ) { Text("返回", color = TextPrimary, fontSize = 16.sp) }
+        }
         }
     }
 

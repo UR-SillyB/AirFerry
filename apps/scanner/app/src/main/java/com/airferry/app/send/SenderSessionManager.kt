@@ -125,8 +125,13 @@ class SenderSessionManager(private val resolver: ContentResolver) {
         }
     }
 
-    /** Build the native streamed sender. Call once after [prepare]. */
-    fun build(prepared: Prepared, items: List<SendItem>, symbolSize: Int, fps: Int, redundancyPct: Int) {
+    /**
+     * Build the native streamed sender. Call once after [prepare].
+     * [qrCount] is the number of QR tiles played per frame tick; the channel-rate
+     * estimate below mirrors the web sender (`options.tsx`: symbolSize × fps ×
+     * max(1, multiQr)) and gates the balanced encoder's p6 escalation.
+     */
+    fun build(prepared: Prepared, items: List<SendItem>, symbolSize: Int, fps: Int, qrCount: Int, redundancyPct: Int) {
         val h = NativeBridge.senderBuildStreamed(
             prepared.kinds, prepared.paths, prepared.sizes,
             prepared.contentHashes, prepared.chunkHashes,
@@ -142,7 +147,7 @@ class SenderSessionManager(private val resolver: ContentResolver) {
             handle = h
             this.items = items
             this.plan = prepared.plan
-            this.channelBps = fps.toLong() * symbolSize
+            this.channelBps = fps.toLong() * symbolSize * qrCount.coerceAtLeast(1)
         }
     }
 
@@ -170,22 +175,16 @@ class SenderSessionManager(private val resolver: ContentResolver) {
 
     /**
      * Prefetch hook (call from an IO coroutine every ~100 ms during play):
-     * keep the armed set {current, next} staged so [nextQr] never blocks the
-     * render loop on disk + encode. Mirrors the web sender's chunk-stager:
-     * staged bytes are consumed as the playlist window moves on, so `current`
-     * must be RE-armed for the next epoch, and `next` wraps to chunk 0 after
-     * the last chunk.
+     * stage only the next window, wrapping to chunk 0 after the last chunk.
+     * For a single-chunk transfer this re-arms the current chunk for its next
+     * epoch; multi-chunk transfers must not retain already-played chunks.
      */
     fun prefetchNextChunk() {
         lock.withLock {
             val p = plan ?: return
             if (handle == 0L) return
             val current = NativeBridge.senderCurrentChunkIndex(handle)
-            if (current < 0) return // bootstrap: manifest symbols still playing
-            if (!NativeBridge.senderIsStaged(handle, current)) {
-                stageChunkLocked(current) // consumed by the live window; re-arm for next epoch
-            }
-            val next = (current + 1) % p.chunkCount
+            val next = nextPrefetchChunk(current, p.chunkCount) ?: return
             if (!NativeBridge.senderIsStaged(handle, next)) {
                 stageChunkLocked(next)
             }
@@ -225,20 +224,22 @@ class SenderSessionManager(private val resolver: ContentResolver) {
         return raw
     }
 
-    fun statsJson(): JSONObject? {
-        val s = lock.withLock {
-            if (handle == 0L) null else NativeBridge.senderStatsJson(handle)
-        } ?: return null
-        return try { JSONObject(s) } catch (_: Exception) { null }
+    data class Stats(val fps: Double, val throughputBps: Double, val bytes: Double, val epoch: Int)
+
+    /** Call off the UI thread: the native-call lock also covers disk + encode. */
+    fun stats(): Stats? {
+        val (json, epoch) = lock.withLock {
+            if (handle == 0L) return null
+            NativeBridge.senderStatsJson(handle) to NativeBridge.senderEpoch(handle)
+        }
+        return try {
+            val s = JSONObject(json)
+            Stats(s.optDouble("fps"), s.optDouble("throughput_bps"), s.optDouble("bytes"), epoch)
+        } catch (_: Exception) { null }
     }
 
     fun transferIdHex(): String? = lock.withLock {
         if (handle == 0L) null else NativeBridge.senderTransferIdHex(handle)
-    }
-
-    /** 1-based broadcast epoch (1 when idle — display only). */
-    fun epoch(): Int = lock.withLock {
-        if (handle == 0L) 1 else NativeBridge.senderEpoch(handle)
     }
 
     fun destroy() {

@@ -188,7 +188,7 @@ class SendActivity : ComponentActivity() {
                         ui.prepTotal = total.coerceAtLeast(1)
                     }
                 }
-                activeSender.build(prepared, ui.items, preset.symbolSize, preset.fps, REDUNDANCY_PCT)
+                activeSender.build(prepared, ui.items, preset.symbolSize, preset.fps, QR_PER_FRAME, REDUNDANCY_PCT)
                 withContext(Dispatchers.Main) {
                     // The user may have backgrounded the app mid-prepare —
                     // entering play now would stream QRs to an invisible screen.
@@ -234,7 +234,7 @@ class SendActivity : ComponentActivity() {
             while (isActive && ui.page == Page.PLAY) {
                 val t0 = System.nanoTime()
                 try {
-                    val batch = activeSender.nextQr(1)
+                    val batch = activeSender.nextQr(QR_PER_FRAME)
                     val frame = renderFrame(batch)
                     withContext(Dispatchers.Main) {
                         // stopPlay swaps the manager before native work already
@@ -277,12 +277,12 @@ class SendActivity : ComponentActivity() {
     private fun startStatsLoop(activeSender: SenderSessionManager) {
         lifecycleScope.launch(Dispatchers.Main) {
             while (isActive && ui.page == Page.PLAY) {
-                val s = withContext(Dispatchers.Default) { activeSender.statsJson() }
+                val s = withContext(Dispatchers.Default) { activeSender.stats() }
                 if (s != null && ui.page == Page.PLAY && sender === activeSender) {
-                    val mbps = s.optDouble("throughput_bps") / (1024.0 * 1024.0)
-                    val mb = s.optDouble("bytes") / (1024.0 * 1024.0)
+                    val mbps = s.throughputBps / (1024.0 * 1024.0)
+                    val mb = s.bytes / (1024.0 * 1024.0)
                     ui.statsText = "%.1f fps · %.2f MiB/s · 已发 %.1f MiB · 第 %d 轮".format(
-                        s.optDouble("fps"), mbps, mb, activeSender.epoch()
+                        s.fps, mbps, mb, s.epoch
                     )
                 }
                 delay(250)
@@ -337,10 +337,16 @@ class SendActivity : ComponentActivity() {
     @Composable
     private fun SelectPage() {
         var showTextDialog by remember { mutableStateOf(false) }
+        // 折叠屏内屏 / 平板上限制内容列宽（640dp）并居中，避免单列被拉满整幅屏。
+        Box(
+            modifier = Modifier.fillMaxSize().background(BgDark),
+            contentAlignment = Alignment.TopCenter
+        ) {
         Column(
             modifier = Modifier
-                .fillMaxSize()
-                .background(BgDark)
+                .fillMaxHeight()
+                .widthIn(max = 640.dp)
+                .windowInsetsPadding(WindowInsets.safeDrawing)
                 .padding(20.dp)
         ) {
             Text(
@@ -426,6 +432,7 @@ class SendActivity : ComponentActivity() {
                 colors = ButtonDefaults.buttonColors(containerColor = Accent)
             ) { Text("开始发送", fontSize = 16.sp, fontWeight = FontWeight.Bold) }
         }
+        }
 
         if (showTextDialog) {
             var text by remember { mutableStateOf("") }
@@ -454,22 +461,26 @@ class SendActivity : ComponentActivity() {
     @Composable
     private fun PreparePage() {
         val pct = (ui.prepDone.toFloat() / ui.prepTotal).coerceIn(0f, 1f)
-        Column(
-            modifier = Modifier.fillMaxSize().background(BgDark).padding(32.dp),
-            verticalArrangement = Arrangement.Center,
-            horizontalAlignment = Alignment.CenterHorizontally
+        Box(
+            modifier = Modifier.fillMaxSize().background(BgDark),
+            contentAlignment = Alignment.Center
         ) {
-            Text("正在准备…", color = TextPrimary, fontSize = 20.sp, fontWeight = FontWeight.Bold)
-            Spacer(Modifier.height(8.dp))
-            Text(
-                "哈希计算 ${formatSize(ui.prepDone)} / ${formatSize(ui.prepTotal)}",
-                color = TextSecondary, fontSize = 14.sp
-            )
-            Spacer(Modifier.height(24.dp))
-            LinearProgressIndicator(
-                progress = { pct },
-                modifier = Modifier.fillMaxWidth().height(6.dp)
-            )
+            Column(
+                modifier = Modifier.widthIn(max = 560.dp).padding(32.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Text("正在准备…", color = TextPrimary, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    "哈希计算 ${formatSize(ui.prepDone)} / ${formatSize(ui.prepTotal)}",
+                    color = TextSecondary, fontSize = 14.sp
+                )
+                Spacer(Modifier.height(24.dp))
+                LinearProgressIndicator(
+                    progress = { pct },
+                    modifier = Modifier.fillMaxWidth().height(6.dp)
+                )
+            }
         }
     }
 
@@ -505,9 +516,17 @@ class SendActivity : ComponentActivity() {
                     CircularProgressIndicator(color = Accent)
                 }
             }
-            // Stats bar
+            // Stats bar：宽屏（折叠内屏/平板）下限制列宽并居中；navigationBars
+            // padding 避开全面屏手势区，QR 区域本身保持纯白全幅。
             Surface(color = BgDark) {
-                Column(Modifier.fillMaxWidth().padding(16.dp)) {
+                Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.TopCenter) {
+                    Column(
+                        Modifier
+                            .widthIn(max = 560.dp)
+                            .navigationBarsPadding()
+                            .fillMaxWidth()
+                            .padding(16.dp)
+                    ) {
                     Text(
                         ui.statsText.ifEmpty { "正在启动…" },
                         color = Success, fontSize = 14.sp,
@@ -525,6 +544,7 @@ class SendActivity : ComponentActivity() {
                         modifier = Modifier.fillMaxWidth().height(48.dp),
                         colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFEF4444))
                     ) { Text("停止发送") }
+                    }
                 }
             }
         }
@@ -539,5 +559,11 @@ class SendActivity : ComponentActivity() {
 
     private companion object {
         const val REDUNDANCY_PCT = 5 // web sender default (DEFAULT_CONFIG in types.ts)
+
+        /** QR tiles per played frame (single-code today). The render loop and
+         *  the sender build must share this constant: it feeds the channel-rate
+         *  estimate (fps × symbolSize × QR count) that gates p6 escalation, so a
+         *  future multi-QR tier must not update one site and forget the other. */
+        const val QR_PER_FRAME = 1
     }
 }

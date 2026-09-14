@@ -106,8 +106,17 @@ class ReceiveTextActivity : ComponentActivity() {
         val statusOk = hasText && (crcOk || crcUnknown)
         val charCount = remember(text) { text.length }
 
+        // 折叠内屏/平板：内容列限宽居中，safeDrawing insets 避开系统栏/挖孔。
+        Box(
+            modifier = Modifier.fillMaxSize().background(BgDark),
+            contentAlignment = Alignment.TopCenter
+        ) {
         Column(
-            modifier = Modifier.fillMaxSize().background(BgDark).padding(24.dp),
+            modifier = Modifier
+                .fillMaxHeight()
+                .widthIn(max = 640.dp)
+                .windowInsetsPadding(WindowInsets.safeDrawing)
+                .padding(24.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.Center
         ) {
@@ -230,6 +239,7 @@ class ReceiveTextActivity : ComponentActivity() {
             ) {
                 Text("重新扫码", color = TextPrimary, fontSize = 16.sp)
             }
+        }
         }
     }
 

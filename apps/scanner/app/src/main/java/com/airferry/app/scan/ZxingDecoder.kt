@@ -104,7 +104,9 @@ object ZxingDecoder {
     fun parseMulti(buf: ByteArray?): List<MultiResult> {
         if (buf == null || buf.size < 4) return emptyList()
         val count = u32le(buf, 0)
-        val out = ArrayList<MultiResult>(count.coerceAtMost(64))
+        // u32le yields a signed Int: a native-compromised 0xFFFFFFFF reads as
+        // -1 and would make ArrayList(negative) throw. Clamp to 0..64.
+        val out = ArrayList<MultiResult>(count.coerceIn(0, 64))
         var pos = 4
         var i = 0
         while (i < count && pos + 4 <= buf.size) {

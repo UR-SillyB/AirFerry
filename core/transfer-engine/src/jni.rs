@@ -45,6 +45,14 @@ use jni::JNIEnv;
 /// "staying synchronising" on >32 MiB transfers with a stale library.
 pub const AIRFERRY_NATIVE_ABI_VERSION: jint = 4;
 
+/// True only for handles the FFI registry knows: null, already-destroyed, and
+/// forged values are rejected before they reach the raw pointer cast
+/// (`ffi_handle` module: double-destroy / UAF become the caller's null-handle
+/// error path instead of undefined behavior).
+fn live_receiver(handle: jlong) -> bool {
+    crate::ffi_handle::is_live(handle as *const ReceiverSession)
+}
+
 /// Report the native ABI / protocol capability version. Returns
 /// [`AIRFERRY_NATIVE_ABI_VERSION`].
 #[no_mangle]
@@ -68,7 +76,7 @@ pub extern "system" fn Java_com_airferry_app_nativelib_NativeBridge_receiverCrea
     // supplies the authoritative, sanity-checked OTI (see ReceiverSession::ingest),
     // which builds the real decoder.
     let session = ReceiverSession::new_pending(sid);
-    Box::into_raw(Box::new(session)) as jlong
+    crate::ffi_handle::register(Box::into_raw(Box::new(session)), 0) as jlong
 }
 
 #[no_mangle]
@@ -77,7 +85,9 @@ pub extern "system" fn Java_com_airferry_app_nativelib_NativeBridge_receiverDest
     _class: JClass,
     handle: jlong,
 ) {
-    if handle != 0 {
+    // Withdraw from the registry first: a double-destroy or forged handle is
+    // a silent no-op instead of a second free of the same allocation.
+    if crate::ffi_handle::take(handle as *mut ReceiverSession).is_some() {
         unsafe { drop(Box::from_raw(handle as *mut ReceiverSession)) };
     }
 }
@@ -112,7 +122,7 @@ pub extern "system" fn Java_com_airferry_app_nativelib_NativeBridge_receiverInge
     handle: jlong,
     frame_bytes: JByteArray,
 ) -> jlong {
-    if handle == 0 {
+    if !live_receiver(handle) {
         return 0;
     }
     let frame_vec: Vec<u8> = match env.convert_byte_array(&frame_bytes) {
@@ -132,7 +142,7 @@ pub extern "system" fn Java_com_airferry_app_nativelib_NativeBridge_receiverProg
     _class: JClass,
     handle: jlong,
 ) -> jni::sys::jbyteArray {
-    if handle == 0 {
+    if !live_receiver(handle) {
         return null_byte_array(&mut env);
     }
     let session = unsafe { &*(handle as *const ReceiverSession) };
@@ -167,7 +177,7 @@ pub extern "system" fn Java_com_airferry_app_nativelib_NativeBridge_receiverIsCo
     _class: JClass,
     handle: jlong,
 ) -> jint {
-    if handle == 0 {
+    if !live_receiver(handle) {
         return 0;
     }
     let session = unsafe { &*(handle as *const ReceiverSession) };
@@ -190,7 +200,7 @@ pub extern "system" fn Java_com_airferry_app_nativelib_NativeBridge_receiverAsse
     _class: JClass,
     handle: jlong,
 ) -> jni::sys::jbyteArray {
-    if handle == 0 {
+    if !live_receiver(handle) {
         return null_byte_array(&mut env);
     }
     let session = unsafe { &mut *(handle as *mut ReceiverSession) };
@@ -234,7 +244,7 @@ pub extern "system" fn Java_com_airferry_app_nativelib_NativeBridge_receiverAsse
     handle: jlong,
     index: jint,
 ) -> jni::sys::jbyteArray {
-    if handle == 0 || index < 0 {
+    if !live_receiver(handle) || index < 0 {
         return null_byte_array(&mut env);
     }
     let session = unsafe { &mut *(handle as *mut ReceiverSession) };
@@ -266,7 +276,7 @@ pub extern "system" fn Java_com_airferry_app_nativelib_NativeBridge_receiverLast
     _class: JClass,
     handle: jlong,
 ) -> jint {
-    if handle == 0 {
+    if !live_receiver(handle) {
         return -1;
     }
     let session = unsafe { &*(handle as *const ReceiverSession) };
@@ -285,7 +295,7 @@ pub extern "system" fn Java_com_airferry_app_nativelib_NativeBridge_receiverForg
     handle: jlong,
     index: jint,
 ) -> jni::sys::jboolean {
-    if handle == 0 || index < 0 {
+    if !live_receiver(handle) || index < 0 {
         return 0;
     }
     let session = unsafe { &mut *(handle as *mut ReceiverSession) };
@@ -301,7 +311,7 @@ pub extern "system" fn Java_com_airferry_app_nativelib_NativeBridge_receiverVeri
     index: jint,
     raw_bytes: jni::sys::jbyteArray,
 ) -> jni::sys::jboolean {
-    if handle == 0 || index < 0 || raw_bytes.is_null() {
+    if !live_receiver(handle) || index < 0 || raw_bytes.is_null() {
         return false as jni::sys::jboolean;
     }
     let session = unsafe { &*(handle as *const ReceiverSession) };
@@ -326,7 +336,7 @@ pub extern "system" fn Java_com_airferry_app_nativelib_NativeBridge_receiverVeri
     handle: jlong,
     stream_bytes: jni::sys::jbyteArray,
 ) -> jni::sys::jboolean {
-    if handle == 0 || stream_bytes.is_null() {
+    if !live_receiver(handle) || stream_bytes.is_null() {
         return false as jni::sys::jboolean;
     }
     let session = unsafe { &*(handle as *const ReceiverSession) };
@@ -347,7 +357,7 @@ pub extern "system" fn Java_com_airferry_app_nativelib_NativeBridge_receiverFina
     _class: JClass,
     handle: jlong,
 ) -> jni::sys::jboolean {
-    if handle == 0 {
+    if !live_receiver(handle) {
         return false as jni::sys::jboolean;
     }
     let session = unsafe { &mut *(handle as *mut ReceiverSession) };
@@ -362,7 +372,7 @@ pub extern "system" fn Java_com_airferry_app_nativelib_NativeBridge_receiverFina
     handle: jlong,
     stream_bytes: jni::sys::jbyteArray,
 ) -> jni::sys::jboolean {
-    if handle == 0 || stream_bytes.is_null() {
+    if !live_receiver(handle) || stream_bytes.is_null() {
         return false as jni::sys::jboolean;
     }
     let session = unsafe { &mut *(handle as *mut ReceiverSession) };
@@ -383,7 +393,7 @@ pub extern "system" fn Java_com_airferry_app_nativelib_NativeBridge_receiverFina
     _class: JClass,
     handle: jlong,
 ) -> jni::sys::jboolean {
-    if handle == 0 {
+    if !live_receiver(handle) {
         return false as jni::sys::jboolean;
     }
     let session = unsafe { &mut *(handle as *mut ReceiverSession) };
@@ -399,7 +409,7 @@ pub extern "system" fn Java_com_airferry_app_nativelib_NativeBridge_receiverResu
     root_frame_bytes: jni::sys::jbyteArray,
     completed_indices: jni::sys::jintArray,
 ) -> jni::sys::jboolean {
-    if handle == 0 || root_frame_bytes.is_null() || completed_indices.is_null() {
+    if !live_receiver(handle) || root_frame_bytes.is_null() || completed_indices.is_null() {
         return false as jni::sys::jboolean;
     }
     let session = unsafe { &mut *(handle as *mut ReceiverSession) };
@@ -435,7 +445,7 @@ pub extern "system" fn Java_com_airferry_app_nativelib_NativeBridge_receiverInva
     handle: jlong,
     index: jint,
 ) -> jni::sys::jboolean {
-    if handle == 0 || index < 0 {
+    if !live_receiver(handle) || index < 0 {
         return false as jni::sys::jboolean;
     }
     let session = unsafe { &mut *(handle as *mut ReceiverSession) };
@@ -458,7 +468,7 @@ pub extern "system" fn Java_com_airferry_app_nativelib_NativeBridge_receiverSnap
     _class: JClass,
     handle: jlong,
 ) -> jni::sys::jstring {
-    if handle == 0 {
+    if !live_receiver(handle) {
         return std::ptr::null_mut();
     }
     let session = unsafe { &*(handle as *const ReceiverSession) };

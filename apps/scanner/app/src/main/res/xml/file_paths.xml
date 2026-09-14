@@ -4,8 +4,10 @@
     <external-files-path name="store" path="store/" />
     <!-- ContentStore falls back here when external app storage is unavailable. -->
     <files-path name="internal_store" path="store/" />
-    <!-- Legacy: older builds used cache recovered_* / share staging -->
-    <cache-path name="cache" path="." />
+    <!-- Legacy share staging retained for older installs; current builds share
+         ContentStore blobs only (store/ below). The former broad
+         <cache-path path="." /> entry exposed the whole cacheDir to any future
+         getUriForFile caller and was removed. -->
     <cache-path name="share" path="share/" />
     <!-- Legacy received/ tree (pre-ContentStore) -->
     <external-files-path name="received" path="received/" />

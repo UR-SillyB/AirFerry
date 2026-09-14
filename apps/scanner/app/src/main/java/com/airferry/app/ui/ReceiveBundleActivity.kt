@@ -28,6 +28,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.airferry.app.scan.ContentStore
 import com.airferry.app.scan.CreateNamedDocument
 import com.airferry.app.scan.FileTransfer
 import com.airferry.app.scan.SafTreeExporter
@@ -127,10 +128,28 @@ class ReceiveBundleActivity : ComponentActivity() {
         val names = intent.getStringArrayListExtra("FILE_NAMES") ?: arrayListOf()
         val sizes = intent.getStringArrayListExtra("FILE_SIZES") ?: arrayListOf()
         files.clear()
+        // Intent extras are trusted only as far as they stay inside the
+        // app-private ContentStore root: the activities are exported=false,
+        // but a forged/replayed task stack must not turn this save flow into
+        // an arbitrary app-file copy handle.
+        val storeRoot = try {
+            ContentStore.root(this).canonicalFile.path
+                .trimEnd(File.separatorChar) + File.separatorChar
+        } catch (_: java.io.IOException) {
+            ""
+        }
         for (i in paths.indices) {
             val name = names.getOrElse(i) { "file_$i" }
             val size = sizes.getOrElse(i) { "0" }.toLongOrNull() ?: 0L
-            files.add(FileInfo(paths[i], name, size))
+            val canonical = try {
+                File(paths[i]).canonicalPath
+            } catch (_: java.io.IOException) {
+                null
+            }
+            if (canonical == null || storeRoot.isEmpty() || !canonical.startsWith(storeRoot)) {
+                continue
+            }
+            files.add(FileInfo(canonical, name, size))
         }
         expectedCrc = intent.getLongExtra("CRC32", 0L)
         receivedCrc = intent.getLongExtra("CRC32_RECEIVED", 0L)
@@ -150,8 +169,17 @@ class ReceiveBundleActivity : ComponentActivity() {
         val totalCount = files.size
         val totalSize = files.sumOf { it.size }
 
+        // 折叠内屏/平板：内容列限宽居中，safeDrawing insets 避开系统栏/挖孔。
+        Box(
+            modifier = Modifier.fillMaxSize().background(BgDark),
+            contentAlignment = Alignment.TopCenter
+        ) {
         Column(
-            modifier = Modifier.fillMaxSize().background(BgDark).padding(20.dp)
+            modifier = Modifier
+                .fillMaxHeight()
+                .widthIn(max = 640.dp)
+                .windowInsetsPadding(WindowInsets.safeDrawing)
+                .padding(20.dp)
         ) {
             // Header card
             Box(
@@ -266,6 +294,7 @@ class ReceiveBundleActivity : ComponentActivity() {
             ) {
                 Text("重新扫码", color = TextPrimary, fontSize = 15.sp)
             }
+        }
         }
     }
 

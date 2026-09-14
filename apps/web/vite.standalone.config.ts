@@ -2,11 +2,17 @@ import { defineConfig } from "vite"
 import react from "@vitejs/plugin-react"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
+import { transferEngineSha256 } from "./scripts/wasm-fingerprint"
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
 export default defineConfig({
   plugins: [react()],
+  define: {
+    // Pinned at build time; src/wasm/loader.ts refuses a wasm whose SHA-256
+    // differs (scripts/wasm-fingerprint.ts for the threat-model caveat).
+    __WASM_TRANSFER_ENGINE_SHA256__: JSON.stringify(transferEngineSha256()),
+  },
   build: {
     outDir: "dist-standalone",
     lib: {

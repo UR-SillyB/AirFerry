@@ -8,6 +8,7 @@
     forbid(unsafe_code)
 )]
 
+pub mod ffi_handle;
 pub mod ingest_status;
 pub mod progress;
 pub mod receiver;

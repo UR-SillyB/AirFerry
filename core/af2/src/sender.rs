@@ -1244,7 +1244,7 @@ impl Af2Sender {
         let redundancy = (k as u64 * self.config.redundancy_pct as u64 / 100).max(1) as u32;
         if epoch == 1 {
             // Epoch 1: the source-symbol pass plus the configured redundancy.
-            k + redundancy
+            k.saturating_add(redundancy)
         } else if epoch == 2 {
             // First recovery pass stays short: start = K and target = 2K+R,
             // therefore it emits exactly K+R fresh repairs. High-capture
@@ -1268,7 +1268,13 @@ impl Af2Sender {
     fn get_manifest_symbol_frame(&self, symbol_index: u32) -> Result<Vec<u8>, SenderError> {
         let t = self.config.symbol_size;
         let packets = &self.manifest_encoder.source_packets;
-        let pkt = &packets[symbol_index as usize % packets.len()];
+        // Defensive: an empty packet cache would panic the modulo below. The
+        // EmptyContent gate plus RaptorQ's ceil(F/T) ≥ 1 packets make this
+        // unreachable today, but panic = abort makes the guard cheaper than
+        // the crash it prevents.
+        let pkt = packets
+            .get(symbol_index as usize % packets.len().max(1))
+            .ok_or_else(|| SenderError::Config("manifest encoder has no source packets".into()))?;
         Ok(Af2Frame {
             frame_type: FrameType::Symbol,
             object_id: self.manifest_encoder.object_id,
@@ -1289,7 +1295,13 @@ impl Af2Sender {
         let t = self.config.symbol_size;
         let current_esi = self.manifest_encoder.next_repair_esi;
         let block_encoders = self.manifest_encoder.raptorq_encoder.get_block_encoders();
-        let block_idx = (current_esi as usize) % block_encoders.len().max(1);
+        // Defensive empty-block guard (panic = abort; see get_manifest_symbol_frame).
+        if block_encoders.is_empty() {
+            return Err(SenderError::Config(
+                "manifest encoder exposes no source blocks".into(),
+            ));
+        }
+        let block_idx = (current_esi as usize) % block_encoders.len();
         let block_k = self.manifest_encoder.block_source_symbol_counts[block_idx];
         if current_esi
             .checked_add(block_k)
@@ -1307,7 +1319,7 @@ impl Af2Sender {
                 (self.manifest_repair_replay_cursor % u64::from(replay_space)) as u32;
             self.manifest_repair_replay_cursor =
                 self.manifest_repair_replay_cursor.wrapping_add(1);
-            let replay_block = (replay_ordinal as usize) % block_encoders.len().max(1);
+            let replay_block = (replay_ordinal as usize) % block_encoders.len();
             let pkt = &block_encoders[replay_block].repair_packets(replay_ordinal, 1)[0];
             return Ok(Some(
                 Af2Frame {
@@ -1356,7 +1368,11 @@ impl Af2Sender {
             let (sbn, esi, body) = if symbol_index < k {
                 // Source symbol — O(1) from the construction-time packet cache.
                 let packets = &enc.source_packets;
-                let pkt = &packets[symbol_index as usize % packets.len()];
+                let pkt = packets
+                    .get(symbol_index as usize % packets.len().max(1))
+                    .ok_or_else(|| {
+                        SenderError::Config("chunk encoder has no source packets".into())
+                    })?;
                 (
                     pkt.payload_id().source_block_number(),
                     pkt.payload_id().encoding_symbol_id(),
@@ -1366,7 +1382,13 @@ impl Af2Sender {
                 // Fresh repair symbol (monotonic ESI, never repeated, stop at 2^24 §9.1)
                 let current_repair_esi = enc.next_repair_esi;
                 let block_encoders = enc.raptorq_encoder.get_block_encoders();
-                let block_idx = (current_repair_esi as usize) % block_encoders.len().max(1);
+                // Defensive empty-block guard (panic = abort; see get_manifest_symbol_frame).
+                if block_encoders.is_empty() {
+                    return Err(SenderError::Config(
+                        "chunk encoder exposes no source blocks".into(),
+                    ));
+                }
+                let block_idx = (current_repair_esi as usize) % block_encoders.len();
                 let block_k = enc.block_source_symbol_counts[block_idx];
                 if current_repair_esi
                     .checked_add(block_k)
@@ -1385,8 +1407,7 @@ impl Af2Sender {
                     self.chunk_repair_replay_cursor[chunk_index] = self
                         .chunk_repair_replay_cursor[chunk_index]
                         .wrapping_add(1);
-                    let replay_block =
-                        (replay_ordinal as usize) % block_encoders.len().max(1);
+                    let replay_block = (replay_ordinal as usize) % block_encoders.len();
                     let pkt =
                         &block_encoders[replay_block].repair_packets(replay_ordinal, 1)[0];
                     return Ok(Some(

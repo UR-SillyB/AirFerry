@@ -9,8 +9,10 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
@@ -103,8 +105,18 @@ class ReceiveDetailActivity : ComponentActivity() {
         val crcOk = !crcUnknown && expectedCrc == receivedCrc
         val fileExists = recoveredFile?.exists() == true
 
+        // 折叠内屏/平板：内容列限宽居中，safeDrawing insets 避开系统栏/挖孔。
+        Box(
+            modifier = Modifier.fillMaxSize().background(BgDark),
+            contentAlignment = Alignment.TopCenter
+        ) {
         Column(
-            modifier = Modifier.fillMaxSize().background(BgDark).padding(24.dp),
+            modifier = Modifier
+                .fillMaxHeight()
+                .widthIn(max = 640.dp)
+                .windowInsetsPadding(WindowInsets.safeDrawing)
+                .verticalScroll(rememberScrollState())
+                .padding(24.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.Center
         ) {
@@ -205,6 +217,7 @@ class ReceiveDetailActivity : ComponentActivity() {
             ) {
                 Text("重新扫码", color = TextPrimary, fontSize = 16.sp)
             }
+        }
         }
     }
 

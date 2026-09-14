@@ -24,8 +24,10 @@ import androidx.camera.view.PreviewView
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.*
@@ -38,6 +40,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -255,6 +258,13 @@ class ScanActivity : ComponentActivity() {
         val recovery by recoveryStage
 
         BoxWithConstraints(modifier = Modifier.fillMaxSize().background(BgDark)) {
+            // 折叠屏内屏 / 平板（宽 ≥600dp）改双栏：进度环居左半、信息卡居
+            // 右半，内容避开屏幕中线（书折铰链）；外屏与手机保持原单列。
+            // 方向解锁（fullUser）后横屏矮视口（maxHeight < 520dp）也切双栏：
+            // 单列的环+信息卡+按钮排固定高约 540dp，矮屏会溢出并把底部按钮
+            // 推出屏幕，双栏 + 右栏滚动 + 小环（120dp）保证全部可达。
+            val twoPane = maxWidth >= 600.dp || maxHeight < 520.dp
+            val compactRing = maxHeight < 520.dp
 
             // Camera preview (full screen) — CameraX PreviewView + ImageAnalysis.
             AndroidView(
@@ -268,90 +278,37 @@ class ScanActivity : ComponentActivity() {
             )
 
             Column(
-                modifier = Modifier.fillMaxSize().padding(16.dp),
+                modifier = Modifier
+                    .fillMaxSize()
+                    .windowInsetsPadding(WindowInsets.safeDrawing)
+                    .padding(16.dp),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                Spacer(modifier = Modifier.height(40.dp))
-
-                // Circular progress indicator
-                CircularProgress(
-                    progress = state.progressPct / 100f,
-                    label = "${state.progressPct}%",
-                    sublabel = if (state.fileName.isNotEmpty()) state.fileName else "等待扫描…"
-                )
-
-                Spacer(modifier = Modifier.weight(1f))
-
-                // Bottom info card
-                if (state.totalSymbols > 0) {
-                    Card(
-                        modifier = Modifier.fillMaxWidth(),
-                        shape = RoundedCornerShape(16.dp),
-                        colors = CardDefaults.cardColors(containerColor = CardBg)
+                if (twoPane) {
+                    Row(
+                        modifier = Modifier.weight(1f).fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Column(modifier = Modifier.padding(20.dp)) {
-                            // 文件标题行（大号字体，仅文件名）
-                            if (state.fileName.isNotEmpty()) {
-                                Text(
-                                    state.fileName,
-                                    color = TextPrimary,
-                                    fontSize = 17.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    maxLines = 1,
-                                    modifier = Modifier.padding(bottom = 4.dp)
-                                )
-                            }
-                            // 大小行（原大小~压缩后大小）。压缩后大小来自描述符
-                            // （分段时为整条压缩流大小），不是线上含冗余的符号字节。
-                            val showOrig = state.fileSize > 0
-                            val showCompressed = state.compressedSize > 0
-                            if (showOrig || showCompressed) {
-                                val sizeStr = buildString {
-                                    if (showOrig) {
-                                        append(formatSize(state.fileSize))
-                                        if (showCompressed) append("~压缩后 ")
-                                    }
-                                    if (showCompressed) append(formatSize(state.compressedSize))
-                                }
-                                InfoRow("大小", sizeStr)
-                            }
-                            // 分段传输：明确当前收的是第几段。
-                            if (state.segmentCount > 1) {
-                                InfoRow("分段", "${state.segmentIndex + 1} / ${state.segmentCount}")
-                            }
-                            InfoRow("已识别符号", "${state.receivedSymbols} / ${state.totalSymbols}")
-                            InfoRow("解码速率", "${state.decodePerSec} 符号/秒")
-                            // 传输用时 + 近几秒滑动窗口速度（非全程平均）
-                            if (state.transferElapsedMs > 0) {
-                                val elapsedStr = formatDuration(state.transferElapsedMs)
-                                // 线上吞吐 = 最近 RATE_WINDOW_MS 内 Δ(符号×symbolSize)/Δt
-                                val speedStr = if (state.recentWireBps > 0)
-                                    formatSize(state.recentWireBps) + "/s" else ""
-                                InfoRow("用时", if (speedStr.isNotEmpty()) "$elapsedStr @ $speedStr" else elapsedStr)
-                            }
-                            LinearProgressIndicator(
-                                progress = { state.progressPct / 100f },
-                                modifier = Modifier.fillMaxWidth().padding(top = 12.dp),
-                                color = Accent,
-                                trackColor = Color(0xFF334155)
-                            )
+                        Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
+                            ScanProgress(state, ringSize = if (compactRing) 120.dp else 160.dp)
+                        }
+                        Column(
+                            modifier = Modifier
+                                .weight(1f)
+                                .widthIn(max = 420.dp)
+                                .verticalScroll(rememberScrollState()),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            ScanInfoCard(state)
+                            ScanStatusText(state, recovery)
                         }
                     }
-                    Spacer(modifier = Modifier.height(12.dp))
+                } else {
+                    ScanProgress(state)
+                    Spacer(modifier = Modifier.weight(1f))
+                    ScanInfoCard(state)
+                    ScanStatusText(state, recovery)
                 }
-
-                // Status text. A live recovery stage (assemble/CRC/save) takes
-                // precedence over the "文件恢复完成" snapshot, so the user sees
-                // the post-scan pipeline advancing instead of a frozen 100%.
-                Text(
-                    text = recovery ?: state.statusText,
-                    color = if (recovery != null) Accent
-                            else if (state.complete) Success else TextPrimary,
-                    fontSize = 16.sp,
-                    fontWeight = FontWeight.Bold,
-                    textAlign = TextAlign.Center,
-                    modifier = Modifier.fillMaxWidth()
-                )
 
                 Spacer(modifier = Modifier.height(16.dp))
 
@@ -379,15 +336,101 @@ class ScanActivity : ComponentActivity() {
     }
 
     @Composable
-    private fun CircularProgress(progress: Float, label: String, sublabel: String) {
+    private fun ScanProgress(state: UiState, ringSize: Dp = 160.dp) {
+        CircularProgress(
+            progress = state.progressPct / 100f,
+            label = "${state.progressPct}%",
+            sublabel = if (state.fileName.isNotEmpty()) state.fileName else "等待扫描…",
+            ringSize = ringSize
+        )
+    }
+
+    @Composable
+    private fun ScanInfoCard(state: UiState) {
+        if (state.totalSymbols > 0) {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(containerColor = CardBg)
+            ) {
+                Column(modifier = Modifier.padding(20.dp)) {
+                    // 文件标题行（大号字体，仅文件名）
+                    if (state.fileName.isNotEmpty()) {
+                        Text(
+                            state.fileName,
+                            color = TextPrimary,
+                            fontSize = 17.sp,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1,
+                            modifier = Modifier.padding(bottom = 4.dp)
+                        )
+                    }
+                    // 大小行（原大小~压缩后大小）。压缩后大小来自描述符
+                    // （分段时为整条压缩流大小），不是线上含冗余的符号字节。
+                    val showOrig = state.fileSize > 0
+                    val showCompressed = state.compressedSize > 0
+                    if (showOrig || showCompressed) {
+                        val sizeStr = buildString {
+                            if (showOrig) {
+                                append(formatSize(state.fileSize))
+                                if (showCompressed) append("~压缩后 ")
+                            }
+                            if (showCompressed) append(formatSize(state.compressedSize))
+                        }
+                        InfoRow("大小", sizeStr)
+                    }
+                    // 分段传输：明确当前收的是第几段。
+                    if (state.segmentCount > 1) {
+                        InfoRow("分段", "${state.segmentIndex + 1} / ${state.segmentCount}")
+                    }
+                    InfoRow("已识别符号", "${state.receivedSymbols} / ${state.totalSymbols}")
+                    InfoRow("解码速率", "${state.decodePerSec} 符号/秒")
+                    // 传输用时 + 近几秒滑动窗口速度（非全程平均）
+                    if (state.transferElapsedMs > 0) {
+                        val elapsedStr = formatDuration(state.transferElapsedMs)
+                        // 线上吞吐 = 最近 RATE_WINDOW_MS 内 Δ(符号×symbolSize)/Δt
+                        val speedStr = if (state.recentWireBps > 0)
+                            formatSize(state.recentWireBps) + "/s" else ""
+                        InfoRow("用时", if (speedStr.isNotEmpty()) "$elapsedStr @ $speedStr" else elapsedStr)
+                    }
+                    LinearProgressIndicator(
+                        progress = { state.progressPct / 100f },
+                        modifier = Modifier.fillMaxWidth().padding(top = 12.dp),
+                        color = Accent,
+                        trackColor = Color(0xFF334155)
+                    )
+                }
+            }
+            Spacer(modifier = Modifier.height(12.dp))
+        }
+    }
+
+    @Composable
+    private fun ScanStatusText(state: UiState, recovery: String?) {
+        // Status text. A live recovery stage (assemble/CRC/save) takes
+        // precedence over the "文件恢复完成" snapshot, so the user sees the
+        // post-scan pipeline advancing instead of a frozen 100%.
+        Text(
+            text = recovery ?: state.statusText,
+            color = if (recovery != null) Accent
+                    else if (state.complete) Success else TextPrimary,
+            fontSize = 16.sp,
+            fontWeight = FontWeight.Bold,
+            textAlign = TextAlign.Center,
+            modifier = Modifier.fillMaxWidth()
+        )
+    }
+
+    @Composable
+    private fun CircularProgress(progress: Float, label: String, sublabel: String, ringSize: Dp = 160.dp) {
         Box(contentAlignment = Alignment.Center) {
             Surface(
                 shape = CircleShape,
                 color = CardBg,
-                modifier = Modifier.size(160.dp)
+                modifier = Modifier.size(ringSize)
             ) {}
             // Progress ring
-            androidx.compose.foundation.Canvas(modifier = Modifier.size(160.dp)) {
+            androidx.compose.foundation.Canvas(modifier = Modifier.size(ringSize)) {
                 val stroke = 8.dp.toPx()
                 val diameter = size.minDimension - stroke
                 val topLeft = androidx.compose.ui.geometry.Offset(

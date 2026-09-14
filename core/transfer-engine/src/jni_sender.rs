@@ -57,6 +57,15 @@ fn read_metas(
         );
         return None;
     }
+    // Bound n BEFORE any with_capacity/iteration derived from it (the wire
+    // Manifest itself caps at af2::manifest::MAX_ENTRIES — 4096).
+    if n > af2::manifest::MAX_ENTRIES {
+        throw(
+            env,
+            &format!("sender meta arrays exceed the entry cap: {n} > {}", af2::manifest::MAX_ENTRIES),
+        );
+        return None;
+    }
     let mut sizes_vec = vec![0 as jlong; n];
     env.get_long_array_region(sizes, 0, &mut sizes_vec).ok()?;
     let mut metas = Vec::with_capacity(n);
@@ -82,7 +91,9 @@ fn read_metas(
 }
 
 fn session_mut(handle: jlong) -> Option<&'static mut SenderSession> {
-    if handle == 0 {
+    // Registry-backed liveness: null, destroyed, and forged handles all
+    // return None before the raw pointer cast (ffi_handle module).
+    if !crate::ffi_handle::is_live(handle as *const SenderSession) {
         None
     } else {
         Some(unsafe { &mut *(handle as *mut SenderSession) })
@@ -130,7 +141,7 @@ pub extern "system" fn Java_com_airferry_app_nativelib_NativeBridge_blake3Create
     _env: JNIEnv,
     _class: JClass,
 ) -> jlong {
-    Box::into_raw(Box::new(af2::id::new_hasher())) as jlong
+    crate::ffi_handle::register(Box::into_raw(Box::new(af2::id::new_hasher())), 0) as jlong
 }
 
 #[no_mangle]
@@ -140,8 +151,8 @@ pub extern "system" fn Java_com_airferry_app_nativelib_NativeBridge_blake3Update
     handle: jlong,
     bytes: JByteArray,
 ) {
-    if handle == 0 {
-        throw(&mut env, "blake3Update on null handle");
+    if !crate::ffi_handle::is_live(handle as *const af2::id::Blake3Hasher) {
+        throw(&mut env, "blake3Update on unknown handle");
         return;
     }
     let data = match env.convert_byte_array(&bytes) {
@@ -159,8 +170,10 @@ pub extern "system" fn Java_com_airferry_app_nativelib_NativeBridge_blake3Digest
     _class: JClass,
     handle: jlong,
 ) -> jni::sys::jbyteArray {
-    if handle == 0 {
-        throw(&mut env, "blake3Digest on null handle");
+    // Withdraw from the registry first: a double-digest or forged handle is
+    // a null result instead of a second free of the same allocation.
+    if crate::ffi_handle::take(handle as *mut af2::id::Blake3Hasher).is_none() {
+        throw(&mut env, "blake3Digest on unknown handle");
         return std::ptr::null_mut();
     }
     let hasher = unsafe { Box::from_raw(handle as *mut af2::id::Blake3Hasher) };
@@ -268,7 +281,7 @@ pub extern "system" fn Java_com_airferry_app_nativelib_NativeBridge_senderBuildS
         redundancy_pct: redundancy_pct as u8,
     };
     match SenderSession::new_streamed(metas_with_hash, config, chunk_table) {
-        Ok(session) => Box::into_raw(Box::new(session)) as jlong,
+        Ok(session) => crate::ffi_handle::register(Box::into_raw(Box::new(session)), 0) as jlong,
         Err(e) => {
             throw(&mut env, &e);
             0
@@ -282,7 +295,9 @@ pub extern "system" fn Java_com_airferry_app_nativelib_NativeBridge_senderDestro
     _class: JClass,
     handle: jlong,
 ) {
-    if handle != 0 {
+    // Withdraw from the registry first: a double-destroy or forged handle is
+    // a silent no-op instead of a second free of the same allocation.
+    if crate::ffi_handle::take(handle as *mut SenderSession).is_some() {
         unsafe { drop(Box::from_raw(handle as *mut SenderSession)) };
     }
 }

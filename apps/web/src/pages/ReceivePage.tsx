@@ -32,7 +32,7 @@ import {
 import iconUrl from "../../assets/receiver-icon128.png"
 import type { Recovered } from "@/receive/parse"
 import { ensureWasm } from "@/wasm/loader"
-import { createZipBlob } from "@/lib/zip"
+import { createZipBlob, sanitizeDownloadName } from "@/lib/zip"
 import {
   recordPartialTransfer,
   recordCompletedTransfer,
@@ -1682,7 +1682,7 @@ function TextView({
     const url = URL.createObjectURL(blob)
     const a = document.createElement("a")
     a.href = url
-    a.download = displayName
+    a.download = sanitizeDownloadName(displayName)
     a.click()
     // Firefox cancels the download if the URL is revoked synchronously.
     revokeDownloadUrlLater(url)
@@ -1726,7 +1726,7 @@ function FileView({
     const url = URL.createObjectURL(data)
     const a = document.createElement("a")
     a.href = url
-    a.download = name
+    a.download = sanitizeDownloadName(name)
     a.click()
     // Firefox cancels the download if the URL is revoked synchronously.
     revokeDownloadUrlLater(url)
@@ -1783,7 +1783,7 @@ function BundleView({
       const url = URL.createObjectURL(e.data)
       const a = document.createElement("a")
       a.href = url
-      a.download = e.name
+      a.download = sanitizeDownloadName(e.name)
       a.click()
       revokeDownloadUrlLater(url)
     }
@@ -1801,7 +1801,7 @@ function BundleView({
             const url = URL.createObjectURL(e.data)
             const a = document.createElement("a")
             a.href = url
-            a.download = e.name
+            a.download = sanitizeDownloadName(e.name)
             a.click()
             revokeDownloadUrlLater(url)
           }

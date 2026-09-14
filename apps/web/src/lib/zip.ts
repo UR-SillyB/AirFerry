@@ -69,6 +69,17 @@ export function sanitizeZipEntryPath(name: string): string {
 }
 
 /**
+ * Reduce an attacker-controlled manifest name to one safe download filename
+ * for `a.download`: the same traversal/drive/control stripping as
+ * [sanitizeZipEntryPath], then the final path component only. Browsers
+ * sanitize download names themselves, but the rules differ per engine —
+ * normalize once here so every receive path hands the same clean name.
+ */
+export function sanitizeDownloadName(name: string): string {
+  return sanitizeZipEntryPath(name).split("/").pop() || ZIP_FALLBACK_NAME
+}
+
+/**
  * Sanitization can collapse distinct attacker-controlled names (for example
  * `C:report.txt` and `report.txt`) onto the same archive member. Many unzip
  * tools silently let the later member overwrite the first one. Allocate a
@@ -139,11 +150,20 @@ export async function createZipBlob(entries: ZipEntryInput[]): Promise<Blob> {
   const encoder = new TextEncoder()
   const localParts: BlobPart[] = []
   const centralParts: BlobPart[] = []
+  const requestedPaths = entries.map((entry) => sanitizeZipEntryPath(entry.name))
   const usedPaths = new Set<string>()
+  // Reserve every implicit directory before allocating files, irrespective of
+  // input order. A file must not claim an ancestor needed by another member,
+  // including a directory whose name resembles a generated collision suffix.
+  for (const path of requestedPaths) {
+    for (let slash = path.indexOf("/"); slash >= 0; slash = path.indexOf("/", slash + 1)) {
+      usedPaths.add(path.slice(0, slash).toLowerCase())
+    }
+  }
   let currentOffset = 0n
 
-  for (const entry of entries) {
-    const cleanPath = uniqueZipEntryPath(usedPaths, sanitizeZipEntryPath(entry.name))
+  for (const [index, entry] of entries.entries()) {
+    const cleanPath = uniqueZipEntryPath(usedPaths, requestedPaths[index])
     const encodedName = encoder.encode(cleanPath)
     if (encodedName.length > 0xffff) throw new Error(`ZIP 文件名过长: ${entry.name}`)
     const data = asBlob(entry.data)

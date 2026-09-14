@@ -63,7 +63,9 @@ pub extern "C" fn airferry_native_abi_version() -> u32 {
 pub extern "C" fn airferry_receiver_create(sid_lo: u64, sid_hi: u64) -> *mut ReceiverSession {
     let sid: u128 = ((sid_hi as u128) << 64) | (sid_lo as u128);
     let session = ReceiverSession::new_pending(sid);
-    Box::into_raw(Box::new(session))
+    // Every handle crossing the ABI is registered: destroy/accessor paths
+    // reject double-destroy and forged pointers instead of UB.
+    crate::ffi_handle::register(Box::into_raw(Box::new(session)), 0)
 }
 
 /// Destroy a receiver created by [`airferry_receiver_create`]. Passing null is
@@ -75,6 +77,11 @@ pub extern "C" fn airferry_receiver_create(sid_lo: u64, sid_hi: u64) -> *mut Rec
 #[no_mangle]
 pub unsafe extern "C" fn airferry_receiver_destroy(handle: *mut ReceiverSession) {
     if handle.is_null() {
+        return;
+    }
+    // Withdraw from the registry first: a double-destroy or forged handle is
+    // a silent no-op instead of a second free of the same allocation.
+    if crate::ffi_handle::take(handle).is_none() {
         return;
     }
     // SAFETY: the caller obtained `handle` from `airferry_receiver_create` and
@@ -106,7 +113,7 @@ pub unsafe extern "C" fn airferry_receiver_ingest(
     frame_bytes: *const u8,
     frame_len: usize,
 ) -> u64 {
-    if handle.is_null() {
+    if !crate::ffi_handle::is_live(handle) {
         return ingest_status::INGEST_ERROR;
     }
     // SAFETY: caller guarantees `frame_bytes[..frame_len]` is a valid borrowed
@@ -120,7 +127,6 @@ pub unsafe extern "C" fn airferry_receiver_ingest(
     let session = unsafe { &mut *handle };
     session.ingest(slice)
 }
-
 /// Return 1 if the object is fully decoded, 0 otherwise (including a null
 /// handle).
 ///
@@ -129,7 +135,7 @@ pub unsafe extern "C" fn airferry_receiver_ingest(
 /// concurrently for the duration of this call.
 #[no_mangle]
 pub unsafe extern "C" fn airferry_receiver_is_complete(handle: *const ReceiverSession) -> i32 {
-    if handle.is_null() {
+    if !crate::ffi_handle::is_live(handle) {
         return 0;
     }
     // SAFETY: shared borrow; caller guarantees the handle is valid.
@@ -167,7 +173,7 @@ pub unsafe extern "C" fn airferry_receiver_assemble(
         *out_buf = std::ptr::null_mut();
         *out_len = 0;
     }
-    if handle.is_null() {
+    if !crate::ffi_handle::is_live(handle) {
         return 0;
     }
     // SAFETY: shared borrow; caller guarantees the handle is valid.
@@ -187,23 +193,33 @@ pub unsafe extern "C" fn airferry_receiver_assemble(
     1
 }
 
-/// Release a buffer returned by [`airferry_receiver_assemble`]. `ptr`/`len`
-/// must be exactly the values the assemble call wrote. Passing null/0 is a
-/// no-op. Do NOT call this on any pointer the host allocated itself.
+/// Release a buffer returned by [`airferry_receiver_assemble`] /
+/// [`airferry_receiver_assemble_chunk`] / [`airferry_decompress_bytes`].
+/// The allocation is freed with the length recorded when it was handed out,
+/// so a mismatched `len` argument is ignored rather than corrupting the
+/// allocator. Passing null, or any pointer this library did not issue (or
+/// already freed), is a no-op.
 ///
 /// # Safety
-/// A non-null `ptr` and `len` must be the exact, still-owned pair returned by
-/// `airferry_receiver_assemble`, and may be freed only once.
+/// A non-null `ptr` must be a pointer previously returned by this library
+/// and not yet freed via this function.
 #[no_mangle]
 pub unsafe extern "C" fn airferry_buffer_free(ptr: *mut u8, len: usize) {
-    if ptr.is_null() {
+    // Free with the REGISTERED length: a host passing a mismatched `len`
+    // previously sized the deallocation wrong and corrupted the allocator.
+    // Unregistered pointers (double free / host-allocated) are silent no-ops.
+    let Some(owned_len) = crate::ffi_handle::take(ptr) else {
         return;
+    };
+    if len != 0 && len != owned_len {
+        cffi_log(&format!(
+            "buffer_free: host length {len} != registered {owned_len} (freeing with registered)"
+        ));
     }
-    // SAFETY: `ptr` came from `Box::into_raw(slice.into_boxed_slice())` in
-    // `airferry_receiver_assemble`, with the same `len`. Reconstruct the slice
-    // and drop it to free the allocation.
+    // SAFETY: `ptr` came from a registered `Box::into_raw(slice)` with
+    // `owned_len`; reconstruct the slice and drop it to free the allocation.
     unsafe {
-        let slice = std::slice::from_raw_parts_mut(ptr, len);
+        let slice = std::slice::from_raw_parts_mut(ptr, owned_len);
         let _ = Box::from_raw(slice as *mut [u8]);
     }
 }
@@ -230,7 +246,7 @@ pub unsafe extern "C" fn airferry_receiver_assemble_chunk(
         *out_buf = std::ptr::null_mut();
         *out_len = 0;
     }
-    if handle.is_null() {
+    if !crate::ffi_handle::is_live(handle) {
         return 0;
     }
     let session = unsafe { &mut *handle };
@@ -238,7 +254,12 @@ pub unsafe extern "C" fn airferry_receiver_assemble_chunk(
         return 0;
     };
     let len = data.len();
-    let ptr = Box::into_raw(data.into_boxed_slice()) as *mut u8;
+    // Register the buffer so airferry_buffer_free can reject double frees and
+    // free with the authoritative length even if the host passes a wrong one.
+    let ptr = crate::ffi_handle::register(
+        Box::into_raw(data.into_boxed_slice()) as *mut u8,
+        len,
+    );
     unsafe {
         *out_buf = ptr;
         *out_len = len;
@@ -258,7 +279,7 @@ pub unsafe extern "C" fn airferry_receiver_assemble_chunk(
 pub unsafe extern "C" fn airferry_receiver_last_chunk_index(
     handle: *const ReceiverSession,
 ) -> i32 {
-    if handle.is_null() {
+    if !crate::ffi_handle::is_live(handle) {
         return -1;
     }
     let session = unsafe { &*handle };
@@ -280,7 +301,7 @@ pub unsafe extern "C" fn airferry_receiver_forget_chunk(
     handle: *mut ReceiverSession,
     index: u32,
 ) -> i32 {
-    if handle.is_null() {
+    if !crate::ffi_handle::is_live(handle) {
         return 0;
     }
     let session = unsafe { &mut *handle };
@@ -332,7 +353,10 @@ pub unsafe extern "C" fn airferry_decompress_bytes(
         return 0;
     }
     let len = out.len();
-    let ptr = Box::into_raw(out.into_boxed_slice()) as *mut u8;
+    let ptr = crate::ffi_handle::register(
+        Box::into_raw(out.into_boxed_slice()) as *mut u8,
+        len,
+    );
     unsafe {
         *out_buf = ptr;
         *out_len = len;
@@ -444,7 +468,7 @@ pub unsafe extern "C" fn airferry_receiver_progress_json(
     out: *mut u8,
     cap: usize,
 ) -> usize {
-    if handle.is_null() {
+    if !crate::ffi_handle::is_live(handle) {
         return 0;
     }
     let session = unsafe { &*handle };
@@ -472,14 +496,14 @@ pub unsafe extern "C" fn airferry_receiver_progress_json(
 pub unsafe extern "C" fn airferry_receiver_snapshot_json(
     handle: *const ReceiverSession,
 ) -> *mut c_char {
-    if handle.is_null() {
+    if !crate::ffi_handle::is_live(handle) {
         return std::ptr::null_mut();
     }
     let session = unsafe { &*handle };
     // A CString conversion only fails on interior NULs, which the JSON
     // escaping in snapshot_json rules out; fall back to null defensively.
     match std::ffi::CString::new(session.snapshot_json()) {
-        Ok(s) => s.into_raw(),
+        Ok(s) => crate::ffi_handle::register(s.into_raw(), 0),
         Err(_) => std::ptr::null_mut(),
     }
 }
@@ -498,7 +522,7 @@ pub unsafe extern "C" fn airferry_receiver_verify_chunk(
     raw_ptr: *const u8,
     raw_len: usize,
 ) -> i32 {
-    if handle.is_null() || (raw_ptr.is_null() && raw_len != 0) {
+    if !crate::ffi_handle::is_live(handle) || (raw_ptr.is_null() && raw_len != 0) {
         return 0;
     }
     let session = unsafe { &*handle };
@@ -523,7 +547,7 @@ pub unsafe extern "C" fn airferry_receiver_verify_final_stream(
     stream_ptr: *const u8,
     stream_len: usize,
 ) -> i32 {
-    if handle.is_null() || (stream_ptr.is_null() && stream_len != 0) {
+    if !crate::ffi_handle::is_live(handle) || (stream_ptr.is_null() && stream_len != 0) {
         return 0;
     }
     let session = unsafe { &*handle };
@@ -544,7 +568,7 @@ pub unsafe extern "C" fn airferry_receiver_verify_final_stream(
 pub unsafe extern "C" fn airferry_receiver_final_verify_begin(
     handle: *mut ReceiverSession,
 ) -> i32 {
-    if handle.is_null() {
+    if !crate::ffi_handle::is_live(handle) {
         return 0;
     }
     let session = unsafe { &mut *handle };
@@ -563,7 +587,7 @@ pub unsafe extern "C" fn airferry_receiver_final_verify_feed(
     stream_ptr: *const u8,
     stream_len: usize,
 ) -> i32 {
-    if handle.is_null() || (stream_ptr.is_null() && stream_len != 0) {
+    if !crate::ffi_handle::is_live(handle) || (stream_ptr.is_null() && stream_len != 0) {
         return 0;
     }
     let session = unsafe { &mut *handle };
@@ -584,7 +608,7 @@ pub unsafe extern "C" fn airferry_receiver_final_verify_feed(
 pub unsafe extern "C" fn airferry_receiver_final_verify_finish(
     handle: *mut ReceiverSession,
 ) -> i32 {
-    if handle.is_null() {
+    if !crate::ffi_handle::is_live(handle) {
         return 0;
     }
     let session = unsafe { &mut *handle };
@@ -607,7 +631,10 @@ pub unsafe extern "C" fn airferry_receiver_resume(
     completed_ptr: *const u32,
     completed_len: usize,
 ) -> i32 {
-    if handle.is_null() || root_ptr.is_null() || (completed_ptr.is_null() && completed_len != 0) {
+    if !crate::ffi_handle::is_live(handle)
+        || root_ptr.is_null()
+        || (completed_ptr.is_null() && completed_len != 0)
+    {
         return 0;
     }
     let session = unsafe { &mut *handle };
@@ -632,7 +659,7 @@ pub unsafe extern "C" fn airferry_receiver_invalidate_chunk(
     handle: *mut ReceiverSession,
     index: u32,
 ) -> i32 {
-    if handle.is_null() {
+    if !crate::ffi_handle::is_live(handle) {
         return 0;
     }
     let session = unsafe { &mut *handle };
@@ -647,10 +674,11 @@ pub unsafe extern "C" fn airferry_receiver_invalidate_chunk(
 /// [`airferry_receiver_snapshot_json`] that has not been freed yet.
 #[no_mangle]
 pub unsafe extern "C" fn airferry_free_string(ptr: *mut c_char) {
-    if ptr.is_null() {
+    // Unregistered pointers (double free / host-allocated) are silent no-ops.
+    if crate::ffi_handle::take(ptr).is_none() {
         return;
     }
-    // SAFETY: caller guarantees the provenance of `ptr`.
+    // SAFETY: provenance was verified against the registry above.
     unsafe { drop(std::ffi::CString::from_raw(ptr)) };
 }
 

@@ -28,6 +28,11 @@
   --radius: 16px;
   --radius-md: 12px;
   --radius-sm: 8px;
+  /* receive.css 历史弹窗引用（原先未定义，实际渲染为 0） */
+  --radius-lg: 20px;
+
+  /* 内容列左右留白基准（各断点覆盖；与挖孔 safe-area 取大者） */
+  --app-pad-x: 20px;
 
   /* 阴影 */
   --shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.05);
@@ -76,7 +81,10 @@ code {
 .app {
   max-width: 720px;
   margin: 0 auto;
-  padding: 32px 20px 48px;
+  /* 左右留白与挖孔 safe-area 取大者：viewport-fit=cover 下折叠屏外屏
+     （摄像头挖孔）与平板横屏（圆角）内容不被遮挡；未开启时 env 为 0。 */
+  padding: 32px max(var(--app-pad-x), env(safe-area-inset-right, 0px)) 48px
+    max(var(--app-pad-x), env(safe-area-inset-left, 0px));
   min-height: 100vh;
   min-height: 100dvh;
   display: flex;
@@ -469,15 +477,17 @@ code {
 }
 .file-list-item .file-list-ico.text-ico { background: #fef9c3; color: #a16207; }
 .file-list-text { display: flex; flex-direction: column; min-width: 0; }
+/* 文件名截断交给 flex 收缩链（item > name > text 均 min-width:0），
+   不再用 320px 绝对上限——折叠内屏/平板上会过早截断成窄条。 */
 .file-list-text strong {
   font-size: 14px;
   font-weight: 500;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  max-width: 320px;
+  max-width: 100%;
 }
-.file-list-text .muted { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 320px; }
+.file-list-text .muted { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
 .file-list-remove {
   flex-shrink: 0;
   display: flex;
@@ -698,8 +708,9 @@ code {
 }
 .qr-fullscreen-actions {
   position: fixed;
-  top: 12px;
-  right: 12px;
+  /* 避开挖孔/圆角：viewport-fit=cover 下全屏 QR 覆盖到屏幕边缘 */
+  top: max(12px, env(safe-area-inset-top, 0px));
+  right: max(12px, env(safe-area-inset-right, 0px));
   z-index: 10000;
   display: flex;
   gap: 8px;
@@ -946,14 +957,19 @@ code {
   }
 }
 
-/* ───────────── 响应式：平板 ≤900px ───────────── */
+/* ───────────── 响应式：≤900px（手机 / 折叠屏外屏） ───────────── */
 
 @media (max-width: 900px) {
-  .app { max-width: 92vw; padding: 24px 16px 40px; }
+  .app {
+    max-width: 92vw;
+    --app-pad-x: 16px;
+    padding: 24px max(var(--app-pad-x), env(safe-area-inset-right, 0px)) 40px
+      max(var(--app-pad-x), env(safe-area-inset-left, 0px));
+  }
   .app-main { padding: 24px; min-height: 360px; }
 }
 
-/* ───────────── 响应式：手机 ≤600px ───────────── */
+/* ───────────── 响应式：手机 ≤600px（折叠屏外屏） ───────────── */
 
 @media (max-width: 600px) {
   .segment-info { align-items: flex-start; flex-direction: column; gap: 4px; }
@@ -962,7 +978,12 @@ code {
   .segment-jump { grid-column: 1 / -1; grid-row: 1; justify-content: center; }
   :root { --space-page: 18px; }
 
-  .app { max-width: 100%; padding: 18px 12px 32px; }
+  .app {
+    max-width: 100%;
+    --app-pad-x: 12px;
+    padding: 18px max(var(--app-pad-x), env(safe-area-inset-right, 0px)) 32px
+      max(var(--app-pad-x), env(safe-area-inset-left, 0px));
+  }
   .app-header { gap: 12px; margin-bottom: 18px; }
   .app-logo { width: 38px; height: 38px; }
   .app-logo img { width: 26px; height: 26px; }
@@ -1014,4 +1035,44 @@ code {
 @media (max-width: 340px) {
   .step-label { display: none; }
   .step { gap: 0; }
+}
+
+/* ───────────── 响应式：>600px 折叠屏内屏 / 小平板 ─────────────
+   小米 18 Fold 等阔折叠内屏竖屏约 850-990 CSS px 宽、比例 ≈ 1.1:1，
+   落在原 600-900 区间时 QR 画布被 600px 上限卡住。放大画布并加视口
+   高度约束（横屏矮视口不溢出），扫码距离更远、模块像素更足。 */
+@media (min-width: 601px) {
+  /* height:auto + aspect-ratio：宽度被容器 max-width 钳制时高度同步收缩，
+     始终保持正方形。若 width/height 分别声明 min()，钳制只作用于宽度，
+     画布会竖向拉伸、QR 模块变形，劣化扫码。
+     vw 系数与 ≤900 容器节奏一致（92vw）：窄内屏书折（约 604-700 CSS px）
+     下画布不小于旧版 min(600px, 92vw)，超宽部分由容器钳制。 */
+  .qr-canvas { width: min(640px, 92vw, 74vh); height: auto; aspect-ratio: 1 / 1; }
+}
+
+@media (min-width: 1280px) {
+  .qr-canvas { width: min(720px, 92vw, 74vh); }
+}
+
+/* ───────────── 响应式：≥1024px 平板 / 折叠内屏横屏 ─────────────
+   容器只在选择页放宽到 1040px；页面元素（含拖放区）整体铺满容器宽，
+   文件列表限高内部滚动，避免长列表把页面撑得过长。
+   播放/统计/设置页保持 720px 经典栏宽，表单控件与主按钮不被拉宽。
+   :has() 需 Chrome 105+；更旧浏览器自动回退为单列 720px，无功能损失。 */
+@media (min-width: 1024px) {
+  .app:has(.dropzone) { max-width: 1040px; }
+  .app:has(.dropzone) .app-main { padding: 32px; }
+
+  .page:has(> .dropzone) > .dropzone { min-height: 220px; }
+  .page:has(> .dropzone) > .file-list { max-height: 48vh; overflow-y: auto; }
+
+  .modal-card { max-width: 480px; }
+}
+
+/* ───────────── 响应式：341-400px 窄长外屏过渡 ─────────────
+   外屏（约 445-520 CSS px）落在 ≤600 手机档，但 341-400px 段步骤条
+   最挤：收紧间距，给 4 个中文标签留出余地（≤340 仍隐藏标签）。 */
+@media (max-width: 400px) {
+  .step { gap: 4px; }
+  .step-line { margin: 0 4px; min-width: 6px; }
 }

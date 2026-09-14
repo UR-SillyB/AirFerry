@@ -1,6 +1,6 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
-import { createZipBlob, crc32, sanitizeZipEntryPath } from "../src/lib/zip.ts"
+import { createZipBlob, crc32, sanitizeDownloadName, sanitizeZipEntryPath } from "../src/lib/zip.ts"
 
 test("crc32 calculates correct IEEE standard checksum", () => {
   const encoder = new TextEncoder()
@@ -110,4 +110,53 @@ test("createZipBlob keeps names unique after sanitization and case folding", asy
   }
   assert.deepEqual(names, ["report.txt", "report (1).txt", "REPORT (1) (1).txt"])
   assert.equal(new Set(names.map((name) => name.toLowerCase())).size, names.length)
+})
+
+for (const requested of [
+  ["C:a", "a/b.txt"],
+  ["a/b.txt", "C:a"],
+  ["A", "a/b.txt"],
+  ["a", "a (1)/b.txt", "a/b.txt"],
+  ["root/a", "root/a/b.txt", "root/a (1)/c.txt"],
+  ["C:a", "a/b.txt", "a/c.txt", "a (1)"],
+]) {
+  test(`createZipBlob preserves files without ancestor collisions: ${requested.join(", ")}`, async () => {
+    const blob = await createZipBlob(requested.map((name, i) => ({
+      name, data: Uint8Array.from([i + 1]),
+    })))
+    const bytes = new Uint8Array(await blob.arrayBuffer())
+    const view = new DataView(bytes.buffer)
+    const names = []
+    let offset = 0
+    for (let i = 0; i < requested.length; i++) {
+      assert.equal(view.getUint32(offset, true), 0x04034b50)
+      const size = view.getUint32(offset + 18, true)
+      const nameLength = view.getUint16(offset + 26, true)
+      const extraLength = view.getUint16(offset + 28, true)
+      names.push(new TextDecoder().decode(bytes.subarray(offset + 30, offset + 30 + nameLength)))
+      const dataOffset = offset + 30 + nameLength + extraLength
+      assert.deepEqual(bytes.subarray(dataOffset, dataOffset + size), Uint8Array.from([i + 1]))
+      offset = dataOffset + size
+    }
+    const folded = names.map((name) => name.toLowerCase())
+    assert.equal(new Set(folded).size, requested.length)
+    for (const name of folded) {
+      assert.ok(!folded.some((other) => other.startsWith(`${name}/`)), `file is also a directory: ${name}`)
+    }
+    for (let i = 0; i < requested.length; i++) {
+      const clean = sanitizeZipEntryPath(requested[i])
+      if (clean.includes("/")) {
+        assert.equal(names[i].slice(0, names[i].lastIndexOf("/")), clean.slice(0, clean.lastIndexOf("/")))
+      }
+    }
+  })
+}
+
+test("sanitizeDownloadName reduces a hostile manifest name to one safe filename", () => {
+  assert.equal(sanitizeDownloadName("report.txt"), "report.txt")
+  assert.equal(sanitizeDownloadName("../../etc/passwd"), "passwd")
+  assert.equal(sanitizeDownloadName("C:/Users/me/secret.txt"), "secret.txt")
+  assert.equal(sanitizeDownloadName("dir/sub/name.bin"), "name.bin")
+  assert.equal(sanitizeDownloadName(".."), "unnamed")
+  assert.equal(sanitizeDownloadName("bad\u0007name"), "badname")
 })

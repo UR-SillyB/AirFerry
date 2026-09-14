@@ -66,6 +66,30 @@ public sealed class ChunkSpillStore : IDisposable
         {
             throw new ArgumentOutOfRangeException(nameof(index), "invalid spill chunk");
         }
+        // Free-space preflight: a hostile broadcast can legally declare a
+        // multi-gigabyte transfer (host receive ceiling), and the sparse write
+        // would otherwise fill the disk mid-transfer with a late "disk full"
+        // failure. Fail here, before any byte is touched, so the caller's
+        // existing I/O failure path (pause + rollback) surfaces early.
+        long needed = (long)(index + 1) * chunkRawSize;
+        try
+        {
+            string? root = Path.GetPathRoot(Path.GetFullPath(_path));
+            if (root is not null)
+            {
+                DriveInfo drive = new(root);
+                if (drive.AvailableFreeSpace < needed)
+                {
+                    throw new IOException(
+                        $"insufficient space for AF2 spill ({drive.AvailableFreeSpace} free, {needed} needed)");
+                }
+            }
+        }
+        catch (ArgumentException)
+        {
+            // UNC / unmapped roots cannot be queried — fall through to the
+            // write itself and let the filesystem report actual exhaustion.
+        }
         // A rewrite can partially damage a previously-good range before an
         // I/O/Flush(true) failure is reported. Withdraw the durable bit first;
         // only a fully flushed replacement may add it back.

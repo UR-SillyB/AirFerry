@@ -2,6 +2,7 @@ package com.airferry.app.scan
 
 import java.io.File
 import java.io.FileOutputStream
+import java.io.IOException
 import java.io.RandomAccessFile
 
 /**
@@ -49,6 +50,18 @@ class ChunkSpillStore(dir: File, transferIdHex: String) {
         require(index in 0 until MAX_CHUNK_COUNT && chunkRawSize > 0 && bytes.isNotEmpty() &&
             bytes.size <= chunkRawSize) {
             "invalid spill chunk"
+        }
+        // Free-space preflight: a hostile broadcast can legally declare a
+        // multi-gigabyte transfer (HOST_MAX_RECEIVE_BYTES ceiling), and the
+        // sparse pwrite would otherwise fill the disk mid-transfer with a
+        // late ENOSPC. Fail here, before any byte is touched, so the caller's
+        // existing I/O failure path (pause + rollback) surfaces early.
+        val needed = (index + 1).toLong() * chunkRawSize.toLong()
+        val dir = path.parentFile
+        if (dir != null && dir.usableSpace < needed) {
+            throw IOException(
+                "insufficient space for AF2 spill (${dir.usableSpace} free, $needed needed)"
+            )
         }
         // A rewrite can partially damage a previously-good range before an
         // I/O/fsync failure is reported. Withdraw the durable bit up front and

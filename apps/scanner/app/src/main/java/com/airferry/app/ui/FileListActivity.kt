@@ -13,8 +13,9 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -249,7 +250,13 @@ class FileListActivity : ComponentActivity() {
             }
         }
 
-        Column(modifier = Modifier.fillMaxSize().background(BgDark)) {
+        // safeDrawing insets：折叠内外屏/横竖姿态下避开系统栏与挖孔。
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(BgDark)
+                .windowInsetsPadding(WindowInsets.safeDrawing)
+        ) {
             Row(
                 modifier = Modifier.fillMaxWidth().padding(20.dp),
                 verticalAlignment = Alignment.CenterVertically
@@ -379,9 +386,12 @@ class FileListActivity : ComponentActivity() {
                     Text("暂无接收文件或待恢复任务", color = TextSecondary, fontSize = 16.sp, textAlign = TextAlign.Center)
                 }
             } else {
-                LazyColumn(
+                // 折叠内屏/平板：自适应网格（每列最小 340dp），宽屏自动多列排布。
+                LazyVerticalGrid(
+                    columns = GridCells.Adaptive(minSize = 340.dp),
                     modifier = Modifier.weight(1f).padding(horizontal = 16.dp),
                     verticalArrangement = Arrangement.spacedBy(10.dp),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
                     contentPadding = PaddingValues(bottom = if (inSelectionMode) 88.dp else 24.dp)
                 ) {
                     items(rows, key = { it.key }) { row ->

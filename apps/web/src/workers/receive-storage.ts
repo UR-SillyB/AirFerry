@@ -44,6 +44,15 @@ export class ChunkStore {
   private transferId = ""
   private completedIndices = new Set<number>()
   /**
+   * Last origin quota estimate (quota − usage), or null when the browser does
+   * not expose navigator.storage.estimate. Used as a free-space preflight so a
+   * hostile multi-gigabyte transfer fails early with the fatal error channel
+   * instead of an opaque QuotaExceededError deep into the receive loop.
+   * Decremented optimistically per durable write; re-estimated periodically.
+   */
+  private opfsFreeBytes: number | null = null
+  private opfsWritesSinceEstimate = 0
+  /**
    * A completed result may expose Blob slices backed by the OPFS partial.
    * Once release() hands those Blobs to the UI, a subsequent UI reset must not
    * immediately unlink the backing file while a browser download is still
@@ -99,10 +108,22 @@ export class ChunkStore {
       if (typeof (this.opfsFile as any).createSyncAccessHandle === "function") {
         this.syncHandle = await (this.opfsFile as any).createSyncAccessHandle()
       }
+      this.opfsFreeBytes = await this.estimateOpfsFreeBytes()
+      this.opfsWritesSinceEstimate = 0
     } catch {
       this.opfsFile = null
       this.syncHandle = null
     }
+  }
+
+  private async estimateOpfsFreeBytes(): Promise<number | null> {
+    try {
+      const est = await navigator.storage?.estimate?.()
+      if (est && typeof est.quota === "number") {
+        return Math.max(0, est.quota - (est.usage ?? 0))
+      }
+    } catch {}
+    return null
   }
 
   writeChunk(
@@ -137,6 +158,12 @@ export class ChunkStore {
       }
     }
     if (this.syncHandle && chunkRawSize > 0) {
+      // Free-space preflight against the last quota estimate (refreshed every
+      // 64 durable writes): fail early with the fatal channel instead of an
+      // opaque QuotaExceededError mid-transfer.
+      if (this.opfsFreeBytes !== null && bytes.byteLength > this.opfsFreeBytes) {
+        throw new Error("AF2_STORAGE_FATAL: OPFS 存储空间不足")
+      }
       try {
         const written = this.syncHandle.write(bytes, { at })
         if (written !== bytes.byteLength) {
@@ -148,6 +175,15 @@ export class ChunkStore {
         if (previous) this.memoryBytes -= previous.byteLength
         this.memory.delete(index)
         this.completedIndices.add(index)
+        if (this.opfsFreeBytes !== null) {
+          this.opfsFreeBytes = Math.max(0, this.opfsFreeBytes - bytes.byteLength)
+        }
+        if (++this.opfsWritesSinceEstimate >= 64) {
+          this.opfsWritesSinceEstimate = 0
+          void this.estimateOpfsFreeBytes().then((free) => {
+            if (free !== null) this.opfsFreeBytes = free
+          })
+        }
         return "disk"
       } catch {
         // Keep the known-good bytes in memory. Do not mark this chunk as
