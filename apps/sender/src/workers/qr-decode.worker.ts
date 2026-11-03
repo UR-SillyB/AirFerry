@@ -77,11 +77,17 @@ async function loadFastBackend(): Promise<boolean> {
       locateFile?: (path: string, prefix: string) => string
     } | undefined
 
-    if (
-      standaloneGlobals.__AIRFERRY_STANDALONE__ &&
+    const standalone = standaloneGlobals.__AIRFERRY_STANDALONE__ === true
+    const hasInlinedFast = Boolean(
       standaloneGlobals.__ZXING_FAST_JS__ &&
-      standaloneGlobals.__ZXING_FAST_WASM__
-    ) {
+        standaloneGlobals.__ZXING_FAST_WASM__
+    )
+    // A standalone build may intentionally ship without the optional FAST
+    // artifact; go straight to compat instead of resolving a public path that
+    // cannot exist under file://.
+    if (standalone && !hasInlinedFast) return false
+
+    if (standalone && hasInlinedFast) {
       // file:// cannot resolve the public airferry_zxing.js path. Import the
       // inlined glue from a Blob URL and hand the wasm bytes to Emscripten's
       // wasmBinary hook so it never fetches. locateFile is also supplied because
