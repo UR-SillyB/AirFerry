@@ -25,6 +25,7 @@ set -euo pipefail
 #   airferry-sender-web-v<VER>.zip              网页发送端静态站点
 #   airferry-receiver-web-v<VER>.zip            网页接收端静态站点（receiver.html）
 #   airferry-sender-web-standalone-v<VER>.html  网页发送端单文件版（双击即用，file:// 可运行）
+#   airferry-receiver-web-standalone-v<VER>.html 网页接收端单文件版（双击即用，Chrome/Edge，file:// 可运行）
 #   airferry-extension.pem                      Chrome 签名私钥（须预先配置）
 #
 # ⚠️ 上传 Release 切勿用裸 `gh release upload ... dist/*`：dist/ 同时存放
@@ -247,7 +248,18 @@ build_web() {
   # ② 接收端：vite.receiver.config.ts 单入口 receiver.html → dist-receiver/
   npm run build:receiver 2>&1 | grep -E 'built in|error|✖' | while read -r line; do info "$line"; done
   info "接收端网页构建完成 → apps/web/dist-receiver/（receiver.html）"
-  # ③ 发送端单文件版：vite.standalone.config.ts + build-standalone.cjs → dist-standalone/index.html
+  # ③ 接收端单文件版：vite.receiver-standalone.config.ts + build-receiver-standalone.cjs
+  #    → dist-receiver-standalone/index.html，双击在 file://（Chrome/Edge）下运行。
+  npm run build:receiver:standalone 2>&1 | grep -E 'single-file|error|✖' | while read -r line; do info "$line"; done
+  if [[ -f "$ROOT/apps/web/dist-receiver-standalone/index.html" ]]; then
+    mkdir -p "$ROOT/dist"
+    cp "$ROOT/apps/web/dist-receiver-standalone/index.html" \
+       "$ROOT/dist/airferry-receiver-web-standalone-v${VER}.html"
+    info "接收端单文件版 → dist/airferry-receiver-web-standalone-v${VER}.html（双击即用，Chrome/Edge）"
+  else
+    warn "接收端单文件版构建产物缺失：apps/web/dist-receiver-standalone/index.html，跳过复制到 dist/"
+  fi
+  # ④ 发送端单文件版：vite.standalone.config.ts + build-standalone.cjs → dist-standalone/index.html
   #    产物按版本规范命名并复制到 dist/（airferry-sender-web-standalone-v<VER>.html），
   #    双击即可在 file:// 下运行（发送端，不含接收端）。
   npm run build:standalone 2>&1 | grep -E 'Standalone|error|✖' | while read -r line; do info "$line"; done
@@ -310,6 +322,7 @@ pack_dist() {
         "$ROOT/dist"/airferry-firefox-*.xpi \
         "$ROOT/dist"/airferry-sender-web-*.zip \
         "$ROOT/dist"/airferry-sender-web-standalone-*.html \
+        "$ROOT/dist"/airferry-receiver-web-standalone-*.html \
         "$ROOT/dist"/airferry-receiver-web-*.zip \
         "$ROOT/dist"/airferry-web-*.zip
 
@@ -355,6 +368,16 @@ pack_dist() {
     info "接收端网页 → dist/airferry-receiver-web-v${VER}.zip（receiver.html）"
   else
     warn "未找到接收端网页构建产物（${web_receiver_dist}）。如需打包，先运行: ./scripts/build-all.sh web"
+  fi
+
+  # 接收端单文件版（自包含 HTML，双击 file:// 即用，Chrome/Edge）。与发送端
+  # 单文件版同理，pack_dist 清旧产物后按 warn 模式重建，缺失不中断。
+  local receiver_standalone="$ROOT/apps/web/dist-receiver-standalone/index.html"
+  if [[ -f "$receiver_standalone" ]]; then
+    cp "$receiver_standalone" "$ROOT/dist/airferry-receiver-web-standalone-v${VER}.html"
+    info "接收端单文件版 → dist/airferry-receiver-web-standalone-v${VER}.html（双击即用，Chrome/Edge）"
+  else
+    warn "未找到接收端单文件版构建产物（${receiver_standalone}）。如需打包，先运行: ./scripts/build-all.sh web"
   fi
 
   # 发送端单文件版（自包含 HTML，双击 file:// 即用）。build_web 构建时已复制一份

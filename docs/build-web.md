@@ -22,7 +22,7 @@ npm run wasm           # 生成 legacy/simd 两个标量变体（simd 为历史�
 
 > 网页端明确使用现代/MV3 变体。`prepare-wasm.cjs` 每次都校验 sender 的 `wasm-pkg-simd`，持跨进程锁原子复制到 **web 自有**的 `apps/web/wasm-pkg/`；扩展构建切换自己的 MV2/MV3 包时不会改动 Vite 正在读取的文件。
 
-> 若 `apps/sender/wasm-pkg-simd/{transfer_engine.js,transfer_engine_bg.wasm}` 不完整，`predev`/`prebuild`/`prebuild:standalone` 会报错退出并提示先跑此步。
+> 若 `apps/sender/wasm-pkg-simd/{transfer_engine.js,transfer_engine_bg.wasm}` 不完整，`predev`/`prebuild`/`prebuild:standalone`/`prebuild:receiver:standalone` 会报错退出并提示先跑此步。
 
 > **FAST ZXing-C++（接收端加速后端）**：`build_web` 在 **emcc 可用时**通过 `scripts/build-fastzxing.sh --use-cache` 重编 `airferry_zxing.js/.wasm` 到 `apps/sender/src/fastzxing/`，再被 `prepare-wasm.cjs` 拷到 `public/`（此前 `build-all.sh` 从不调用它，本地发布可能带上一次遗留的旧快路径产物）。**emcc 缺失时 `build_web` 显式 `warn`（不静默）**，接收端回退 zxing-wasm 兼容后端，构建不中断；发布前请在带 Emscripten 的环境运行 `./scripts/build-fastzxing.sh` 以确保 FAST 快路径最新。
 
@@ -41,19 +41,20 @@ npm run preview        # 本地预览构建产物（默认 http://localhost:4173
 1. 校验 `apps/sender/wasm-pkg-simd` 的 JS + WASM，并持锁原子复制到 `apps/web/wasm-pkg/`
 2. 把 `@foxglove/wasm-zstd/dist/wasm-zstd.wasm` 拷到 `apps/web/public/wasm-zstd.wasm`（供压缩 worker 运行时 fetch）
 
-`npm run build:standalone` 也有相同的 `prebuild:standalone` 前置，不会在缺少 `wasm-zstd.wasm` 时先成功打包、再在后处理阶段失败。
+`npm run build:standalone` / `npm run build:receiver:standalone` 也有相同的 `prebuild*` 前置，不会在缺少 `wasm-zstd.wasm` / `zxing_reader.wasm` 时先成功打包、再在后处理阶段失败。
 
 ## 构建命令（发送端 / 接收端拆分）
 
 v1.1.6 起发送端与接收端**分开构建、独立 zip**：
 
 ```bash
-npm run build           # 发送端 → dist/（index.html 单入口）
-npm run build:receiver  # 接收端 → dist-receiver/（receiver.html 单入口）
-npm run build:standalone  # 发送端单文件版 → dist-standalone/index.html
+npm run build                     # 发送端 → dist/（index.html 单入口）
+npm run build:receiver            # 接收端 → dist-receiver/（receiver.html 单入口）
+npm run build:standalone          # 发送端单文件版 → dist-standalone/index.html
+npm run build:receiver:standalone # 接收端单文件版 → dist-receiver-standalone/index.html
 ```
 
-两个产物各自自包含、可独立部署；发送端 zip 打包时排除 `zxing_reader.wasm`（接收端 QR 解码专用）。
+多文件产物各自自包含、可独立部署；发送端 zip 打包时排除 `zxing_reader.wasm`（接收端 QR 解码专用）。接收端单文件版内联全部 Worker/WASM，Chrome/Edge 双击 `file://` 即用。
 
 ## 产物结构
 
@@ -84,6 +85,9 @@ apps/web/dist-receiver/            # 接收端（airferry-receiver-web-v{VER}.zi
     ├── transfer_engine_bg-*.wasm  # Rust 核心引擎
     ├── lzma_wasm_bg-*.wasm        # xz 解压 WASM
     └── receiver-icon128-*.png     # 接收端页面品牌图标
+
+apps/web/dist-receiver-standalone/ # 接收端单文件版（airferry-receiver-web-standalone-v{VER}.html）
+└── index.html                     # 唯一产物（约 6.4 MB；主 bundle + 两个 Worker + 全部 WASM 已内联）
 ```
 
 ## 部署
@@ -98,7 +102,7 @@ apps/web/dist-receiver/            # 接收端（airferry-receiver-web-v{VER}.zi
 
 ### 局域网 HTTPS 接收端测试（`serve-https.mjs`）
 
-> ⚠️ **网页接收端不能像发送端单文件版那样双击打开**：它是多文件静态站点（module 脚本/Worker/WASM 均为独立文件），必须先部署。`getUserMedia` 要求安全上下文；常规部署需 HTTPS 或 localhost（普通 http 非 localhost 不可用）。注意 Chromium 的 `file://` 本身是安全上下文（Chrome 实测摄像头与 Blob module worker 可用），所以单文件接收端在 Chrome/Edge 技术上可行，但当前未提供该构建目标——需要把 receive/qr Worker 与全部 WASM 内联并用 Blob URL/`wasmBinary` 注入。局域网真机扫码测试仍建议用 HTTPS 静态服务器。
+> 网页接收端有两种形态：多文件 `dist-receiver/` 需部署到 HTTPS/localhost；**单文件 `dist-receiver-standalone/index.html`** 在 Chrome/Edge 下可双击 `file://` 运行（见下文「接收端单文件版」）。`getUserMedia` 要求安全上下文；Chromium 的 `file://` 属于安全上下文，Safari/Firefox 未验证。局域网真机扫码测试仍建议用 HTTPS 静态服务器。
 
 仓库自带最小实现：
 
@@ -135,7 +139,7 @@ node scripts/serve-https.mjs dist-receiver .cert/selfsigned.crt .cert/selfsigned
 
 两端共用同一份 `apps/sender/src/options.tsx`——zstd 预加载走共享助手 `apps/sender/src/wasm/zstdPreload.ts` 的 `preloadZstdBytes()`：用 `typeof chrome !== "undefined"` 做环境自适应，扩展走 `chrome.runtime.getURL`，网页走 `new URL("wasm-zstd.wasm", document.baseURI)`，行为各自正确（见 `AGENTS.md` §5.8）。网页接收端的 receive worker 也由 `ReceivePage` 用同一助手**在 post `init` 前 `await` 预加载**并 post `wasm-init`（worker 消息 FIFO 保证先于 assemble；worker 内 `initZstdFromBytes` 安装）。`compress.ts` 的兜底 fetch 按执行环境分流：主线程（`document`）走 `document.baseURI` 同级路径（子路径部署正确），打包 worker（脚本在 `assets/` 下）走 `../wasm-zstd.wasm`——曾统一按 worker 自身 URL 相对 fetch 解析到 `assets/wasm-zstd.wasm` 404（文件在站点根），导致 zstd 压缩传输在接收完成时报错。
 
-## 单文件版（双击运行，无需服务器）
+## 发送端单文件版（双击运行，无需服务器）
 
 普通 `dist/` 需要静态服务器（因为 ES module 脚本在 `file://` 下被浏览器禁止）。**单文件版**把所有资源内联进一个 `index.html`，**双击即可在 `file://` 下运行**，无需任何服务器。
 
@@ -192,10 +196,45 @@ npm run build:standalone    # 产出自包含单文件 dist-standalone/index.htm
 | Worker | ES module worker（`new Worker(url, {type:"module"})`） | Blob URL classic worker |
 | 体积 | 总和约 1.2MB（可 gzip） | 约 2MB（单文件，无 gzip） |
 
+## 接收端单文件版（双击运行，Chrome/Edge）
+
+多文件 `dist-receiver/` 仍需 HTTP(S)/localhost。**接收端单文件版**把主 bundle、两个 Worker、全部 WASM 内联进一个 HTML，Chrome/Edge 下可双击 `file://` 运行（`getUserMedia` 可用；Safari/Firefox 未验证）。
+
+### 构建与使用
+
+```bash
+cd apps/web
+npm run build:receiver:standalone   # → dist-receiver-standalone/index.html（约 6.4 MB）
+```
+
+双击该文件 → 选择摄像头/屏幕捕获 → 开始接收。手机场景仍建议用 HTTPS/localhost 的多文件版（手机通常拿不到电脑上的这个文件）。
+
+### 与发送端单文件版的差异
+
+| 维度 | 发送端单文件 | 接收端单文件 |
+|------|--------------|--------------|
+| 入口 | `src/standalone.tsx` | `src/receiver-standalone.tsx` |
+| Worker | 1 个 compress worker，classic Blob worker | receive + qr-decode 两个 Worker，**module Blob worker**（含 `import.meta.url`） |
+| WASM | transfer_engine + zstd + lzma | transfer_engine + zstd + lzma + FAST ZXing（`airferry_zxing.js/.wasm`）+ `zxing_reader.wasm` |
+| 体积 | 约 2 MB | 约 6.4 MB |
+
+### 关键实现
+
+1. 主 bundle 为 IIFE；Worker 源码由后处理脚本注入 `__RECEIVE_WORKER_CODE__` / `__QR_WORKER_CODE__`，`ReceivePage` 用 module Blob URL 启动。
+2. receive Worker 预置 `__WASM_TRANSFER_ENGINE__`（base64），`loader.ts` 的 `init(buffer)` 直接实例化，不 fetch。
+3. QR Worker 预置 `__ZXING_FAST_JS__`/`__ZXING_FAST_WASM__`/`__ZXING_READER_WASM__`。FAST 必须同时传 `wasmBinary` 和 `locateFile`：Emscripten 的 `findWasmBinary()` 即使有 `wasmBinary` 也会先走 `locateFile`，而 Blob 模块的 `import.meta.url` 不能作为相对 URL 基址（否则 `Failed to construct 'URL': Invalid URL`）。
+4. 兼容后端 `getZXingModule({locateFile})` 返回 wasm 的 Blob URL，避免 `file://` 相对路径 fetch。
+5. zstd 仍由主线程 `preloadZstdBytes()` 解码 `__WASM_ZSTD__` 后 `postMessage` 给 receive Worker。
+
+### 验证
+
+用 Chrome 假摄像头（`--use-file-for-fake-video-capture`）灌入 Python 发送端生成的 MP4/Y4M，单文件接收端在 `file://` 下成功恢复 `af-test.bin`，CRC 通过，FAST 后端 `fast=true`（Y 平面路径）。
+
 ## 调试
 
 | 症状 | 原因 | 解决 |
 |------|------|------|
 | 启动报 `transfer_engine.js not found` | `apps/sender/wasm-pkg-simd/` 缺失或不完整 | `cd apps/sender && npm run wasm`，再重跑 web 命令 |
 | 压缩总是 100%（走 raw） | `public/wasm-zstd.wasm` 缺失，worker fetch 404 | 重跑 `npm run build`（触发 `prebuild`→prepare-wasm） |
+| 接收端单文件版 `fast=false` 或 `Failed to construct 'URL': Invalid URL` | FAST glue 的 `findWasmBinary()` 在 Blob 模块里解析相对 URL | 确认 `link-wasm.sh` 导出 `HEAPU8,HEAPU32` 并用 `em++`；FAST 工厂同时传 `wasmBinary` 与 `locateFile`（wasm Blob URL） |
 | 跨工程 import 报 `@/options` 找不到 | Vite alias 未生效 | 确认 `vite.config.ts` 的 `resolve.alias` 含 `{ find: "@/", replacement: ".../sender/src/" }` |

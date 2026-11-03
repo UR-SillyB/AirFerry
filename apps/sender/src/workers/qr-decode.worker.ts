@@ -23,8 +23,27 @@
 
 /// <reference lib="webworker" />
 
+import { base64ToBuffer } from "@/wasm/base64"
+
+/**
+ * Single-file (standalone) build constants. The standalone post-processor
+ * prepends these to this worker's source: the Emscripten glue source, the FAST
+ * ZXing wasm as base64, and the compat `zxing_reader.wasm` as base64. Under
+ * `file://` neither `new URL("../airferry_zxing.js", ...)` nor a relative
+ * `locateFile` can resolve, so both backends consume the inlined bytes.
+ */
+const standaloneGlobals = globalThis as {
+  __AIRFERRY_STANDALONE__?: boolean
+  __ZXING_FAST_JS__?: string
+  __ZXING_FAST_WASM__?: string
+  __ZXING_READER_WASM__?: string
+}
+
 let ready = false
 let readyPromise: Promise<void> | null = null
+// Keep the standalone FAST wasm's Blob URL alive: Emscripten calls
+// findWasmBinary() (which consults locateFile) even when wasmBinary is set.
+let standaloneFastWasmUrl: string | null = null
 
 /** Self-compiled fast backend state. */
 let fastOk = false
@@ -48,22 +67,74 @@ let fastMod: {
 /** Try to load the self-compiled ZXing-C++ WASM (fast backend). */
 async function loadFastBackend(): Promise<boolean> {
   try {
-    // The fast backend is an optional generated artifact (build-fastzxing.sh,
-    // git-ignored). In the web receiver build it is copied to the site root
-    // (public/) by prepare-wasm.cjs; at runtime this worker lives at
-    // assets/<hash>.js, so "../airferry_zxing.js" resolves to the site root —
-    // the same mechanism zxing-wasm's locateFile uses for zxing_reader.wasm.
-    // Keep @vite-ignore so Vite doesn't try to bundle it (it's a public runtime
-    // asset); builds without the artifact still ship the zxing-wasm fallback.
-    const moduleUrl = new URL("../airferry_zxing.js", self.location.href).href
-    const mod = await import(/* @vite-ignore */ moduleUrl)
-    const inst = await (mod.default as () => Promise<unknown>)()
+    type FastFactory = (overrides?: {
+      wasmBinary?: Uint8Array
+      locateFile?: (path: string, prefix: string) => string
+    }) => Promise<unknown>
+    let factory: FastFactory
+    let overrides: {
+      wasmBinary?: Uint8Array
+      locateFile?: (path: string, prefix: string) => string
+    } | undefined
+
+    if (
+      standaloneGlobals.__AIRFERRY_STANDALONE__ &&
+      standaloneGlobals.__ZXING_FAST_JS__ &&
+      standaloneGlobals.__ZXING_FAST_WASM__
+    ) {
+      // file:// cannot resolve the public airferry_zxing.js path. Import the
+      // inlined glue from a Blob URL and hand the wasm bytes to Emscripten's
+      // wasmBinary hook so it never fetches. locateFile is also supplied because
+      // findWasmBinary() runs before instantiation and would otherwise resolve
+      // a relative path against the Blob module URL (invalid base → TypeError).
+      const wasm = base64ToBuffer(standaloneGlobals.__ZXING_FAST_WASM__)
+      if (!wasm) return false
+      const wasmBytes = new Uint8Array(wasm)
+      standaloneFastWasmUrl ??= URL.createObjectURL(
+        new Blob([wasmBytes], { type: "application/wasm" })
+      )
+      const wasmUrl = standaloneFastWasmUrl
+      const jsUrl = URL.createObjectURL(
+        new Blob([standaloneGlobals.__ZXING_FAST_JS__], {
+          type: "text/javascript",
+        })
+      )
+      try {
+        const mod = await import(/* @vite-ignore */ jsUrl)
+        factory = mod.default as FastFactory
+      } finally {
+        URL.revokeObjectURL(jsUrl)
+      }
+      overrides = {
+        wasmBinary: wasmBytes,
+        locateFile: () => wasmUrl,
+      }
+    } else {
+      // The fast backend is an optional generated artifact (build-fastzxing.sh,
+      // git-ignored). In the web receiver build it is copied to the site root
+      // (public/) by prepare-wasm.cjs; at runtime this worker lives at
+      // assets/<hash>.js, so "../airferry_zxing.js" resolves to the site root —
+      // the same mechanism zxing-wasm's locateFile uses for zxing_reader.wasm.
+      // Keep @vite-ignore so Vite doesn't try to bundle it (it's a public
+      // runtime asset); builds without the artifact still ship the fallback.
+      const moduleUrl = new URL("../airferry_zxing.js", self.location.href).href
+      const mod = await import(/* @vite-ignore */ moduleUrl)
+      factory = mod.default as FastFactory
+    }
+
+    const inst = await factory(overrides)
     const m = inst as typeof fastMod
     if (!m || m._airferry_wasm_abi_version() !== 1) return false
     fastMod = m
     fastOk = true
     return true
-  } catch {
+  } catch (error) {
+    if (standaloneGlobals.__AIRFERRY_STANDALONE__) {
+      console.warn(
+        "[qr] standalone FAST ZXing failed; using zxing-wasm compat:",
+        error
+      )
+    }
     return false
   }
 }
@@ -144,6 +215,10 @@ function cropRgba(
   return out
 }
 
+// Keep the inlined compat wasm's Blob URL alive for the module lifetime: the
+// Emscripten glue resolves it lazily and may request it more than once.
+let standaloneReaderWasmUrl: string | null = null
+
 /** Load the compat backend (zxing-wasm) as a fallback. */
 async function ensureZxingWasm(): Promise<void> {
   if (ready) return
@@ -152,10 +227,22 @@ async function ensureZxingWasm(): Promise<void> {
       // `zxing-wasm/reader` is the decode-only subpath (smaller WASM). It
       // exposes readBarcodesFromImageData which accepts ImageData directly.
       const zxing = await import("zxing-wasm/reader")
-      await zxing.getZXingModule({
-        locateFile: (file: string) =>
-          new URL("../" + file, self.location.href).href,
-      })
+      let locateFile = (file: string) =>
+        new URL("../" + file, self.location.href).href
+      if (
+        standaloneGlobals.__AIRFERRY_STANDALONE__ &&
+        standaloneGlobals.__ZXING_READER_WASM__
+      ) {
+        const wasm = base64ToBuffer(standaloneGlobals.__ZXING_READER_WASM__)
+        if (wasm) {
+          standaloneReaderWasmUrl ??= URL.createObjectURL(
+            new Blob([wasm], { type: "application/wasm" })
+          )
+          const url = standaloneReaderWasmUrl
+          locateFile = () => url
+        }
+      }
+      await zxing.getZXingModule({ locateFile })
       ready = true
     })().catch((e) => {
       readyPromise = null

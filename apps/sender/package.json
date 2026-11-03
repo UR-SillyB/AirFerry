@@ -1,6 +1,6 @@
 {
   "name": "@airferry/sender",
-  "version": "1.2.8",
+  "version": "1.2.9",
   "description": "AirFerry sender — Chrome/Edge/Firefox extension that streams QR codes.",
   "type": "module",
   "license": "MIT",
@@ -45,7 +45,7 @@
   "manifest": {
     "name": "AirFerry - 无网文件传输",
     "description": "通过屏幕二维码视频流，无网传输文件到手机。无需网络、蓝牙、USB。",
-    "version": "1.2.8",
+    "version": "1.2.9",
     "permissions": [],
     "content_security_policy": {
       "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"

@@ -86,6 +86,10 @@ jobs:
         working-directory: apps/web
         run: npm run build:receiver
 
+      - name: Build web receiver standalone (dist-receiver-standalone/)
+        working-directory: apps/web
+        run: npm run build:receiver:standalone
+
       - name: Assemble GitHub Pages site
         run: |
           set -euo pipefail
@@ -96,6 +100,9 @@ jobs:
           # 接收端 → /receiver/（receiver.html 作为该子路径的 index）
           cp -r apps/web/dist-receiver/. _site/receiver/
           mv _site/receiver/receiver.html _site/receiver/index.html
+          # 单文件版可直接从站点下载（双击 file:// 运行）
+          cp apps/web/dist-standalone/index.html _site/sender-standalone.html
+          cp apps/web/dist-receiver-standalone/index.html _site/receiver-standalone.html
           # 发送端产物不含 zxing_reader.wasm；接收端已带，无需从发送端清。
           # 但发送端根目录可能混入接收端 wasm 的旧文件，确保干净：
           rm -f _site/zxing_reader.wasm
