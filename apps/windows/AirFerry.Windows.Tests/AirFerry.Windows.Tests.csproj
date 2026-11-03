@@ -28,6 +28,7 @@
     <Compile Include="..\AirFerry.Windows\Scan\ScreenRectUtil.cs" Link="Scan\ScreenRectUtil.cs" />
     <Compile Include="..\AirFerry.Windows\Scan\IngestStatus.cs" Link="Scan\IngestStatus.cs" />
     <Compile Include="..\AirFerry.Windows\Scan\FrameHeader.cs" Link="Scan\FrameHeader.cs" />
+    <Compile Include="..\AirFerry.Windows\Scan\CompletedSegmentTracker.cs" Link="Scan\CompletedSegmentTracker.cs" />
     <Compile Include="..\AirFerry.Windows\Scan\Crc32.cs" Link="Scan\Crc32.cs" />
     <Compile Include="..\AirFerry.Windows\Scan\ReceiverSession.cs" Link="Scan\ReceiverSession.cs" />
     <Compile Include="..\AirFerry.Windows\Scan\ProgressSnapshot.cs" Link="Scan\ProgressSnapshot.cs" />
