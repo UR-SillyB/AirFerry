@@ -87,8 +87,9 @@ const b64 = (file) => fs.readFileSync(file).toString("base64")
 
 const fastJsSrc = fs.existsSync(fastJs) ? fs.readFileSync(fastJs, "utf8") : ""
 const fastWasmB64 = fs.existsSync(fastWasm) ? b64(fastWasm) : ""
+const hasFast = Boolean(fastJsSrc && fastWasmB64)
 const readerB64 = fs.existsSync(readerWasm) ? b64(readerWasm) : ""
-if (!fastJsSrc && !readerB64) {
+if (!hasFast && !readerB64) {
   fail(
     "No QR backend available: need airferry_zxing.js/.wasm (FAST) or " +
       "zxing_reader.wasm (compat). Run scripts/build-fastzxing.sh or npm install."
@@ -186,7 +187,7 @@ console.log(
     `QR worker (${kb(qrCode.length)} KB), zstd (${kb(zstdB64.length)} KB base64)`
 )
 console.log(
-  `    QR backend: ${fastJsSrc ? "FAST ZXing-C++" : "zxing-wasm compat"}` +
-    `${fastJsSrc ? ` (${kb(fastWasmB64.length)} KB wasm base64)` : ""}`
+  `    QR backend: ${hasFast ? "FAST ZXing-C++" : "zxing-wasm compat"}` +
+    `${hasFast ? ` (${kb(fastWasmB64.length)} KB wasm base64)` : ""}`
 )
 console.log(`    cleaned ${path.relative(root, outDir)} intermediates\n`)
