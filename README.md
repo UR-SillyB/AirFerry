@@ -6,9 +6,9 @@
 
 > 🤖 **AI 代理/新开发者**：先读 [AGENTS.md](AGENTS.md)（构建命令、代码导航、调试速查、文档与代码偏差清单）。跨端线格式的位级权威定义见 [docs/SPEC.md](docs/SPEC.md)。
 
-- **发送端**：浏览器扩展（Chrome / Edge / Firefox，支持 MV2 与 MV3）· **网页端**（[在线版](#网页端-web-发送接收)）
+- **发送端**：浏览器扩展（Chrome / Edge / Firefox，支持 MV2 与 MV3）· **网页端**（[在线版](#网页端-web-发送接收)）· **Python 文件转视频包**（[使用与构建](docs/build-python.md)，尚未发布 PyPI）
 - **接收端**：Android 原生 App · Windows 桌面应用（WPF）· **网页接收端**（[在线版](#网页端-web-发送接收)）
-- **核心库**：Rust，同时编译为 **WebAssembly**（浏览器插件）、**Android Native Library**（JNI）、**Windows DLL**（C ABI，P/Invoke），保证三端编解码逻辑完全一致
+- **核心库**：Rust，提供 **WebAssembly**（浏览器插件）、**Android Native Library**（JNI）、**Windows DLL**（C ABI，P/Invoke）和 **Python 扩展**（PyO3），复用同一套编解码逻辑
 
 ## 数据流
 
@@ -73,6 +73,22 @@
 
 > 发送端/APK/web 由 `./scripts/build-all.sh release` 产出；版本号取自 `apps/sender/package.json`。Windows zip 默认由 GitHub Actions `windows` workflow（`workflow_dispatch`）上传到同一 Release。Chrome `.crx` 需本机有 Chrome 才能签名，否则仅产出 `.zip`。web 发送端/接收端由 GitHub Actions `pages` workflow 自动构建并部署到 GitHub Pages（推送 `main` 即触发）。
 
+### Python 文件转视频
+
+Python 包独立版本为 `0.1.0`，目前从完整仓库安装，尚未发布 PyPI：
+
+```bash
+python -m pip install ./apps/python
+```
+
+```python
+from airferry import file_to_video
+
+file_to_video("report.pdf", "report.mp4")
+```
+
+也可使用 `airferry report.pdf report.mp4 --qr-count 4`。安装完成后，压缩和视频编码使用 Rust 核心与本机 FFmpeg，无运行期组件下载、遥测或在线服务。文件可位于普通磁盘、UNC、映射盘或 NFS 等文件系统，支持 `file://` URL；网络存储按正常文件 I/O 访问。支持大文件分段。源码安装需要 Rust/C 构建工具，离线 wheel 安装与完整接口见[Python 构建指南](docs/build-python.md)。
+
 ### Android 接收端
 
 下载 APK，允许「未知来源」后安装到 Android 10+ 设备（已用 release keystore 签名）。
@@ -112,6 +128,7 @@ AirFerry/
 ├── apps/
 │   ├── sender/            # Plasmo + React + TS + WASM 发送端（浏览器扩展）
 │   ├── scanner/           # Kotlin + CameraX + ZXing-C++ 接收端（Android App）
+│   ├── python/            # Python + PyO3 发送端（本地文件 → MP4；独立 PyPI 包）
 │   └── windows/           # C# WPF + OpenCvSharp + ZXing-C++（Windows App）
 ├── scripts/
 │   ├── build-all.sh       # 一键构建 + 打包（含 crx/xpi 签名，windows 子命令）
@@ -131,6 +148,7 @@ AirFerry/
 | 浏览器扩展 | `npm run build` | 构建全部 4 个目标 |
 | Android App | `./gradlew assembleDebug` | 需要 Android NDK |
 | Windows App | `./scripts/build-windows.ps1` | 须 Windows + .NET 8 SDK + CMake/VS C++（详见 [docs/build-windows.md](docs/build-windows.md)） |
+| Python 发送端 | `python -m pip install ./apps/python` | CPython 3.10+；文件转 MP4，详见 [docs/build-python.md](docs/build-python.md) |
 
 ## 技术架构
 
@@ -154,6 +172,7 @@ AirFerry/
 - [构建指南 - 浏览器扩展](docs/build-browser.md)
 - [构建指南 - Android](docs/build-android.md)
 - [构建指南 - Windows](docs/build-windows.md)
+- [构建指南 - Python](docs/build-python.md)
 - [开发环境搭建](docs/dev-setup.md)
 
 ## 致谢

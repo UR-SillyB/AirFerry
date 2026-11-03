@@ -1,0 +1,65 @@
+[build-system]
+requires = ["maturin>=1.15,<2"]
+build-backend = "maturin"
+
+[project]
+name = "airferry"
+dynamic = ["version"]
+description = "Convert files into AirFerry QR transfer videos with offline codecs."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "../../LICENSE" }
+keywords = ["airferry", "offline", "qr", "raptorq", "file-transfer", "video"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Programming Language :: Rust",
+    "Topic :: Multimedia :: Video :: Conversion",
+]
+dependencies = [
+    "Pillow>=10",
+    "imageio-ffmpeg>=0.6,<0.7",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8", "zxing-cpp>=2.2"]
+
+[project.scripts]
+airferry = "airferry.__main__:main"
+
+[project.urls]
+Homepage = "https://github.com/UR-SillyB/AirFerry"
+Repository = "https://github.com/UR-SillyB/AirFerry"
+Documentation = "https://github.com/UR-SillyB/AirFerry/blob/main/docs/build-python.md"
+Issues = "https://github.com/UR-SillyB/AirFerry/issues"
+
+[tool.maturin]
+bindings = "pyo3"
+manifest-path = "Cargo.toml"
+module-name = "airferry._native"
+python-source = "python"
+features = ["extension-module"]
+strip = true
+include = [{ path = "tests/*.py", format = "sdist" }]
+exclude = [
+    { path = "**/dist/**", format = "sdist" },
+    { path = "**/.venv/**", format = "sdist" },
+    { path = "**/__pycache__/**", format = ["sdist", "wheel"] },
+    { path = "**/*.pyc", format = ["sdist", "wheel"] },
+    { path = "**/*.pyd", format = "sdist" },
+    { path = "**/*.so", format = "sdist" },
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "interop: encode a real MP4, decode QR bytes, and recover through the Rust receiver",
+    "slow: exercise large files or expensive segment boundary cases",
+]

@@ -88,3 +88,12 @@ release/
 # Local HTTPS self-signed certs (contain private keys; used by serve-https.mjs
 # for LAN receiver testing — never commit)
 apps/web/.cert/
+
+# Python package environments, caches, and native development artifacts.
+.venv/
+__pycache__/
+.pytest_cache/
+*.py[cod]
+*.egg-info/
+apps/python/python/airferry/*.pyd
+apps/python/python/airferry/*.so

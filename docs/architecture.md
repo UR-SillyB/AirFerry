@@ -2,7 +2,7 @@
 
 ## 概述
 
-AirFerry 是一个完全离线的光学文件传输系统。发送端（浏览器扩展或网页）将文件/文字编码为二维码视频流在屏幕上连续播放；接收端（网页 / Android App / Windows 桌面）用摄像头、采集卡或（Windows 端）屏幕区域/窗口捕获实时扫描并恢复内容。编解码共享同一套 Rust 核心库，分别编译为 WebAssembly、Android JNI `.so`、Windows C ABI DLL，确保数学一致。
+AirFerry 是一个完全离线的光学文件传输系统。浏览器扩展和网页将文件/文字编码为二维码视频流在屏幕上连续播放，Python 发送端将单个文件导出为有限长度 MP4；接收端（网页 / Android App / Windows 桌面）用摄像头、采集卡或（Windows 端）屏幕区域/窗口捕获实时扫描并恢复内容。编解码共享同一套 Rust 核心库，分别编译为 WebAssembly、Android JNI `.so`、Windows C ABI DLL 和 Python PyO3 扩展，确保协议一致。
 
 ## 架构图
 
@@ -62,6 +62,9 @@ core/
 | 浏览器 / 网页 | `wasm32-unknown-unknown` | `wasm-bindgen` | `transfer_engine_bg.wasm` |
 | Android | `aarch64-linux-android` | JNI | `libtransfer_engine.so` |
 | Windows | `x86_64-pc-windows-msvc` | C ABI | `transfer_engine.dll` |
+| Python 发送端 | 主机 Windows / Linux / macOS | PyO3 `abi3-py310` | `airferry._native` 平台 wheel |
+
+Python 绑定位于 `apps/python/src/lib.rs`，直接调用共享发送器与 QR 渲染器；Python 层使用 Pillow 整倍数放大二维码，通过管道交给安装时附带的 FFmpeg 写入 MP4。压缩与编码计算不调用在线服务，也不在运行时补下载组件；文件、输出和临时存储按正常文件 I/O 访问，可位于 UNC、映射盘或 NFS 等文件系统，支持 `file://` URL。网络存储读写可能产生网络流量。FFmpeg 的 `file,pipe` 协议通过系统文件 API 支持这些存储。压缩流先写临时文件，再按规范逐段编码；有限视频的冗余预算、每段最低一秒与离线计算约束见 [Python 构建与使用](build-python.md)。
 
 相机识别使用同一模式、不同平台桥接：Android 的 `QrDecodePool.kt` / `scan_jni.cpp` 锁定为 v1.1.3 解码路径，产出 `libairferry_zxing.so`；Windows 的 `QrDecodePool.cs` 镜像相同 worker、队列、4 符号批摄入及全帧/ROI 状态机，`native/zxing_capi.cpp` 调用 `core/zxing-decoder/` 产出 `airferry_zxing.dll`。两端也共享 Rust 帧协议与 RaptorQ 引擎。
 

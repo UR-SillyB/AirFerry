@@ -4,6 +4,12 @@ members = [
     "core/raptorq-core",
     "core/qr-protocol",
     "core/transfer-engine",
+    "apps/python",
+]
+default-members = [
+    "core/raptorq-core",
+    "core/qr-protocol",
+    "core/transfer-engine",
 ]
 
 [workspace.package]

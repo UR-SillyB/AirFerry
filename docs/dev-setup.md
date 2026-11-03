@@ -4,6 +4,8 @@
 
 AirFerry 的开发需要以下工具链：Rust（核心库）、Node.js（浏览器扩展）、JDK + Android SDK/NDK（Android App）；完整 Windows 桌面构建还需 Windows + .NET 8 + CMake/MSVC。
 
+Python 发送端从源码构建需要 CPython 3.10+、Rust stable（绑定 crate 声明最低 1.83）和本机 C/C++ 编译器；安装对应平台 wheel 不需要 Rust。安装可以联网，安装后压缩、QR 和 MP4 编码在本机完成，不依赖在线服务或运行期组件下载。文件存储位置不受限制，可使用正常网络文件系统路径及 `file://` URL。详见 [Python 构建指南](build-python.md)。
+
 ## 1. Rust 工具链
 
 ```bash

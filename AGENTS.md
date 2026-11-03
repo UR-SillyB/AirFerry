@@ -8,7 +8,7 @@
 
 ## 项目一句话
 
-**AirFerry**：完全离线的光学文件传输。发送端（浏览器扩展）把文件编成二维码视频流在屏幕上连续播放；接收端（Android App）用摄像头实时扫描恢复文件。两端共享同一套 Rust 核心库（分别编译为 WASM 与 Android Native `.so`），编解码逻辑数学上一致。**零网络依赖、单向信道、无握手**。
+**AirFerry**：完全离线的光学文件传输。发送端把文件编成二维码视频流在屏幕上连续播放，也可由 Python 包输出 MP4；接收端用摄像头或屏幕捕获扫描恢复文件。各端共享同一套 Rust 核心库（WASM、Android Native `.so`、Windows DLL、Python/PyO3 扩展），编解码逻辑数学上一致。**零运行期网络依赖、单向信道、无握手**。
 
 ---
 
@@ -16,7 +16,7 @@
 
 ```
 AirFerry/
-├── core/                       # Rust 核心库（三 crate workspace）
+├── core/                       # Rust 协议核心（三个核心 crate；workspace 另含 apps/python）
 │   ├── raptorq-core/           #   RFC 6330 RaptorQ 编解码封装（纯逻辑）
 │   ├── qr-protocol/            #   帧格式 / 分块 / 压缩 / CRC / QR 矩阵 / 会话 ID
 │   ├── transfer-engine/        #   编排 / 状态机 / 进度 / 断点 / 大文件分段组装 + WASM&JNI&C-ABI 绑定
@@ -36,6 +36,7 @@ AirFerry/
 │   │       ├── java/com/airferry/app/   # Kotlin
 │   │       ├── cpp/                     # ZXing-C++ JNI 桥（CMake）
 │   │       └── jniLibs/arm64-v8a/       # Rust .so（cargo-ndk 产物, git-ignored）
+│   ├── python/                 # Python 文件转 MP4（PyO3 + Pillow + 本地 FFmpeg；独立包版本）
 │   └── windows/                # Windows App（C# WPF + OpenCvSharp + ZXing-C++）
 │       ├── native/                     #   Windows ZXing C ABI 包装器 + CMake
 │       ├── AirFerry.Windows/            #   主项目（Views/ViewModels/Models/Scan/Bundle/Native/Services/Themes；WPF-UI Fluent 主题）
@@ -55,7 +56,7 @@ AirFerry/
 ### 2.1 核心库（Rust）
 
 ```bash
-# 全部单元 + 集成测试（根目录）
+# 三个核心 crate 的单元 + 集成测试（根目录 default-members）
 cargo test
 
 # 含 diag_* 基准测试（默认 #[ignore]）
@@ -80,8 +81,9 @@ npm run wasm
 #       → Chrome 87+/FF 91+ 可加载，供 MV2 目标使用
 #     • wasm-pkg-simd/   — wasm-bindgen =0.2.125（隔离副本升级）、标量、含 externref
 #       → `simd` 为保留的历史目录/参数名；Chrome 96+/FF 116+ 支持 externref，供 MV3 使用
-#   ⚠️ 工作树隔离：build-wasm.cjs 把 workspace 复制到临时目录，仅在副本中把
-#       wasm-bindgen/js-sys/web-sys 升到现代版本并重算 lockfile。源码 Cargo.toml /
+#   ⚠️ 工作树隔离：build-wasm.cjs 只复制 core 与根 Cargo 文件到临时目录，把副本
+#       workspace 的 members/default-members 投影为原三个核心 crate，排除宿主
+#       Python/PyO3 crate；仅在现代副本把 wasm-bindgen/js-sys/web-sys 升级并重算 lockfile。源码 Cargo.toml /
 #       Cargo.lock 从不写入；脚本还用 `.wasm-build.lock` 阻止两个 WASM 构建互相覆盖。
 #   说明: `wasm` feature 已隐含 `serde`（见 core/transfer-engine/Cargo.toml）。
 #   ⚠️ 实测结论（见 §5 第6条）：当前 raptorq/fast_qr 的 wasm32 热路径无 SIMD
@@ -102,6 +104,9 @@ npm run build
 npm run build:chrome-mv3     # 或 :chrome-mv2 / :firefox-mv3 / :firefox-mv2
 
 npm run dev                  # Plasmo HMR 开发模式
+
+# WASM 隔离回归（2 项，含临时 workspace 的 cargo metadata --offline）
+node --test scripts/test-build-wasm.cjs
 ```
 
 | 目标目录 | 支持浏览器 |
@@ -333,6 +338,25 @@ npm run preview        # 本地预览构建产物
 
 本地 Windows 机仍可用 `.\scripts\build-windows.ps1 -Pack` 等价打包到 `dist/`，但**默认发布路径是 workflow**。
 
+### 2.10 Python 文件转视频包（apps/python）
+
+```bash
+# 仓库根目录；源码安装需 CPython 3.10+、Rust stable 和本机 C 编译器
+python -m pip install "./apps/python[test]"
+python -m pytest apps/python/tests
+cargo test -p airferry-python
+
+# wheel + sdist（不上传）
+python -m pip install "maturin>=1.15,<2" build twine
+python -m build --wheel --sdist apps/python --outdir dist/python
+```
+
+包版本独立为 `0.1.0`（`apps/python/Cargo.toml`），maturin 从 crate 读取版本，最低要求 1.15；发行名/导入名为 `airferry`，尚未发布 PyPI。`file_to_video(input_path, output_path, ...)` 和 `airferry input output.mp4` 将单文件转换成有限 H.264 MP4。默认 30fps、单码、1400B symbol、4px/模块、50% 修复比例（至少 8 个修复符号），支持四码和 descriptor-v5 大文件分段；每段每次传输至少 1 秒，补足帧继续产生新修复符号。参见 [`docs/build-python.md`](docs/build-python.md) 与 `apps/python/README.md`。
+
+**离线编码与存储**：安装阶段可以联网；安装后压缩、RaptorQ、QR 与视频编码在本机完成，无在线服务、遥测或运行期组件补下载。FFmpeg 来自已安装 `imageio-ffmpeg` wheel，缺失即报错。文件 I/O 遵循操作系统路径语义：输入、输出、临时目录可使用 UNC、映射盘、reparse point、符号链接及 NFS 等正常文件系统路径，`file://` URL 转成文件系统路径（含 UNC 主机）；其他 URL 取决于文件 I/O 适配，当前未提供 HTTP 上传协议。网络存储读写可能产生网络流量，不属于编码调用线上服务。FFmpeg 的 `file,pipe` 设置保留操作系统网络文件系统访问。临时磁盘容纳原始快照与压缩候选，RaptorQ 按当前压缩段使用内存。测试覆盖真实离线编码。重复播放/`repeats` 不增加独立喷泉码，数字 MP4 往返测试不等于手机光学实测；Linux/macOS 真实 CI 尚待运行。
+
+**构建隔离**：Python 是根 workspace 的额外成员，`default-members` 保持原三个核心 crate；普通 `cargo test` 不要求 Python 构建环境。Python crate 的直接 `fast_qr` path 依赖用于确保 maturin sdist 纳入 workspace vendored patch，不能因未直接引用而删除；pyproject 排除缓存与旧 dist 产物。`.github/workflows/python.yml` 构建 Windows/Linux x64 和 macOS x64/arm64 abi3 wheel、sdist，检查源码包 QR 文件完整及无旧制品，再从 sdist 重建 wheel 并运行 WASM 隔离测试；只保存 CI artifacts，不发布 PyPI。`build-all.sh` 的既有 release/dist 流程不纳入 Python 包。
+
 ---
 
 ## 3. 代码导航地图（file:line 索引）
@@ -517,7 +541,7 @@ npm run preview        # 本地预览构建产物
 
 4. **`derive_meta_from_totals` 已废弃**：`receiver.rs` 内仍保留 JNI/ABI 兼容符号，**新代码勿调用**（其 OTI 构建在大文件上会 assert）。现代路径：从描述符帧拿权威 OTI。
 
-5. **wasm-bindgen 双轨制（MV2=0.2.92 旧版 / MV3=0.2.125 新版）**：`core/transfer-engine/Cargo.toml` **默认仍钉死 `=0.2.92`**（js-sys/web-sys `=0.3.69`），**不要**改回宽松的 `"0.2"` / `"0.3"`。`build-wasm.cjs` 把 workspace 复制进独立临时目录，只在副本中升级到 0.2.125/0.3.102、重算副本 lockfile 并编译；源码 Cargo 文件从不写入。`.wasm-build.lock` 串行化发布目录切换。
+5. **wasm-bindgen 双轨制（MV2=0.2.92 旧版 / MV3=0.2.125 新版）**：`core/transfer-engine/Cargo.toml` **默认仍钉死 `=0.2.92`**（js-sys/web-sys `=0.3.69`），**不要**改回宽松的 `"0.2"` / `"0.3"`。`build-wasm.cjs` 只复制 core 与根 Cargo 文件进独立临时目录，将副本 workspace 的 `members` / `default-members` 裁剪为三个核心 crate，避免解析未复制的宿主 Python/PyO3 crate；仅在现代副本升级到 0.2.125/0.3.102、重算副本 lockfile 并编译，源码 Cargo 文件从不写入。`.wasm-build.lock` 串行化发布目录切换。`node --test apps/sender/scripts/test-build-wasm.cjs` 两项测试含临时 workspace 的 `cargo metadata --offline` 验证。
    - **为什么是双轨**：wasm-bindgen 0.2.93+ 默认开 reference-types proposal（`externref` 值类型），仅 Chrome 96+ 支持；Chrome 87/88 会在 `WebAssembly.instantiateStreaming()` 报 `CompileError: invalid value type 'externref'`。Chrome 87 是 MV2 的兼容目标。MV3 使用新版 wasm-bindgen/externref，但与 MV2 一样都是标量 WASM。
    - **⚠️ 实测性能结论（不要据此期待提速）**：对 RaptorQ + Frame + QR RS + 矩阵全链路的 Node benchmark（T=1400、5000 帧）：
      - **旧 SIMD vs 标量**：约 0.95×（**轻微变慢**）。`raptorq` / `fast_qr` 均无 wasm32 SIMD intrinsics；`+simd128` 主要增大 wasm，现已移除。
@@ -560,10 +584,11 @@ npm run preview        # 本地预览构建产物
 
 ## 6. 架构关键不变量（速览，详见 [`docs/SPEC.md`](docs/SPEC.md)）
 
-- **同一份 Rust 源码** → 三个 FFI 目标：浏览器 `wasm32-unknown-unknown`（wasm-bindgen）、Android `aarch64-linux-android`（`#[no_mangle] extern "system"` JNI）、Windows `x86_64-pc-windows-msvc`（`#[no_mangle] extern "C"` C ABI，供 .NET P/Invoke）。编解码数学一致。
+- **同一份 Rust 源码** → 浏览器 `wasm32-unknown-unknown`（wasm-bindgen）、Android `aarch64-linux-android`（`#[no_mangle] extern "system"` JNI）、Windows `x86_64-pc-windows-msvc`（`#[no_mangle] extern "C"` C ABI，供 .NET P/Invoke）及 Python/PyO3 abi3 扩展。编解码数学一致。
   - **浏览器扩展（apps/sender）与网页端（apps/web）共用 TS 源码和构建出的 WASM 变体**。MV2 选 legacy，MV3 与 web 选 simd/modern；sender 的 `wasm-pkg/` 是当前扩展目标快照，web 有独立 `apps/web/wasm-pkg/` 快照。两者由共享锁协调发布。web 通过 Vite alias 跨工程 import，**不单独编译 Rust、不复制业务代码**。
 - **帧格式**：`[Header 60B][Payload T][Footer 4B]`，大端，magic `0x4554`，version 1，双层 CRC32；T=symbol_size（浏览器默认 1400——`DEFAULT_CONFIG.symbolSize`，核心库默认 1024——`Config::default()`）。
 - **会话 ID**：FNV-1a 128-bit（name/size/mtime/指纹），确定性 → 断点恢复。Rust 与 TS 实现必须位一致。
+  - Python 复用同一 `SessionId::derive` 算法，fingerprint 独立绑定原文件 SHA-256、压缩标签、`symbol_size`（小端）和精确压缩流 SHA-256；改编码参数或压缩结果即换会话，防不同 OTI/压缩流混用旧符号，详见 `docs/build-python.md`。
 - **喷泉码发射**：源符号跨块轮询发一遍 → 持续新鲜修复符号（ESI 单调递增、不重复）；每块到 24 位 ESI 上限时明确停止，绝不回绕。进度近似线性，无 coupon-collector 拖尾。
 - **接收端安全生命线**：`panic = "abort"` 构建，任何 panic = 进程崩溃。`ObjectMeta::validate` + `decompress_with_limit` 是把恶意/越界输入挡在解码器前的防线。
 - **线程模型**：原生 receiver 句柄**非线程安全**。Android 用一把 `ingestLock` 串行化所有摄入；ZXing 解码在 N 个 worker 上并行。

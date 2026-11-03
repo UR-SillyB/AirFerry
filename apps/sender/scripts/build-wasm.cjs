@@ -12,11 +12,7 @@ const { acquireWasmLock } = require("./wasm-lock.cjs")
 
 const senderRoot = path.resolve(__dirname, "..")
 const repoRoot = path.resolve(senderRoot, "../..")
-const requested = process.argv[2] || "all"
-if (!new Set(["all", "legacy", "simd"]).has(requested)) {
-  console.error("Usage: node scripts/build-wasm.cjs [all|legacy|simd]")
-  process.exit(2)
-}
+const WASM_MEMBERS = ["core/raptorq-core", "core/qr-protocol", "core/transfer-engine"]
 
 const MODERN = {
   wasmBindgen: "0.2.125",
@@ -29,9 +25,32 @@ function run(file, args, cwd, env = process.env) {
   execFileSync(file, args, { cwd, env, stdio: "inherit" })
 }
 
+function wasmWorkspaceManifest(source) {
+  const match = /^\[workspace\][^\S\r\n]*(?:\r?\n|$)/m.exec(source)
+  if (!match) throw new Error("root Cargo.toml has no [workspace] section")
+  const start = match.index + match[0].length
+  const next = source.slice(start).search(/^\[/m)
+  const end = next < 0 ? source.length : start + next
+  let workspace = source.slice(start, end)
+  const members = `[\n${WASM_MEMBERS.map((name) => `    "${name}",`).join("\n")}\n]`
+  if (!/^members\s*=\s*\[/m.test(workspace)) {
+    throw new Error("root Cargo.toml workspace has no members list")
+  }
+  workspace = workspace.replace(/^members\s*=\s*\[[\s\S]*?\]/m, `members = ${members}`)
+  if (/^default-members\s*=\s*\[/m.test(workspace)) {
+    workspace = workspace.replace(/^default-members\s*=\s*\[[\s\S]*?\]/m, `default-members = ${members}`)
+  } else {
+    workspace += `default-members = ${members}\n\n`
+  }
+  return source.slice(0, start) + workspace + source.slice(end)
+}
+
 function isolatedWorkspace() {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "airferry-wasm-"))
-  fs.copyFileSync(path.join(repoRoot, "Cargo.toml"), path.join(temp, "Cargo.toml"))
+  // This snapshot only contains core/. Host-only members (the Python/PyO3
+  // package) must not be loaded or resolved by either WASM toolchain.
+  const manifest = fs.readFileSync(path.join(repoRoot, "Cargo.toml"), "utf8")
+  fs.writeFileSync(path.join(temp, "Cargo.toml"), wasmWorkspaceManifest(manifest))
   fs.copyFileSync(path.join(repoRoot, "Cargo.lock"), path.join(temp, "Cargo.lock"))
   fs.cpSync(path.join(repoRoot, "core"), path.join(temp, "core"), {
     recursive: true,
@@ -90,16 +109,26 @@ function buildVariant(variant) {
   }
 }
 
-const releaseLock = acquireWasmLock(senderRoot)
-try {
-  if (requested === "all" || requested === "legacy") buildVariant("legacy")
-  if (requested === "all" || requested === "simd") buildVariant("simd")
-  // Publish a default sender snapshot for direct tooling/import resolution.
-  // Web copies wasm-pkg-simd into its own directory during prepare-wasm.
-  if (requested !== "legacy") {
-    publishDirectory(path.join(senderRoot, "wasm-pkg-simd"), "wasm-pkg")
+function main(requested = process.argv[2] || "all") {
+  if (!new Set(["all", "legacy", "simd"]).has(requested)) {
+    console.error("Usage: node scripts/build-wasm.cjs [all|legacy|simd]")
+    process.exitCode = 2
+    return
   }
-  console.log("\n✅ WASM output published without modifying Cargo sources")
-} finally {
-  releaseLock()
+  const releaseLock = acquireWasmLock(senderRoot)
+  try {
+    if (requested === "all" || requested === "legacy") buildVariant("legacy")
+    if (requested === "all" || requested === "simd") buildVariant("simd")
+    // Publish a default sender snapshot for direct tooling/import resolution.
+    // Web copies wasm-pkg-simd into its own directory during prepare-wasm.
+    if (requested !== "legacy") {
+      publishDirectory(path.join(senderRoot, "wasm-pkg-simd"), "wasm-pkg")
+    }
+    console.log("\n✅ WASM output published without modifying Cargo sources")
+  } finally {
+    releaseLock()
+  }
 }
+
+if (require.main === module) main()
+module.exports = { isolatedWorkspace, wasmWorkspaceManifest }

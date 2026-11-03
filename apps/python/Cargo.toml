@@ -1,0 +1,31 @@
+[package]
+name = "airferry-python"
+version = "0.1.0"
+edition.workspace = true
+rust-version = "1.83"
+license-file = "../../LICENSE"
+repository.workspace = true
+description = "Python bindings for AirFerry's offline optical file sender."
+publish = false
+
+[lib]
+name = "_native"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+pyo3 = { version = "=0.28.3", features = ["abi3-py310"] }
+transfer-engine.workspace = true
+qr-protocol.workspace = true
+# Keep the root workspace's fast_qr patch in maturin's vendored source graph.
+fast_qr = { path = "../../core/qr-protocol/vendor/fast_qr", default-features = false }
+raptorq-core.workspace = true
+crc32fast.workspace = true
+sha2.workspace = true
+zstd = "0.13"
+xz2 = { version = "0.1", features = ["static"] }
+
+[features]
+extension-module = ["pyo3/extension-module"]
+
+[dev-dependencies]
+tempfile = "3"
