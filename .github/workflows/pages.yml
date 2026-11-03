@@ -86,6 +86,10 @@ jobs:
         working-directory: apps/web
         run: npm run build:receiver
 
+      - name: Build web sender standalone (dist-standalone/)
+        working-directory: apps/web
+        run: npm run build:standalone
+
       - name: Build web receiver standalone (dist-receiver-standalone/)
         working-directory: apps/web
         run: npm run build:receiver:standalone
