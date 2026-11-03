@@ -382,6 +382,12 @@ public sealed class ReceiverSession : IDisposable
         lock (_gate) return _initialized ? NativeBridge.ReceiverOriginalSize(_handle) : 0UL;
     }
 
+    /// <summary>This child session's id, split exactly as the wire stores it.</summary>
+    public (ulong Lo, ulong Hi) SessionId()
+    {
+        lock (_gate) return (_sessionIdLo, _sessionIdHi);
+    }
+
     /// <summary>Session id as a lowercase hex string (high||low, 32 chars).</summary>
     public string SessionIdHex()
     {

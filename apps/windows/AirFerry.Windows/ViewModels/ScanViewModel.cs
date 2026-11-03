@@ -59,6 +59,13 @@ public partial class ScanViewModel : ObservableObject, IDisposable
     private string? _resumeRootId;
     /// <summary>Disk-backed assembler for a descriptor-v5 large transfer (null = none).</summary>
     private AirFerry.Windows.Bundle.SegmentAssembler? _segAssembler;
+    /// <summary>
+    /// Child sessions already stored by this scan. The sender keeps replaying a
+    /// completed segment until the operator advances; the fresh receiver used for
+    /// the next segment must not re-initialize to it (issue #8). Cleared at the
+    /// start of every scan.
+    /// </summary>
+    private readonly CompletedSegmentTracker _completedSegments = new();
     /// <summary>Continuous-receive folder sink (null = single-receive mode).</summary>
     private AirFerry.Windows.Bundle.ContinuousSaver? _continuousSaver;
 
@@ -234,6 +241,7 @@ public partial class ScanViewModel : ObservableObject, IDisposable
         // 置空引用不丢段）。注意：_resumeRootId 由构造函数在 StartScan 之前注入，
         // 且本方法下方与 HandleSegmentedTransfer 都依赖它过滤目标传输，不能在此清空。
         _segAssembler = null;
+        _completedSegments.Clear();
         SelectedSource = source;
         IsComplete = false;
         IsRecovering = false;
@@ -565,6 +573,12 @@ public partial class ScanViewModel : ObservableObject, IDisposable
         {
             return false;
         }
+        // A stored segment may still be on screen while the operator switches to
+        // the next one. Never let it initialize the fresh child receiver again.
+        if (_completedSegments.Contains(payload))
+        {
+            return false;
+        }
         IngestStatus? status = session.Ingest(payload);
         if (status is null)
         {
@@ -685,7 +699,11 @@ public partial class ScanViewModel : ObservableObject, IDisposable
             // Continuous mode: record the folder save, re-arm a fresh receiver
             // and keep scanning — no navigation, no teardown.
             RecordContinuousOutcome(saver, outcome.ContinuousReport);
-            ContinueNextTransfer(session, pool, epoch);
+            // A successful or already-deduplicated save must not be received again
+            // while the sender keeps looping it. A FAILED save stays eligible so
+            // the idempotent archive/retry path can run on the replay.
+            bool remember = outcome.ContinuousReport.Status != ContinuousSaveStatus.Failed;
+            ContinueNextTransfer(session, pool, epoch, remember);
             return;
         }
         StatusText = "接收完成";
@@ -985,15 +1003,17 @@ public partial class ScanViewModel : ObservableObject, IDisposable
         bool stored = asm.StoreSegment(index, segBytes, seg.RawSha256);
         if (!stored)
         {
+            // Already durable (a replayed segment): remember it so the fresh
+            // receiver skips the replay instead of receiving it again.
             UpdateSegmentedProgress(asm);
-            SwapReceiverForNextSegment(session, pool);
+            SwapReceiverForNextSegment(session, pool, rememberCompleted: true);
             return RecoveryOutcome.None();
         }
 
         if (!asm.IsComplete())
         {
             UpdateSegmentedProgress(asm);
-            SwapReceiverForNextSegment(session, pool);
+            SwapReceiverForNextSegment(session, pool, rememberCompleted: true);
             return RecoveryOutcome.None();
         }
 
@@ -1113,7 +1133,13 @@ public partial class ScanViewModel : ObservableObject, IDisposable
     }
 
     /// <summary>Swap to a fresh receiver for the next segment.</summary>
-    private void SwapReceiverForNextSegment(ReceiverSession session, QrDecodePool pool)
+    /// <param name="rememberCompleted">
+    /// Record the outgoing child session as stored, so its replayed frames are
+    /// dropped by <see cref="OnDecoded"/> instead of re-initializing the new
+    /// receiver.
+    /// </param>
+    private void SwapReceiverForNextSegment(
+        ReceiverSession session, QrDecodePool pool, bool rememberCompleted = false)
     {
         lock (_lifecycleGate)
         {
@@ -1121,6 +1147,10 @@ public partial class ScanViewModel : ObservableObject, IDisposable
                 return;
             pool.RunExclusive<bool>(() =>
             {
+                if (rememberCompleted)
+                {
+                    _completedSegments.Add(session.SessionId());
+                }
                 session.Destroy();
                 _session = new ReceiverSession();
                 Interlocked.Exchange(ref _recoveryStarted, 0);
@@ -1215,7 +1245,8 @@ public partial class ScanViewModel : ObservableObject, IDisposable
     /// producer thread, decode pool and capture device keep running) and reset
     /// the per-transfer UI so the next descriptor starts from zero.
     /// </summary>
-    private void ContinueNextTransfer(ReceiverSession session, QrDecodePool pool, int epoch)
+    private void ContinueNextTransfer(
+        ReceiverSession session, QrDecodePool pool, int epoch, bool rememberCompleted = false)
     {
         IsComplete = false;
         Progress = 0;
@@ -1226,7 +1257,7 @@ public partial class ScanViewModel : ObservableObject, IDisposable
         _transferStartTimestamp = 0;
         _decodePerSecond = 0;
         _recentWireBytesPerSecond = 0;
-        SwapReceiverForNextSegment(session, pool);
+        SwapReceiverForNextSegment(session, pool, rememberCompleted);
     }
 
     private RecoveryResult StageSingleFile(byte[] bytes, string displayName,
