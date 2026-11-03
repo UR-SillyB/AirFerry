@@ -98,7 +98,7 @@ apps/web/dist-receiver/            # 接收端（airferry-receiver-web-v{VER}.zi
 
 ### 局域网 HTTPS 接收端测试（`serve-https.mjs`）
 
-> ⚠️ **网页接收端不能像发送端单文件版那样双击打开**：它是多文件静态站点，必须先部署；且 `getUserMedia`（摄像头）只在**安全上下文**（HTTPS 或 localhost）可用，`file://` 直开或普通 http（非 localhost）无法访问摄像头。局域网真机扫码测试需用 HTTPS 静态服务器。
+> ⚠️ **网页接收端不能像发送端单文件版那样双击打开**：它是多文件静态站点（module 脚本/Worker/WASM 均为独立文件），必须先部署。`getUserMedia` 要求安全上下文；常规部署需 HTTPS 或 localhost（普通 http 非 localhost 不可用）。注意 Chromium 的 `file://` 本身是安全上下文（Chrome 实测摄像头与 Blob module worker 可用），所以单文件接收端在 Chrome/Edge 技术上可行，但当前未提供该构建目标——需要把 receive/qr Worker 与全部 WASM 内联并用 Blob URL/`wasmBinary` 注入。局域网真机扫码测试仍建议用 HTTPS 静态服务器。
 
 仓库自带最小实现：
 
