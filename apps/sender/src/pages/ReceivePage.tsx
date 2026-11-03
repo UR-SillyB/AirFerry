@@ -436,10 +436,47 @@ interface ProgressSnapshot {
 }
 
 /**
+ * Single-file (standalone) build: under `file://` a worker cannot be loaded
+ * from a separate script file, so the build inlines both worker sources (with
+ * their WASM base64 constants already prepended) on `globalThis`. We start them
+ * from Blob URLs as **module** workers — the worker chunks contain
+ * `import.meta.url` and dynamic-import machinery, and Chromium supports module
+ * Blob workers under `file://` (verified with Chrome).
+ */
+const standaloneGlobals = globalThis as {
+  __AIRFERRY_STANDALONE__?: boolean
+  __RECEIVE_WORKER_CODE__?: string
+  __QR_WORKER_CODE__?: string
+}
+
+// Created once per page: QR workers are replaced on a fatal error, and
+// re-creating a ~1.5 MB Blob for every replacement is pointless.
+let standaloneReceiveUrl: string | null = null
+let standaloneQrUrl: string | null = null
+
+function standaloneWorkerUrl(code: string, slot: "receive" | "qr"): string {
+  const cached = slot === "receive" ? standaloneReceiveUrl : standaloneQrUrl
+  if (cached) return cached
+  const url = URL.createObjectURL(new Blob([code], { type: "text/javascript" }))
+  if (slot === "receive") standaloneReceiveUrl = url
+  else standaloneQrUrl = url
+  return url
+}
+
+/**
  * Spawn the receive worker. Vite recognizes the `new URL("./...", import.meta.url)`
  * literal and emits the worker as a chunk.
  */
 function createReceiveWorker(): Worker {
+  if (
+    standaloneGlobals.__AIRFERRY_STANDALONE__ &&
+    standaloneGlobals.__RECEIVE_WORKER_CODE__
+  ) {
+    return new Worker(
+      standaloneWorkerUrl(standaloneGlobals.__RECEIVE_WORKER_CODE__, "receive"),
+      { type: "module" }
+    )
+  }
   return new Worker(new URL("../workers/receive.worker.ts", import.meta.url), {
     type: "module",
   })
@@ -447,6 +484,15 @@ function createReceiveWorker(): Worker {
 
 /** Spawn the QR decode worker. */
 function createQrWorker(): Worker {
+  if (
+    standaloneGlobals.__AIRFERRY_STANDALONE__ &&
+    standaloneGlobals.__QR_WORKER_CODE__
+  ) {
+    return new Worker(
+      standaloneWorkerUrl(standaloneGlobals.__QR_WORKER_CODE__, "qr"),
+      { type: "module" }
+    )
+  }
   return new Worker(new URL("../workers/qr-decode.worker.ts", import.meta.url), {
     type: "module",
   })

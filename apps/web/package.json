@@ -1,6 +1,6 @@
 {
   "name": "@airferry/web",
-  "version": "1.2.8",
+  "version": "1.2.9",
   "description": "AirFerry web sender — static website that streams QR codes (reuses sender source).",
   "type": "module",
   "license": "MIT",
@@ -15,6 +15,8 @@
     "dev": "vite",
     "build": "vite build",
     "build:receiver": "vite build --config vite.receiver.config.ts",
+    "build:receiver:standalone": "vite build --config vite.receiver-standalone.config.ts && node scripts/build-receiver-standalone.cjs",
+    "prebuild:receiver:standalone": "node scripts/prepare-wasm.cjs",
     "build:standalone": "vite build --config vite.standalone.config.ts && node scripts/build-standalone.cjs",
     "preview": "vite preview"
   },

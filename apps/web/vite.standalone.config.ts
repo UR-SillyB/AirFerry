@@ -60,6 +60,12 @@ export default defineConfig({
       // Same as the main web config: point @/ at the real sender source.
       { find: "@/", replacement: path.resolve(__dirname, "../sender/src/") + "/" },
       { find: "@airferry-wasm/", replacement: path.resolve(__dirname, "wasm-pkg/") + "/" },
+      // lzma-wasm lives in web's node_modules; the compress worker is compiled
+      // from sender source, so resolve it here instead of sender/node_modules.
+      {
+        find: "lzma-wasm",
+        replacement: path.resolve(__dirname, "node_modules/lzma-wasm"),
+      },
     ],
   },
   worker: {

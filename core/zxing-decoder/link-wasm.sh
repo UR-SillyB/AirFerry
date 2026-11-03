@@ -28,12 +28,12 @@ fi
 # support emscripten traps and JS sees a numeric exception ("解码失败: 638680").
 # Enabling exceptions lets our wrapper's catch(...) swallow it and return nullptr
 # gracefully (the frame is just skipped) instead of breaking the whole backend.
-emcc -O3 -std=c++20 -fexceptions \
+em++ -O3 -std=c++20 -fexceptions \
   -s MODULARIZE=1 -s EXPORT_ES6=1 -s ENVIRONMENT=web,worker \
   -s INITIAL_MEMORY=67108864 -s ALLOW_MEMORY_GROWTH=0 \
   -s STACK_SIZE=1048576 \
   -s EXPORTED_FUNCTIONS=_airferry_wasm_decode_multi_y,_airferry_wasm_free,_airferry_wasm_abi_version,_malloc,_free \
-  -s EXPORTED_RUNTIME_METHODS=ccall,cwrap \
+  -s EXPORTED_RUNTIME_METHODS=ccall,cwrap,HEAPU8,HEAPU32 \
   "$BUILD_DIR/libairferry_zxing.a" "$ZXING_LIB" \
   -o "$OUT_DIR/airferry_zxing.js"
 

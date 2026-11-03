@@ -53,25 +53,30 @@
 | **网页发送端** | <https://UR-SillyB.github.io/AirFerry/> | 在浏览器里播放二维码视频流发送文件 |
 | **网页接收端** | <https://UR-SillyB.github.io/AirFerry/receiver/> | 用摄像头扫码恢复文件 |
 
-> ⚠️ **网页接收端**是多文件静态站点，需运行在 **HTTPS / localhost** 下（GitHub Pages 天然是 HTTPS，直接可用）。直接双击 `receiver.html` 无法加载 Worker/WASM；当前未提供单文件接收端（Chromium 的 `file://` 虽属安全上下文、摄像头可用，但仍需专门构建把 Worker/WASM 内联）。因浏览器摄像头管道 + JS/WASM 解码限制，**网页端速度低于原生端**，追求满速、稳定的大文件恢复请优先用 Android / Windows 原生接收端（见下方下载）。
+> 网页接收端有两种发布形态：
+> - **在线版 / 多文件 zip**：部署在 **HTTPS / localhost**（GitHub Pages 天然是 HTTPS，直接可用），适合手机/局域网；
+> - **单文件版**（`airferry-receiver-web-standalone-v1.2.9.html`，约 6.4 MB）：**Chrome / Edge 双击即可在 `file://` 下运行**，无需服务器；已内联接收/QR Worker 与全部 WASM。Firefox/Safari 的 `file://` 摄像头行为尚未验证。
+>
+> 因浏览器摄像头管道 + JS/WASM 解码限制，**网页端速度低于原生端**，追求满速、稳定的大文件恢复请优先用 Android / Windows 原生接收端（见下方下载）。
 
 ## 下载安装
 
-最新版本发布在 [GitHub Release v1.2.8](https://github.com/UR-SillyB/AirFerry/releases/tag/v1.2.8)。
+最新版本发布在 [GitHub Release v1.2.9](https://github.com/UR-SillyB/AirFerry/releases/tag/v1.2.9)。
 
 | 文件 | 说明 |
 |------|------|
-| `airferry-sender-chrome-mv3-v1.2.8.crx` / `.zip` | Chrome / Edge MV3 现代标量版；CRX 使用固定发布密钥签名，受策略限制时改用 zip 解压加载 |
-| `airferry-sender-chrome-mv2-v1.2.8.crx` / `.zip` | Chrome / Edge MV2 旧版兼容标量版；CRX 使用同一固定发布密钥签名 |
-| `airferry-sender-firefox-mv3-v1.2.8.xpi` | Firefox 扩展，MV3（Firefox 116+） |
-| `airferry-sender-firefox-mv2-v1.2.8.xpi` | Firefox 91+ 的 MV2 兼容版 |
-| `airferry-sender-web-v1.2.8.zip` | 网页发送端静态站点，现代标量 WASM，部署到任意静态托管（官方在线版见[网页端](#网页端web-发送--接收)） |
-| `airferry-sender-web-standalone-v1.2.8.html` | 网页发送端单文件版（约 2MB，双击即用，无需服务器） |
-| `airferry-receiver-web-v1.2.8.zip` | **网页接收端**：需部署到 HTTPS / localhost 后使用摄像头（官方在线版见[网页端](#网页端web-发送--接收)） |
-| `airferry-receiver-android-arm64-v1.2.8.apk` | **Android 扫码端**：arm64-v8a，Android 10+，使用固定 release keystore 签名 |
-| `airferry-receiver-windows-x64-v1.2.8.zip` | **Windows 扫码端**：x64，Windows 10+，视频源支持摄像头 + USB/HDMI/SDI 采集卡 + 屏幕区域/窗口捕获 |
+| `airferry-sender-chrome-mv3-v1.2.9.crx` / `.zip` | Chrome / Edge MV3 现代标量版；CRX 使用固定发布密钥签名，受策略限制时改用 zip 解压加载 |
+| `airferry-sender-chrome-mv2-v1.2.9.crx` / `.zip` | Chrome / Edge MV2 旧版兼容标量版；CRX 使用同一固定发布密钥签名 |
+| `airferry-sender-firefox-mv3-v1.2.9.xpi` | Firefox 扩展，MV3（Firefox 116+） |
+| `airferry-sender-firefox-mv2-v1.2.9.xpi` | Firefox 91+ 的 MV2 兼容版 |
+| `airferry-sender-web-v1.2.9.zip` | 网页发送端静态站点，现代标量 WASM，部署到任意静态托管（官方在线版见[网页端](#网页端web-发送--接收)） |
+| `airferry-sender-web-standalone-v1.2.9.html` | 网页发送端单文件版（约 2MB，双击即用，无需服务器） |
+| `airferry-receiver-web-v1.2.9.zip` | **网页接收端**：需部署到 HTTPS / localhost 后使用摄像头（官方在线版见[网页端](#网页端web-发送--接收)） |
+| `airferry-receiver-web-standalone-v1.2.9.html` | **网页接收端单文件版**：约 6.4 MB，Chrome/Edge 双击即用（`file://`），无需服务器；内联两个 Worker 与全部 WASM |
+| `airferry-receiver-android-arm64-v1.2.9.apk` | **Android 扫码端**：arm64-v8a，Android 10+，使用固定 release keystore 签名 |
+| `airferry-receiver-windows-x64-v1.2.9.zip` | **Windows 扫码端**：x64，Windows 10+，视频源支持摄像头 + USB/HDMI/SDI 采集卡 + 屏幕区域/窗口捕获 |
 
-> 发送端/APK/web 由 `./scripts/build-all.sh release` 产出；版本号取自 `apps/sender/package.json`。Windows zip 默认由 GitHub Actions `windows` workflow（`workflow_dispatch`）上传到同一 Release。Chrome `.crx` 需本机有 Chrome 才能签名，否则仅产出 `.zip`。web 发送端/接收端由 GitHub Actions `pages` workflow 自动构建并部署到 GitHub Pages（推送 `main` 即触发）。
+> 发送端/APK/web 由 `./scripts/build-all.sh release` 产出；版本号取自 `apps/sender/package.json`。Windows zip 默认由 GitHub Actions `windows` workflow（`workflow_dispatch`）上传到同一 Release。Chrome `.crx` 需本机有 Chrome 才能签名，否则仅产出 `.zip`。web 发送端/接收端多文件版由 GitHub Actions `pages` workflow 自动构建并部署到 GitHub Pages（推送 `main` 即触发）；接收端单文件版随 `build-all.sh web` 产出。
 
 ### Python 文件转视频
 
@@ -95,7 +100,7 @@ file_to_video("report.pdf", "report.mp4")
 
 ### Windows 接收端
 
-解压 `airferry-receiver-windows-x64-v1.2.8.zip`，安装 [.NET 8 Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/8.0) 后运行 `AirFerry.exe`。启动后在同一个「扫描来源」单选列表中选择摄像头、采集卡或屏幕捕获（彼此互斥，USB/HDMI/SDI 采集卡会被自动标注），再点统一的主按钮开始。选择「屏幕捕获」时会打开截图式选择器，可把**屏幕矩形区域**（拖动）或**某个窗口**（单击，悬停自动高亮）作为视频源；**右键= 快速选择整个屏幕**（全屏应用/游戏首选——无边框游戏会因焦点被抢而最小化、独占全屏无法按窗口捕获）——适合同机浏览器播放二维码做端到端测试、虚拟机/远程桌面窗口等无摄像头场景，Esc 取消。进入扫码页对准屏幕二维码即可。
+解压 `airferry-receiver-windows-x64-v1.2.9.zip`，安装 [.NET 8 Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/8.0) 后运行 `AirFerry.exe`。启动后在同一个「扫描来源」单选列表中选择摄像头、采集卡或屏幕捕获（彼此互斥，USB/HDMI/SDI 采集卡会被自动标注），再点统一的主按钮开始。选择「屏幕捕获」时会打开截图式选择器，可把**屏幕矩形区域**（拖动）或**某个窗口**（单击，悬停自动高亮）作为视频源；**右键= 快速选择整个屏幕**（全屏应用/游戏首选——无边框游戏会因焦点被抢而最小化、独占全屏无法按窗口捕获）——适合同机浏览器播放二维码做端到端测试、虚拟机/远程桌面窗口等无摄像头场景，Esc 取消。进入扫码页对准屏幕二维码即可。
 
 ### Chrome / Edge 扩展
 
@@ -103,7 +108,7 @@ file_to_video("report.pdf", "report.mp4")
 2. 使用 zip 时打开 `chrome://extensions`，右上角开启「开发者模式」
 3. 点击「加载已解压的扩展程序」，选择解压目录
 
-> v1.2.8 CRX 复用了原固定私钥，MV2/MV3 扩展 ID 均保持为 `lgafjpalpcbiellnlbfdabdlbfooojjm`；zip 作为浏览器阻止商店外 CRX 安装时的回退。
+> v1.2.9 CRX 复用了原固定私钥，MV2/MV3 扩展 ID 均保持为 `lgafjpalpcbiellnlbfdabdlbfooojjm`；zip 作为浏览器阻止商店外 CRX 安装时的回退。
 
 ### Firefox 扩展
 
