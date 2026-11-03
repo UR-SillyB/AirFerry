@@ -53,7 +53,7 @@
 | **网页发送端** | <https://UR-SillyB.github.io/AirFerry/> | 在浏览器里播放二维码视频流发送文件 |
 | **网页接收端** | <https://UR-SillyB.github.io/AirFerry/receiver/> | 用摄像头扫码恢复文件 |
 
-> ⚠️ **网页接收端**必须运行在 **HTTPS / localhost** 下才能访问摄像头（浏览器硬性安全限制）；GitHub Pages 天然是 HTTPS，直接可用。因浏览器摄像头管道 + JS/WASM 解码限制，**网页端速度低于原生端**，追求满速、稳定的大文件恢复请优先用 Android / Windows 原生接收端（见下方下载）。
+> ⚠️ **网页接收端**是多文件静态站点，需运行在 **HTTPS / localhost** 下（GitHub Pages 天然是 HTTPS，直接可用）。直接双击 `receiver.html` 无法加载 Worker/WASM；当前未提供单文件接收端（Chromium 的 `file://` 虽属安全上下文、摄像头可用，但仍需专门构建把 Worker/WASM 内联）。因浏览器摄像头管道 + JS/WASM 解码限制，**网页端速度低于原生端**，追求满速、稳定的大文件恢复请优先用 Android / Windows 原生接收端（见下方下载）。
 
 ## 下载安装
 
