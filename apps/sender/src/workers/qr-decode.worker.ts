@@ -100,8 +100,9 @@ async function loadFastBackend(): Promise<boolean> {
         new Blob([wasmBytes], { type: "application/wasm" })
       )
       const wasmUrl = standaloneFastWasmUrl
+      const fastJsSrc = standaloneGlobals.__ZXING_FAST_JS__ ?? ""
       const jsUrl = URL.createObjectURL(
-        new Blob([standaloneGlobals.__ZXING_FAST_JS__], {
+        new Blob([fastJsSrc], {
           type: "text/javascript",
         })
       )

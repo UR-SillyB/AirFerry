@@ -498,6 +498,30 @@ function createQrWorker(): Worker {
   })
 }
 
+/**
+ * 把 getUserMedia 的失败原因翻译成可操作的提示（issue #15）。
+ * Chromium 的 file:// 属于安全上下文（单文件版双击即用），所以「HTTPS/localhost」
+ * 提示只在真正非安全上下文时出现；最常见的 NotReadableError 实际是摄像头被
+ * 其他程序占用或被系统隐私设置禁用，与页面协议无关。
+ */
+function describeCameraError(e: unknown): string {
+  const raw = e instanceof Error ? e.message : String(e)
+  const name = e instanceof DOMException ? e.name : ""
+  const insecureSuffix = window.isSecureContext
+    ? ""
+    : "当前页面不是安全上下文，请改用 HTTPS / localhost 打开（Chromium 下 file:// 双击打开即可）。"
+  switch (name) {
+    case "NotAllowedError":
+      return `无法访问摄像头：权限被拒绝。请在地址栏的摄像头图标里允许本页面访问后重试。${insecureSuffix}`
+    case "NotFoundError":
+      return "无法访问摄像头：未检测到可用摄像头。请确认设备已连接并已启用。"
+    case "NotReadableError":
+      return `无法访问摄像头：摄像头无法启动（${raw}）。通常是摄像头被其他程序占用（会议/相机等软件），或被系统隐私设置禁用——请关闭占用中的程序；Windows 请检查「设置 → 隐私和安全性 → 摄像头」是否允许应用访问。${insecureSuffix}`
+    default:
+      return `无法访问摄像头：${raw}。请确认已授予摄像头权限。${insecureSuffix}`
+  }
+}
+
 export function ReceivePage(): React.ReactElement {
   const [stage, setStage] = useState<Stage>("camera")
   const [error, setError] = useState<string | null>(null)
@@ -664,9 +688,7 @@ export function ReceivePage(): React.ReactElement {
       await videoRef.current?.play()
       return true
     } catch (e) {
-      setError(
-        `无法访问摄像头：${e instanceof Error ? e.message : String(e)}。请确认已授予摄像头权限，并使用 HTTPS 或 localhost。`
-      )
+      setError(describeCameraError(e))
       stageRef.current = "error"
       setStage("error")
       return false
@@ -713,7 +735,7 @@ export function ReceivePage(): React.ReactElement {
         return false
       }
       setError(
-        `无法开始屏幕捕获：${e instanceof Error ? e.message : String(e)}。请使用支持屏幕共享的桌面浏览器（HTTPS 或 localhost）。`
+        `无法开始屏幕捕获：${e instanceof Error ? e.message : String(e)}。请使用支持屏幕共享的桌面浏览器（Chrome / Edge / Firefox）。`
       )
       stageRef.current = "error"
       setStage("error")
@@ -847,6 +869,20 @@ export function ReceivePage(): React.ReactElement {
       }
       recv.addEventListener("message", h)
     })
+    // Worker 脚本本身加载失败（解析/import/WASM 评估错误）时必须立即失败，
+    // 而不是等 8s 超时后只报一句 "receive worker timeout"——那正是 issue #15
+    // 里用户拿不到任何真实错误的原因。下面的 no-op catch 把该 promise 标记为
+    // 已处理：init 成功后迟到的 error 事件不会变成 unhandled rejection。
+    let reportRecvFail: ((message: string) => void) | null = null
+    const recvFail = new Promise<never>((_, reject) => {
+      reportRecvFail = (message) => reject(new Error(message))
+      recv.addEventListener("error", (ev) =>
+        reportRecvFail?.(
+          `receive worker 加载失败：${ev.message || "未知错误"}（常见原因：浏览器禁用了 WASM/Blob Worker）`
+        )
+      )
+    })
+    recvFail.catch(() => {})
     // QR decode worker pool: N independent zxing workers → parallel frame decode.
     //
     // Each slot is created & wired by `spawnQrWorker(i)`. On a worker-level
@@ -984,17 +1020,25 @@ export function ReceivePage(): React.ReactElement {
     // (Each qr worker's `init` was already sent by `spawnQrWorker`.)
     dbg(`[init] init sent to receive worker + ${qrWorkers.length} qr workers; waiting for ready...`)
 
-    // 分开 await + 超时，定位是哪个 worker 卡住
-    const withTimeout = (p: Promise<unknown>, label: string, ms = 8000) =>
+    // 分开 await + 超时，定位是哪个 worker 卡住；超时文案附带可操作的排查方向
+    const withTimeout = (p: Promise<unknown>, label: string, failHint = "", ms = 8000) =>
       Promise.race([
         p.then(() => dbg(`[init] ${label} READY ✓`)),
         new Promise<void>((_, reject) =>
-          setTimeout(() => reject(new Error(`${label} timeout (${ms}ms)`)), ms)
+          setTimeout(() => reject(new Error(`${label} 初始化超时 (${ms}ms)。${failHint}`)), ms)
         ),
       ])
     try {
-      await withTimeout(recvReady, "receive worker")
-      await withTimeout(qrReady, "qr worker pool")
+      await withTimeout(
+        Promise.race([recvReady, recvFail]),
+        "receive worker",
+        "若反复出现，多半是浏览器禁用了 WASM/Blob Worker——请关闭 Edge「设置 → 隐私 → 增强安全性模式」（或企业策略/安全软件的同类限制），并使用最新版 Chrome / Edge。F12 控制台里有具体错误。"
+      )
+      await withTimeout(
+        qrReady,
+        "qr worker pool",
+        "若反复出现，请检查浏览器是否禁用了 WASM（同上），或设备内存/显卡受限导致解码器无法启动。"
+      )
     } catch (e) {
       dbg(`[init] FAILED: ${e instanceof Error ? e.message : String(e)}`)
       setError(
