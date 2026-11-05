@@ -237,4 +237,6 @@ npm run build:receiver:standalone   # → dist-receiver-standalone/index.html（
 | 启动报 `transfer_engine.js not found` | `apps/sender/wasm-pkg-simd/` 缺失或不完整 | `cd apps/sender && npm run wasm`，再重跑 web 命令 |
 | 压缩总是 100%（走 raw） | `public/wasm-zstd.wasm` 缺失，worker fetch 404 | 重跑 `npm run build`（触发 `prebuild`→prepare-wasm） |
 | 接收端单文件版 `fast=false` 或 `Failed to construct 'URL': Invalid URL` | FAST glue 的 `findWasmBinary()` 在 Blob 模块里解析相对 URL | 确认 `link-wasm.sh` 导出 `HEAPU8,HEAPU32` 并用 `em++`；FAST 工厂同时传 `wasmBinary` 与 `locateFile`（wasm Blob URL） |
+| 报 `receive worker 初始化超时` / Worker 初始化失败 | 浏览器禁用了 WASM/Blob Worker（最常见：Edge「设置 → 隐私 → 增强安全性模式」；或企业策略/安全软件） | 关闭增强安全性模式后重试；v1.2.9 起报错直接透出 worker 的真实错误与排查方向 |
+| 摄像头报 `Could not start video source`（无法访问摄像头） | 摄像头被其他程序占用（会议/相机软件），或 Windows 隐私设置禁用 | 关闭占用程序；Windows 检查「设置 → 隐私和安全性 → 摄像头」。与页面协议无关——`file://` 在 Chromium 是安全上下文 |
 | 跨工程 import 报 `@/options` 找不到 | Vite alias 未生效 | 确认 `vite.config.ts` 的 `resolve.alias` 含 `{ find: "@/", replacement: ".../sender/src/" }` |
