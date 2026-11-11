@@ -1,0 +1,40 @@
+name: AirFerry
+options:
+  bundleIdPrefix: com.airferry
+  deploymentTarget:
+    iOS: '16.0'
+settings:
+  base:
+    SWIFT_VERSION: '5.0'
+    'ARCHS[sdk=iphonesimulator*]': '$(NATIVE_ARCH_ACTUAL)'
+    IPHONEOS_DEPLOYMENT_TARGET: '16.0'
+    MARKETING_VERSION: '1.2.9'
+    CURRENT_PROJECT_VERSION: '1'
+    ENABLE_USER_SCRIPT_SANDBOXING: NO
+targets:
+  AirFerry:
+    type: application
+    platform: iOS
+    sources: [AirFerry]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.airferry.receiver
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_NSCameraUsageDescription: 扫描 AirFerry 二维码以离线接收文件
+        INFOPLIST_KEY_UIFileSharingEnabled: YES
+        INFOPLIST_KEY_LSSupportsOpeningDocumentsInPlace: YES
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        SWIFT_OBJC_BRIDGING_HEADER: Native/AirFerry.h
+        LIBRARY_SEARCH_PATHS: ['$(inherited)', '$(PROJECT_DIR)/Native/$(PLATFORM_NAME)']
+        OTHER_LDFLAGS: ['$(inherited)', '-ltransfer_engine', '-liconv', '-lz', '-lbz2', '-lc++']
+        TARGETED_DEVICE_FAMILY: '1,2'
+        SUPPORTS_MACCATALYST: NO
+    preBuildScripts:
+      - name: Build Rust receiver
+        script: 'bash "$SRCROOT/build-rust.sh"'
+        basedOnDependencyAnalysis: false
+schemes:
+  AirFerry:
+    build:
+      targets:
+        AirFerry: all

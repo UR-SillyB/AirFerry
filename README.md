@@ -192,3 +192,9 @@ AirFerry/
 ## 许可证
 
 MIT
+
+### iOS 原生接收端
+
+新增 SwiftUI iPhone/iPad 接收端（iOS 16+），后置摄像头扫描二维码、复用 Rust C ABI
+恢复并校验文件、本地文件列表和系统分享导出。当前支持单会话、解压后 ≤64 MiB 的文件，
+分段大文件和容器解包 UI 尚未支持。构建、签名和验证步骤见 [iOS 构建指南](docs/build-ios.md)。

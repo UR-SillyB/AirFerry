@@ -1,0 +1,28 @@
+name: iOS receiver
+on:
+  pull_request:
+    paths: ['apps/ios/**', 'core/**', 'Cargo.*', '.github/workflows/ios.yml']
+  push:
+    paths: ['apps/ios/**', 'core/**', 'Cargo.*', '.github/workflows/ios.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: brew install xcodegen
+      - name: Binary QR parser tests
+        run: |
+          swiftc apps/ios/AirFerry/QRBytes.swift apps/ios/Tests/main.swift -o /tmp/airferry-ios-tests
+          /tmp/airferry-ios-tests
+      - run: cargo test --locked -p transfer-engine --features cffi --test cffi_e2e
+      - name: Swift Rust integration (Raw, Zstd, XZ)
+        run: bash apps/ios/test-integration.sh
+      - name: Build unsigned simulator app
+        run: |
+          cd apps/ios
+          xcodegen generate
+          xcodebuild -project AirFerry.xcodeproj -scheme AirFerry -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO build

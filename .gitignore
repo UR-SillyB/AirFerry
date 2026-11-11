@@ -99,3 +99,8 @@ __pycache__/
 *.egg-info/
 apps/python/python/airferry/*.pyd
 apps/python/python/airferry/*.so
+
+# iOS generated projects and Rust archives
+apps/ios/*.xcodeproj/
+apps/ios/Native/iphone*/
+apps/ios/.build/
